@@ -33,6 +33,8 @@ class AirFlightStateMessage:
     gyro_raw: tuple[int, int, int]
     quat_q15: tuple[int, int, int, int]
     quat: tuple[float, float, float, float]
+    quat_raw_zero: bool
+    quat_valid: bool
     vel_mps: tuple[float, float, float]
     pos_m: tuple[float, float, float]
 
@@ -113,22 +115,20 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
             pz,
         ) = unpacked
 
-        quat = normalize_quat(
-            (
-                q15_to_float(qw_i),
-                q15_to_float(qx_i),
-                q15_to_float(qy_i),
-                q15_to_float(qz_i),
-            )
-        )
+        quat_q15 = (int(qw_i), int(qx_i), int(qy_i), int(qz_i))
+        quat_raw_zero = all(q == 0 for q in quat_q15)
+        quat_valid = not quat_raw_zero
+        quat = normalize_quat(tuple(q15_to_float(q) for q in quat_q15))  # type: ignore[arg-type]
 
         return air, AirFlightStateMessage(
             seq=int(seq),
             time_ms=int(time_ms),
             accel_raw=(int(ax), int(ay), int(az)),
             gyro_raw=(int(gx), int(gy), int(gz)),
-            quat_q15=(int(qw_i), int(qx_i), int(qy_i), int(qz_i)),
+            quat_q15=quat_q15,
             quat=quat,
+            quat_raw_zero=quat_raw_zero,
+            quat_valid=quat_valid,
             vel_mps=(float(vx), float(vy), float(vz)),
             pos_m=(float(px), float(py), float(pz)),
         )

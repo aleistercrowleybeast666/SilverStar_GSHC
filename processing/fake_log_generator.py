@@ -88,6 +88,7 @@ def add_flight_state(
     accel_raw = accel_to_raw(accel_mps2)
     gyro_raw = gyro_to_raw(gyro_radps)
     quat_q15 = quat_to_q15(quat)
+    quat_raw_zero = all(q == 0 for q in quat_q15)
 
     records.append(
         {
@@ -102,6 +103,8 @@ def add_flight_state(
             "accel_raw": list(accel_raw),
             "gyro_raw": list(gyro_raw),
             "quat_q15": list(quat_q15),
+            "quat_raw_zero": quat_raw_zero,
+            "quat_valid": not quat_raw_zero,
             "accel_full_scale_g": ACCEL_FULL_SCALE_G,
             "gyro_full_scale_dps": GYRO_FULL_SCALE_DPS,
             "accel_mps2": [float(v) for v in accel_mps2],

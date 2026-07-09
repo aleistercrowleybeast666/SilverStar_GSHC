@@ -25,6 +25,10 @@ The fake log uses the current parsed format:
 
 It also includes simplified current GSP link-quality records for RSSI/SNR plot testing.
 
+`FLIGHT_STATE` records include `quat_q15`, `quat_raw_zero`, and `quat_valid`.
+If `quat_q15` is all zero, the processor records `quat_valid = 0` and does not
+treat the unit quaternion fallback as a valid attitude sample.
+
 ## Process a log
 
 ```bash
@@ -53,5 +57,6 @@ data/yyyy-mm-dd-n/
 - If telemetry is approximately 5 Hz or faster, GIF frames use original sample timestamps.
 - If telemetry is clearly below 5 Hz, frames are generated at the configured target FPS and data is interpolated.
 - In large gaps/disconnections, interpolation holds the last valid sample instead of extrapolating.
+- If no valid quaternion sample exists, attitude GIF rendering uses a unit-quaternion fallback and writes a warning to the processed output.
 
 Default target GIF FPS is 5.

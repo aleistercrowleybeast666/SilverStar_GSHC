@@ -82,6 +82,7 @@ class FlightData:
     accel: list[TimedVector] = field(default_factory=list)
     gyro: list[TimedVector] = field(default_factory=list)
     quat: list[TimedVector] = field(default_factory=list)
+    quat_valid: list[TimedVector] = field(default_factory=list)
     euler: list[TimedVector] = field(default_factory=list)
     vel: list[TimedVector] = field(default_factory=list)
     pos: list[TimedVector] = field(default_factory=list)
@@ -198,6 +199,8 @@ def parse_air_frame(frame: bytes) -> tuple[str, dict] | None:
         quat_q15 = tuple(int16(v) for v in struct.unpack("<HHHH", frame[18:26]))
         vel = struct.unpack("<fff", frame[26:38])
         pos = struct.unpack("<fff", frame[38:50])
+        quat_raw_zero = all(q == 0 for q in quat_q15)
+        quat_valid = not quat_raw_zero
         quat = normalize_quat(tuple(q15_to_float(v) for v in quat_q15))  # type: ignore[arg-type]
 
         return "FLIGHT_STATE", {
@@ -207,6 +210,8 @@ def parse_air_frame(frame: bytes) -> tuple[str, dict] | None:
             "gyro_raw": gyro_raw,
             "quat_q15": quat_q15,
             "quat": quat,
+            "quat_raw_zero": quat_raw_zero,
+            "quat_valid": quat_valid,
             "vel_mps": tuple(float(v) for v in vel),
             "pos_m": tuple(float(v) for v in pos),
         }
@@ -384,6 +389,7 @@ class FlightLogProcessor:
             "accel": [],
             "gyro": [],
             "quat": [],
+            "quat_valid": [],
             "vel": [],
             "pos": [],
         }
@@ -454,6 +460,7 @@ class FlightLogProcessor:
         data.accel = self._convert_samples(all_data["accel"], start_ms, end_ms)
         data.gyro = self._convert_samples(all_data["gyro"], start_ms, end_ms)
         data.quat = self._convert_samples(all_data["quat"], start_ms, end_ms)
+        data.quat_valid = self._convert_samples(all_data["quat_valid"], start_ms, end_ms)
         data.vel = self._convert_samples(all_data["vel"], start_ms, end_ms)
         data.pos = self._convert_samples(all_data["pos"], start_ms, end_ms)
         data.euler = [
@@ -466,6 +473,15 @@ class FlightLogProcessor:
             for (time_ms, rssi, snr) in all_link
             if start_ms <= time_ms <= end_ms
         ]
+
+        invalid_quat_count = sum(1 for s in data.quat_valid if s.values and s.values[0] < 0.5)
+        if invalid_quat_count > 0:
+            data.warnings.append(
+                f"{invalid_quat_count} FLIGHT_STATE quaternion samples have quat_q15 raw all zero; "
+                "check IMU 0x59 Quaternion Pack output."
+            )
+        if invalid_quat_count > 0 and not data.quat:
+            data.warnings.append("No valid quaternion samples; attitude plots/GIF use unit quaternion fallback.")
 
         return data
 
@@ -507,11 +523,23 @@ class FlightLogProcessor:
             gyro_fs = float(r.get("gyro_full_scale_dps", GYRO_FULL_SCALE_DPS_DEFAULT))
             gyro = raw_gyro_to_radps(r["gyro_raw"], gyro_fs)
 
+        q_raw = safe_int_tuple(r.get("quat_q15", ()), 4) if "quat_q15" in r else None
+        quat_raw_zero = False
+        if "quat_raw_zero" in r:
+            quat_raw_zero = bool(r.get("quat_raw_zero"))
+        elif q_raw is not None:
+            quat_raw_zero = all(v == 0 for v in q_raw)
+
+        if "quat_valid" in r:
+            quat_valid = bool(r.get("quat_valid"))
+        elif q_raw is not None:
+            quat_valid = not quat_raw_zero
+        else:
+            quat_valid = True
+
         quat = safe_float_tuple(r.get("quat", ()), 4)
-        if quat is None and "quat_q15" in r:
-            q_raw = safe_int_tuple(r["quat_q15"], 4)
-            if q_raw is not None:
-                quat = normalize_quat(tuple(q15_to_float(v) for v in q_raw))  # type: ignore[arg-type]
+        if quat is None and q_raw is not None:
+            quat = normalize_quat(tuple(q15_to_float(v) for v in q_raw))  # type: ignore[arg-type]
 
         vel = safe_float_tuple(r.get("vel_mps", r.get("vel", ())), 3)
         pos = safe_float_tuple(r.get("pos_m", r.get("pos", ())), 3)
@@ -521,7 +549,9 @@ class FlightLogProcessor:
         if gyro is not None:
             all_data["gyro"].append((time_ms, gyro))
         if quat is not None:
-            all_data["quat"].append((time_ms, normalize_quat(quat)))  # type: ignore[arg-type]
+            all_data["quat_valid"].append((time_ms, (1.0 if quat_valid else 0.0,)))
+            if quat_valid:
+                all_data["quat"].append((time_ms, normalize_quat(quat)))  # type: ignore[arg-type]
         if vel is not None:
             all_data["vel"].append((time_ms, vel))
         if pos is not None:
@@ -639,6 +669,7 @@ class FlightLogProcessor:
 
             write_vec(f, "accel_mps2", data.accel, ("ax", "ay", "az"))
             write_vec(f, "gyro_radps", data.gyro, ("gx", "gy", "gz"))
+            write_vec(f, "quat_valid", data.quat_valid, ("valid",))
             write_vec(f, "quat_wxyz", data.quat, ("qw", "qx", "qy", "qz"))
             write_vec(f, "euler_rad_from_quat", data.euler, ("roll", "pitch", "yaw"))
             write_vec(f, "velocity_mps", data.vel, ("vx", "vy", "vz"))

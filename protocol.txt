@@ -77,6 +77,8 @@ quat_float = quat_q15 / 32767.0
 注意：
 - IMU 量程必须在飞控、上位机、后处理中保持一致。
 - 或者在日志说明中记录 ACCEL_FULL_SCALE_G 和 GYRO_FULL_SCALE_DPS。
+- 若 quat_q15 四项全为 0，接收端必须标记 quat_valid=0 / invalid/raw=0。
+  上位机可用单位四元数作为 3D fallback，但不能把它当作有效姿态。
 
 ============================================================
 3. 天地无线协议 AIR
@@ -151,6 +153,8 @@ Byte 46~49  z              float，m
 说明：
 - 加速度和角速度为 IMU raw，不是物理单位。
 - 四元数为 q15 压缩值。
+- 四元数 raw 位于 AIR frame byte18/20/22/24；经 GSP_AIR_RX 转发后对应 GSP payload byte21/23/25/27。
+- 若 quat_q15 = 0,0,0,0，上位机显示 invalid/raw=0。这通常表示飞控 IMU 未收到或未开启 JY901B 0x59 Quaternion Pack，不表示 GSP_AIR_RX 偏移错误。
 - 速度和位置仍用 float32。
 - 位置推荐使用相对起飞点坐标。
 - 若使用 NED，z 轴向下；若使用 ENU，z 轴向上。上位机与后处理必须统一。
@@ -275,6 +279,18 @@ RESULT：
 - 所有 AIR_CMD 都等待 AIR_ACK。
 - 超时可重发 2~3 次。
 - AIR_FLIGHT_STATE 和 AIR_STATUS 不需要 ACK。
+- AIR_ACK 是上位机命令按钮状态转换的依据，不只是日志记录。
+
+上位机 ACK 后置按钮状态机：
+- 初始 assumed LOCKED：LOCK disabled, UNLOCK enabled, START disabled。
+- 发送任意 AIR_CMD 后，若已有 pending，拒绝发送新命令。
+- LOCK 只有收到匹配 AIR_ACK 且 RESULT=OK 或 ALREADY_LOCKED 后，才切到 LOCK disabled, UNLOCK enabled, START disabled。
+- UNLOCK 只有收到匹配 AIR_ACK 且 RESULT=OK 或 ALREADY_UNLOCKED 后，才切到 LOCK enabled, UNLOCK disabled, START enabled。
+- START_MISSION 只有收到匹配 AIR_ACK 且 RESULT=OK 后，才切到 PING/LOCK/UNLOCK/START 全 disabled，数据处理工具 disabled。
+- ACK 未匹配本机 pending，不改变按钮状态。
+- BAD_TOKEN / BAD_STATE / LOCKED_REQUIRED / BUSY / REJECTED / TIMEOUT 不改变按钮状态，只更新提示；超时清除 pending 后允许用户重发。
+- STATUS LOCKED/UNLOCKED 只在没有 LOCK/UNLOCK pending 时同步按钮，避免状态事件早于 ACK 导致 UI 提前切换。
+- STATUS MISSION_START/LAUNCH/PARACHUTE_DEPLOY/LANDING 可切 mission 状态；若 START pending 尚未 ACK，MISSION_START 等任务状态可视为任务已开始并清除 START pending。
 
 ============================================================
 8. 地面站-上位机串口协议 GSP-MIN
@@ -368,8 +384,9 @@ PAYLOAD 长度：
 
 说明：
 - 实际 SNR = SNR_Q4 / 4.0
-- AIR_FRAME 就是第 3~7 节定义的 AIR 包。
+- AIR_FRAME 起始偏移固定为 payload[3]，就是第 3~7 节定义的 AIR 包。
 - 上位机根据 AIR_TYPE 解析 AIR_FRAME。
+- 对 AIR_FLIGHT_STATE，qw/qx/qy/qz 位于 AIR frame byte18/20/22/24，因此经 GSP_AIR_RX 后位于 GSP payload byte21/23/25/27。
 
 ============================================================
 11. GSP_AIR_TX

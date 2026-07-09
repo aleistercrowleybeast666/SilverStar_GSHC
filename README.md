@@ -170,7 +170,32 @@ position  float32 x 3
 
 上位机根据界面中的加速度/角速度量程选项，把 raw 数据换算成物理量。
 
-## 6. 日志格式
+`GSP_AIR_RX` 的 AIR frame 起始偏移固定为 `payload[3]`。对 `AIR_FLIGHT_STATE`，四元数 raw 位于 AIR frame byte18/20/22/24，经 GSP 转发后对应 GSP payload byte21/23/25/27。若 `quat_q15` 四项全为 0，上位机会显示 `valid=0 INVALID/raw=0`；这通常表示飞控 IMU 没收到或没开启 JY901B `0x59` Quaternion Pack，不表示 GSP 偏移错误。
+
+## 6. 命令 ACK 后置状态机
+
+AIR_ACK 是命令按钮状态转换的依据。发送 LOCK/UNLOCK/START 后，上位机不会立刻切换按钮状态，只有收到匹配本机 pending 命令的 AIR_ACK 才切换。
+
+```text
+初始 assumed LOCKED:
+  LOCK disabled, UNLOCK enabled, START disabled
+
+LOCK ACK OK/ALREADY_LOCKED:
+  LOCK disabled, UNLOCK enabled, START disabled
+
+UNLOCK ACK OK/ALREADY_UNLOCKED:
+  LOCK enabled, UNLOCK disabled, START enabled
+
+START_MISSION ACK OK:
+  PING/LOCK/UNLOCK/START 全 disabled，数据处理工具 disabled
+
+ACK timeout/error:
+  不切状态，只更新提示；pending 清除后允许重发
+```
+
+未匹配本机 pending 的 ACK 不改变按钮状态。`STATUS LOCKED/UNLOCKED` 只在没有 LOCK/UNLOCK pending 时同步按钮，避免状态事件早于 ACK 让 UI 提前切换。`STATUS MISSION_START/LAUNCH/PARACHUTE_DEPLOY/LANDING` 可视为任务已开始；若 START pending 尚未 ACK，上位机会清除 START pending 并进入 mission 禁用态。
+
+## 7. 日志格式
 
 原始日志为 JSONL，每行一个 JSON 对象。
 
@@ -193,7 +218,9 @@ SIMULATION      # 模拟验证数据标记
 
 离线处理结果的 `summary.txt`、`processed_data.txt`、`manifest.json` 也会区分真实数据和模拟数据。
 
-## 7. 数据处理模块
+AIR_PARSED 的 FLIGHT_STATE 记录包含 `quat_q15`、归一化 fallback 后的 `quat`，以及 `quat_raw_zero` / `quat_valid`。当 `quat_valid=false` 时，后处理不会把 fallback 单位四元数当作有效姿态。
+
+## 8. 数据处理模块
 
 源码运行：
 
@@ -232,7 +259,9 @@ SS1_host_computer_data/data/yyyy-mm-dd-n/
 
 没有 `MISSION_START` 则无法确定任务起点，会提示文件有问题。
 
-## 8. 绿色版打包
+如果日志中没有有效四元数，后处理会在 `summary.txt` / `processed_data.txt` / `manifest.json` 中记录 warning；GIF 姿态使用单位四元数 fallback。
+
+## 9. 绿色版打包
 
 推荐只做绿色版，不做安装器。
 
@@ -255,7 +284,7 @@ dist/SS1GroundStation/
 
 注意不要只复制 exe，必须复制整个文件夹。
 
-## 9. 绿色版发布建议
+## 10. 绿色版发布建议
 
 建议最终发布包结构：
 
@@ -270,7 +299,7 @@ SS1GroundStation/
 
 不要把源码目录里的 `logs/`、`data/`、`__pycache__/`、`build/`、`installer/` 混入发布包。
 
-## 10. 开发注意事项
+## 11. 开发注意事项
 
 - 修改协议时，需要同步修改 `protocol/air.py`、地面站固件、空端固件和数据处理模块。
 - 修改日志字段时，需要同步检查 `processing/flight_log_processor.py`。

@@ -56,9 +56,16 @@ class MainWindow(QMainWindow):
 
         self._data_tools_busy = False
         self._data_tools_mission_disabled = False
+        self._command_state_mission_started = False
         self._dynamic_value_font = QFont("Consolas")
         self._dynamic_value_font.setStyleHint(QFont.StyleHint.Monospace)
         self._dynamic_value_font.setFixedPitch(True)
+        self._compact_label_font = QFont()
+        self._compact_label_font.setPointSize(9)
+        self._compact_value_font = QFont("Consolas")
+        self._compact_value_font.setStyleHint(QFont.StyleHint.Monospace)
+        self._compact_value_font.setFixedPitch(True)
+        self._compact_value_font.setPointSize(9)
 
         self._build_ui()
         self._build_3d_scene()
@@ -199,6 +206,7 @@ class MainWindow(QMainWindow):
         *,
         monospace: bool = True,
         show_tooltip: bool = False,
+        compact: bool = False,
     ) -> None:
         label.setMinimumWidth(min_width)
         label.setWordWrap(False)
@@ -206,7 +214,7 @@ class MainWindow(QMainWindow):
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         label.setProperty("showFullTextToolTip", show_tooltip)
         if monospace:
-            label.setFont(self._dynamic_value_font)
+            label.setFont(self._compact_value_font if compact else self._dynamic_value_font)
 
     def _set_dynamic_label_text(self, label: QLabel, text: str) -> None:
         label.setText(text)
@@ -222,13 +230,21 @@ class MainWindow(QMainWindow):
         value_label: QLabel,
         value_min_width: int = 96,
         value_tooltip: bool = False,
+        compact: bool = False,
     ) -> None:
         base_col = col_group * 2
 
         name_label = QLabel(name)
         name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if compact:
+            name_label.setFont(self._compact_label_font)
 
-        self._configure_dynamic_label(value_label, value_min_width, show_tooltip=value_tooltip)
+        self._configure_dynamic_label(
+            value_label,
+            value_min_width,
+            show_tooltip=value_tooltip,
+            compact=compact,
+        )
 
         grid.addWidget(name_label, row, base_col)
         grid.addWidget(value_label, row, base_col + 1)
@@ -236,8 +252,9 @@ class MainWindow(QMainWindow):
     def _build_status_panel(self) -> QWidget:
         box = QGroupBox("状态与链路")
         grid = QGridLayout(box)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(5)
+        grid.setContentsMargins(8, 10, 8, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
 
         self.lbl_gs_state = QLabel("—")
         self.lbl_radio_state = QLabel("—")
@@ -251,20 +268,18 @@ class MainWindow(QMainWindow):
         self.lbl_last_gs_ack = QLabel("—")
         self.lbl_last_air_ack = QLabel("—")
 
-        self._add_value_pair(grid, 0, 0, "地面站状态", self.lbl_gs_state, 100, True)
-        self._add_value_pair(grid, 1, 0, "无线状态", self.lbl_radio_state, 100, True)
-        self._add_value_pair(grid, 2, 0, "TX计数", self.lbl_tx_cnt, 100, True)
-        self._add_value_pair(grid, 3, 0, "RX计数", self.lbl_rx_cnt, 100, True)
-        self._add_value_pair(grid, 4, 0, "CRC错误", self.lbl_crc_err, 100, True)
-
-        self._add_value_pair(grid, 0, 1, "信号强度", self.lbl_rssi, 150, True)
-        self._add_value_pair(grid, 1, 1, "信噪比", self.lbl_snr, 150, True)
-        self._add_value_pair(grid, 2, 1, "最近状态事件", self.lbl_last_status, 150, True)
-        self._add_value_pair(grid, 3, 1, "最近地面站ACK", self.lbl_last_gs_ack, 150, True)
-        self._add_value_pair(grid, 4, 1, "最近天空端ACK", self.lbl_last_air_ack, 150, True)
+        self._add_value_pair(grid, 0, 0, "地面站状态", self.lbl_gs_state, 260, True, True)
+        self._add_value_pair(grid, 1, 0, "无线状态", self.lbl_radio_state, 260, True, True)
+        self._add_value_pair(grid, 2, 0, "TX计数", self.lbl_tx_cnt, 260, True, True)
+        self._add_value_pair(grid, 3, 0, "RX计数", self.lbl_rx_cnt, 260, True, True)
+        self._add_value_pair(grid, 4, 0, "CRC错误", self.lbl_crc_err, 260, True, True)
+        self._add_value_pair(grid, 5, 0, "信号强度", self.lbl_rssi, 260, True, True)
+        self._add_value_pair(grid, 6, 0, "信噪比", self.lbl_snr, 260, True, True)
+        self._add_value_pair(grid, 7, 0, "最近状态事件", self.lbl_last_status, 260, True, True)
+        self._add_value_pair(grid, 8, 0, "最近地面站ACK", self.lbl_last_gs_ack, 260, True, True)
+        self._add_value_pair(grid, 9, 0, "最近天空端ACK", self.lbl_last_air_ack, 260, True, True)
 
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
 
         return box
 
@@ -327,27 +342,28 @@ class MainWindow(QMainWindow):
     def _build_data_panel(self) -> QWidget:
         box = QGroupBox("实时数据")
         grid = QGridLayout(box)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(5)
+        grid.setContentsMargins(8, 10, 8, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
 
-        self.lbl_accel = QLabel("X: —    Y: —    Z: —")
-        self.lbl_gyro = QLabel("X: —    Y: —    Z: —")
-        self.lbl_quat = QLabel("W: —    X: —    Y: —    Z: —")
-        self.lbl_euler = QLabel("R: —    P: —    Y: —")
+        self.lbl_accel = QLabel("X: —  Y: —  Z: —")
+        self.lbl_gyro = QLabel("X: —  Y: —  Z: —")
+        self.lbl_quat_raw = QLabel("W: —  X: —  Y: —  Z: —")
+        self.lbl_quat = QLabel("W: —  X: —  Y: —  Z: —  valid=—")
+        self.lbl_euler = QLabel("R: —  P: —  Y: —")
 
-        self.lbl_vel = QLabel("X: —    Y: —    Z: —")
-        self.lbl_pos = QLabel("X: —    Y: —    Z: —")
+        self.lbl_vel = QLabel("X: —  Y: —  Z: —")
+        self.lbl_pos = QLabel("X: —  Y: —  Z: —")
 
-        self._add_value_pair(grid, 0, 0, "加速度 (m/s²)", self.lbl_accel, 250)
-        self._add_value_pair(grid, 1, 0, "角速度 (rad/s)", self.lbl_gyro, 250)
-        self._add_value_pair(grid, 2, 0, "四元数", self.lbl_quat, 250)
-        self._add_value_pair(grid, 3, 0, "欧拉角 (rad)", self.lbl_euler, 250)
-
-        self._add_value_pair(grid, 0, 1, "速度 (m/s)", self.lbl_vel, 220)
-        self._add_value_pair(grid, 1, 1, "位置 (m)", self.lbl_pos, 220)
+        self._add_value_pair(grid, 0, 0, "加速度 (m/s²)", self.lbl_accel, 360, False, True)
+        self._add_value_pair(grid, 1, 0, "角速度 (rad/s)", self.lbl_gyro, 360, False, True)
+        self._add_value_pair(grid, 2, 0, "Q raw", self.lbl_quat_raw, 460, True, True)
+        self._add_value_pair(grid, 3, 0, "Q norm", self.lbl_quat, 460, True, True)
+        self._add_value_pair(grid, 4, 0, "欧拉角 (rad)", self.lbl_euler, 460, True, True)
+        self._add_value_pair(grid, 5, 0, "速度 (m/s)", self.lbl_vel, 360, False, True)
+        self._add_value_pair(grid, 6, 0, "位置 (m)", self.lbl_pos, 360, False, True)
 
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
 
         return box
 
@@ -529,6 +545,7 @@ class MainWindow(QMainWindow):
 
     def set_command_state_initial(self) -> None:
         """Initial UI state: air side is assumed LOCKED."""
+        self._command_state_mission_started = False
         self.set_data_tools_mission_disabled(False)
         self.set_command_buttons_enabled(
             ping=True,
@@ -538,6 +555,9 @@ class MainWindow(QMainWindow):
         )
 
     def set_command_state_locked(self) -> None:
+        if self._command_state_mission_started:
+            return
+
         self.set_data_tools_mission_disabled(False)
         self.set_command_buttons_enabled(
             ping=True,
@@ -547,6 +567,9 @@ class MainWindow(QMainWindow):
         )
 
     def set_command_state_unlocked(self) -> None:
+        if self._command_state_mission_started:
+            return
+
         self.set_data_tools_mission_disabled(False)
         self.set_command_buttons_enabled(
             ping=True,
@@ -556,6 +579,7 @@ class MainWindow(QMainWindow):
         )
 
     def set_command_state_mission(self) -> None:
+        self._command_state_mission_started = True
         self.set_data_tools_mission_disabled(True)
         self.set_command_buttons_enabled(
             ping=False,
@@ -577,12 +601,13 @@ class MainWindow(QMainWindow):
         self._set_dynamic_label_text(self.lbl_last_gs_ack, "—")
         self._set_dynamic_label_text(self.lbl_last_air_ack, "—")
 
-        self._set_dynamic_label_text(self.lbl_accel, "X: —    Y: —    Z: —")
-        self._set_dynamic_label_text(self.lbl_gyro, "X: —    Y: —    Z: —")
-        self._set_dynamic_label_text(self.lbl_quat, "W: —    X: —    Y: —    Z: —")
-        self._set_dynamic_label_text(self.lbl_euler, "R: —    P: —    Y: —")
-        self._set_dynamic_label_text(self.lbl_vel, "X: —    Y: —    Z: —")
-        self._set_dynamic_label_text(self.lbl_pos, "X: —    Y: —    Z: —")
+        self._set_dynamic_label_text(self.lbl_accel, "X: —  Y: —  Z: —")
+        self._set_dynamic_label_text(self.lbl_gyro, "X: —  Y: —  Z: —")
+        self._set_dynamic_label_text(self.lbl_quat_raw, "W: —  X: —  Y: —  Z: —")
+        self._set_dynamic_label_text(self.lbl_quat, "W: —  X: —  Y: —  Z: —  valid=—")
+        self._set_dynamic_label_text(self.lbl_euler, "R: —  P: —  Y: —")
+        self._set_dynamic_label_text(self.lbl_vel, "X: —  Y: —  Z: —")
+        self._set_dynamic_label_text(self.lbl_pos, "X: —  Y: —  Z: —")
 
         for key in self.series:
             for axis in range(3):
@@ -622,21 +647,36 @@ class MainWindow(QMainWindow):
     def set_last_air_ack(self, text: str) -> None:
         self._set_dynamic_label_text(self.lbl_last_air_ack, text)
 
-    def update_quat(self, values: tuple[float, float, float, float]) -> None:
+    def update_quat(
+        self,
+        values: tuple[float, float, float, float],
+        raw: tuple[int, int, int, int] | None = None,
+        valid: bool = True,
+    ) -> None:
         self.latest_quat = values
+        if raw is None:
+            self._set_dynamic_label_text(self.lbl_quat_raw, "W: —  X: —  Y: —  Z: —")
+        else:
+            self._set_dynamic_label_text(
+                self.lbl_quat_raw,
+                f"W:{raw[0]}  X:{raw[1]}  Y:{raw[2]}  Z:{raw[3]}",
+            )
+
+        valid_suffix = "valid=1" if valid else "valid=0 INVALID/raw=0"
         self._set_dynamic_label_text(
             self.lbl_quat,
             (
-                f"W: {values[0]:.4f}    X: {values[1]:.4f}    "
-                f"Y: {values[2]:.4f}    Z: {values[3]:.4f}"
+                f"W:{values[0]:.4f}  X:{values[1]:.4f}  "
+                f"Y:{values[2]:.4f}  Z:{values[3]:.4f}  {valid_suffix}"
             ),
         )
 
         euler = self._quat_to_euler_rpy(values)
         self.latest_euler = euler
+        euler_suffix = "" if valid else "  INVALID/raw=0"
         self._set_dynamic_label_text(
             self.lbl_euler,
-            f"R: {euler[0]:.4f}    P: {euler[1]:.4f}    Y: {euler[2]:.4f}",
+            f"R:{euler[0]:.4f}  P:{euler[1]:.4f}  Y:{euler[2]:.4f}{euler_suffix}",
         )
 
         self._apply_quat_to_mesh(values)
@@ -650,22 +690,22 @@ class MainWindow(QMainWindow):
         if key == "accel":
             self._set_dynamic_label_text(
                 self.lbl_accel,
-                f"X: {values[0]:.4f}    Y: {values[1]:.4f}    Z: {values[2]:.4f}",
+                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
             )
         elif key == "gyro":
             self._set_dynamic_label_text(
                 self.lbl_gyro,
-                f"X: {values[0]:.4f}    Y: {values[1]:.4f}    Z: {values[2]:.4f}",
+                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
             )
         elif key == "vel":
             self._set_dynamic_label_text(
                 self.lbl_vel,
-                f"X: {values[0]:.4f}    Y: {values[1]:.4f}    Z: {values[2]:.4f}",
+                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
             )
         elif key == "pos":
             self._set_dynamic_label_text(
                 self.lbl_pos,
-                f"X: {values[0]:.4f}    Y: {values[1]:.4f}    Z: {values[2]:.4f}",
+                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
             )
 
     def refresh_plots(self) -> None:

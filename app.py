@@ -143,6 +143,7 @@ class Controller(QObject):
         self.processing_dialog: QProgressDialog | None = None
         self._processing_success_out_dir: str | None = None
         self._processing_error_text: str | None = None
+        self._last_quat_invalid_hint_monotonic = 0.0
 
         self.window.on_refresh_ports = self.refresh_ports
         self.window.on_connect_clicked = self.connect
@@ -173,6 +174,7 @@ class Controller(QObject):
 
         self.gsp_parser = GspParser()
         self.air_seq = 0
+        self._last_quat_invalid_hint_monotonic = 0.0
         self._clear_pending_air_cmds("重新连接")
         self.window.reset_runtime_display()
 
@@ -185,6 +187,7 @@ class Controller(QObject):
         self._clear_pending_air_cmds("串口断开")
         self.link.close()
         self.worker = None
+        self.window.reset_runtime_display()
         self.window.set_connection_status("未连接")
 
     def on_connection_changed(self, ok: bool, text: str) -> None:
@@ -312,6 +315,21 @@ class Controller(QObject):
                 }
             )
 
+    def _has_pending_air_cmd(self, cmd_id: int) -> bool:
+        cmd_id &= 0xFF
+        return any(pending.cmd_id == cmd_id for pending in self.pending_air_cmds.values())
+
+    def _has_pending_lock_state_cmd(self) -> bool:
+        return self._has_pending_air_cmd(int(AirCmdId.LOCK)) or self._has_pending_air_cmd(int(AirCmdId.UNLOCK))
+
+    def _pop_pending_air_cmd(self, cmd_id: int) -> PendingAirCommand | None:
+        cmd_id &= 0xFF
+        for key, pending in list(self.pending_air_cmds.items()):
+            if pending.cmd_id == cmd_id:
+                del self.pending_air_cmds[key]
+                return pending
+        return None
+
     def _on_air_cmd_ack_result(self, msg: AirAckMessage) -> None:
         key = (msg.ack_seq & 0xFF, msg.ack_cmd_id & 0xFF)
         pending = self.pending_air_cmds.pop(key, None)
@@ -326,20 +344,27 @@ class Controller(QObject):
         if not matched:
             return
 
-        self.window.set_radio_state_hint("AIR_CMD 已收到 ACK")
-
         # 只有在收到对应 ACK 后才改变命令按钮状态，避免“发送失败但界面已切状态”。
         if msg.result == 0x00:
             if msg.ack_cmd_id == int(AirCmdId.LOCK):
                 self.window.set_command_state_locked()
+                self.window.set_radio_state_hint("LOCK 已确认")
             elif msg.ack_cmd_id == int(AirCmdId.UNLOCK):
                 self.window.set_command_state_unlocked()
+                self.window.set_radio_state_hint("UNLOCK 已确认")
             elif msg.ack_cmd_id == int(AirCmdId.START_MISSION):
                 self.window.set_command_state_mission()
+                self.window.set_radio_state_hint("START 已确认，任务开始")
+            else:
+                self.window.set_radio_state_hint(f"AIR_CMD ACK: {result}")
         elif msg.result == 0x08 and msg.ack_cmd_id == int(AirCmdId.LOCK):
             self.window.set_command_state_locked()
+            self.window.set_radio_state_hint("LOCK 已是锁定状态")
         elif msg.result == 0x09 and msg.ack_cmd_id == int(AirCmdId.UNLOCK):
             self.window.set_command_state_unlocked()
+            self.window.set_radio_state_hint("UNLOCK 已是开锁状态")
+        else:
+            self.window.set_radio_state_hint(f"AIR_CMD ACK: {result}，按钮状态未切换")
 
     def send_ping(self) -> None:
         self._send_air_cmd(int(AirCmdId.PING), token=int(time.time()) & 0xFFFFFFFF)
@@ -627,9 +652,15 @@ class Controller(QObject):
 
             self.window.push_vector_sample("accel", accel)
             self.window.push_vector_sample("gyro", gyro)
-            self.window.update_quat(msg.quat)
+            self.window.update_quat(msg.quat, raw=msg.quat_q15, valid=msg.quat_valid)
             self.window.push_vector_sample("vel", msg.vel_mps)
             self.window.push_vector_sample("pos", msg.pos_m)
+
+            if not msg.quat_valid:
+                now = time.monotonic()
+                if now - self._last_quat_invalid_hint_monotonic >= 2.0:
+                    self._last_quat_invalid_hint_monotonic = now
+                    self.window.set_radio_state_hint("FLIGHT_STATE quat raw is zero; check IMU 0x59 output")
 
             self.logger.write(
                 {
@@ -643,6 +674,8 @@ class Controller(QObject):
                     "gyro_raw": list(msg.gyro_raw),
                     "quat_q15": list(msg.quat_q15),
                     "quat": list(msg.quat),
+                    "quat_raw_zero": msg.quat_raw_zero,
+                    "quat_valid": msg.quat_valid,
                     "accel_mps2": list(accel),
                     "gyro_radps": list(gyro),
                     "accel_full_scale_g": self.window.current_accel_full_scale_g(),
@@ -657,15 +690,34 @@ class Controller(QObject):
             self.window.set_last_status(f"{text} @ {msg.time_ms} ms")
 
             if msg.status_id == AirStatusId.LOCKED:
-                self.window.set_command_state_locked()
+                if not self._has_pending_lock_state_cmd():
+                    self.window.set_command_state_locked()
             elif msg.status_id == AirStatusId.UNLOCKED:
-                self.window.set_command_state_unlocked()
+                if not self._has_pending_lock_state_cmd():
+                    self.window.set_command_state_unlocked()
             elif msg.status_id in (
                 AirStatusId.MISSION_START,
                 AirStatusId.LAUNCH,
                 AirStatusId.PARACHUTE_DEPLOY,
                 AirStatusId.LANDING,
             ):
+                pending_start = self._pop_pending_air_cmd(int(AirCmdId.START_MISSION))
+                if pending_start is not None:
+                    self.window.set_last_air_ack(
+                        f"START pending cleared by STATUS {text} @ {msg.time_ms} ms"
+                    )
+                    self.logger.write(
+                        {
+                            "ts": time.time(),
+                            "dir": "RX",
+                            "layer": "AIR_PARSED",
+                            "kind": "ACK_CANCELLED",
+                            "reason": f"STATUS_{text}",
+                            "ack_seq": pending_start.seq,
+                            "ack_cmd_id": pending_start.cmd_id,
+                            "sent_count": pending_start.sent_count,
+                        }
+                    )
                 self.window.set_command_state_mission()
 
             self.logger.write(
