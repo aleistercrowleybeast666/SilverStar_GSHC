@@ -7,7 +7,14 @@ from typing import Any
 
 from .common import AirCmdId, AirStatusId, AirType
 
+AIR_TYPE_FLIGHT_STATE = 0x10
+AIR_TYPE_QUAT_STATE = 0x11
+AIR_TYPE_STATUS = 0x20
+AIR_TYPE_CMD = 0x30
+AIR_TYPE_ACK = 0x40
+
 AIR_FLIGHT_STATE_LEN = 50
+AIR_QUAT_STATE_LEN = 14
 AIR_STATUS_LEN = 9
 AIR_CMD_LEN = 9
 AIR_ACK_LEN = 9
@@ -37,6 +44,16 @@ class AirFlightStateMessage:
     quat_valid: bool
     vel_mps: tuple[float, float, float]
     pos_m: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class AirQuatStateMessage:
+    seq: int
+    time_ms: int
+    quat_q15: tuple[int, int, int, int]
+    quat: tuple[float, float, float, float]
+    quat_raw_zero: bool
+    quat_valid: bool
 
 
 @dataclass(frozen=True)
@@ -131,6 +148,25 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
             quat_valid=quat_valid,
             vel_mps=(float(vx), float(vy), float(vz)),
             pos_m=(float(px), float(py), float(pz)),
+        )
+
+    if air_type == AirType.QUAT_STATE:
+        if len(frame) != AIR_QUAT_STATE_LEN:
+            raise ValueError(f"bad AIR_QUAT_STATE length: {len(frame)}")
+
+        _type, seq, time_ms, qw_i, qx_i, qy_i, qz_i = struct.unpack_from("<BBIhhhh", frame, 0)
+        quat_q15 = (int(qw_i), int(qx_i), int(qy_i), int(qz_i))
+        quat_raw_zero = all(q == 0 for q in quat_q15)
+        quat_valid = not quat_raw_zero
+        quat = normalize_quat(tuple(q15_to_float(q) for q in quat_q15))  # type: ignore[arg-type]
+
+        return air, AirQuatStateMessage(
+            seq=int(seq),
+            time_ms=int(time_ms),
+            quat_q15=quat_q15,
+            quat=quat,
+            quat_raw_zero=quat_raw_zero,
+            quat_valid=quat_valid,
         )
 
     if air_type == AirType.STATUS:

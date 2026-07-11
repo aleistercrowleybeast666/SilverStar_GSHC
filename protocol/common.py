@@ -19,6 +19,7 @@ def crc16_ccitt_false(data: bytes) -> int:
 
 class AirType(IntEnum):
     FLIGHT_STATE = 0x10
+    QUAT_STATE = 0x11
     STATUS = 0x20
     CMD = 0x30
     ACK = 0x40

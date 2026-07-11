@@ -652,21 +652,23 @@ class MainWindow(QMainWindow):
         values: tuple[float, float, float, float],
         raw: tuple[int, int, int, int] | None = None,
         valid: bool = True,
+        source: str | None = None,
     ) -> None:
         self.latest_quat = values
+        source_prefix = f"{source} " if source else ""
         if raw is None:
-            self._set_dynamic_label_text(self.lbl_quat_raw, "W: —  X: —  Y: —  Z: —")
+            self._set_dynamic_label_text(self.lbl_quat_raw, f"{source_prefix}W: —  X: —  Y: —  Z: —")
         else:
             self._set_dynamic_label_text(
                 self.lbl_quat_raw,
-                f"W:{raw[0]}  X:{raw[1]}  Y:{raw[2]}  Z:{raw[3]}",
+                f"{source_prefix}W:{raw[0]}  X:{raw[1]}  Y:{raw[2]}  Z:{raw[3]}",
             )
 
         valid_suffix = "valid=1" if valid else "valid=0 INVALID/raw=0"
         self._set_dynamic_label_text(
             self.lbl_quat,
             (
-                f"W:{values[0]:.4f}  X:{values[1]:.4f}  "
+                f"{source_prefix}W:{values[0]:.4f}  X:{values[1]:.4f}  "
                 f"Y:{values[2]:.4f}  Z:{values[3]:.4f}  {valid_suffix}"
             ),
         )

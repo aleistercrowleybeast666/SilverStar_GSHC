@@ -12,8 +12,10 @@ from .flight_plotter import FlightPlotter, PlotterConfig
 
 # Current AIR / GSP-MIN definitions only.
 AIR_TYPE_FLIGHT_STATE = 0x10
+AIR_TYPE_QUAT_STATE = 0x11
 AIR_TYPE_STATUS = 0x20
 AIR_FLIGHT_STATE_LEN = 50
+AIR_QUAT_STATE_LEN = 14
 AIR_STATUS_LEN = 9
 GSP_TYPE_AIR_RX = 0x02
 
@@ -181,6 +183,7 @@ def parse_air_frame(frame: bytes) -> tuple[str, dict] | None:
     Parse current AIR payload only.
 
     AIR_FLIGHT_STATE length = 50 bytes
+    AIR_QUAT_STATE length   = 14 bytes
     AIR_STATUS length       = 9 bytes
     """
     if len(frame) < 2:
@@ -214,6 +217,25 @@ def parse_air_frame(frame: bytes) -> tuple[str, dict] | None:
             "quat_valid": quat_valid,
             "vel_mps": tuple(float(v) for v in vel),
             "pos_m": tuple(float(v) for v in pos),
+        }
+
+    if air_type == AIR_TYPE_QUAT_STATE:
+        if len(frame) != AIR_QUAT_STATE_LEN:
+            return None
+
+        _type, seq, time_ms, qw, qx, qy, qz = struct.unpack_from("<BBIhhhh", frame, 0)
+        quat_q15 = (int(qw), int(qx), int(qy), int(qz))
+        quat_raw_zero = all(q == 0 for q in quat_q15)
+        quat_valid = not quat_raw_zero
+        quat = normalize_quat(tuple(q15_to_float(v) for v in quat_q15))  # type: ignore[arg-type]
+
+        return "QUAT_STATE", {
+            "seq": int(seq),
+            "time_ms": int(time_ms),
+            "quat_q15": quat_q15,
+            "quat": quat,
+            "quat_raw_zero": quat_raw_zero,
+            "quat_valid": quat_valid,
         }
 
     if air_type == AIR_TYPE_STATUS:
@@ -373,7 +395,7 @@ class FlightLogProcessor:
         for r in records:
             if r.get("dir") != "RX":
                 continue
-            if r.get("layer") == "AIR_PARSED" and r.get("kind") in {"FLIGHT_STATE", "STATUS"}:
+            if r.get("layer") == "AIR_PARSED" and r.get("kind") in {"FLIGHT_STATE", "QUAT_STATE", "STATUS"}:
                 return True
             if r.get("layer") == "GSP" and self._is_gsp_air_rx(r):
                 return True
@@ -417,6 +439,8 @@ class FlightLogProcessor:
                         kind, info = parsed
                         if kind == "FLIGHT_STATE":
                             self._add_flight_state(info, all_data)
+                        elif kind == "QUAT_STATE":
+                            self._add_quat_state(info, all_data)
                         elif kind == "STATUS":
                             self._add_status(info, all_status)
 
@@ -500,6 +524,8 @@ class FlightLogProcessor:
         kind = r.get("kind")
         if kind == "FLIGHT_STATE":
             self._add_flight_state(r, all_data)
+        elif kind == "QUAT_STATE":
+            self._add_quat_state(r, all_data)
         elif kind == "STATUS":
             self._add_status(r, all_status)
 
@@ -556,6 +582,30 @@ class FlightLogProcessor:
             all_data["vel"].append((time_ms, vel))
         if pos is not None:
             all_data["pos"].append((time_ms, pos))
+
+    def _add_quat_state(
+        self,
+        r: dict,
+        all_data: dict[str, list[tuple[int, tuple[float, ...]]]],
+    ) -> None:
+        try:
+            time_ms = int(r["time_ms"])
+        except (KeyError, TypeError, ValueError):
+            return
+
+        q_raw = safe_int_tuple(r.get("quat_q15", ()), 4) if "quat_q15" in r else None
+        quat_raw_zero = bool(r.get("quat_raw_zero")) if "quat_raw_zero" in r else (
+            q_raw is not None and all(v == 0 for v in q_raw)
+        )
+        quat_valid = bool(r.get("quat_valid")) if "quat_valid" in r else not quat_raw_zero
+        quat = safe_float_tuple(r.get("quat", ()), 4)
+        if quat is None and q_raw is not None:
+            quat = normalize_quat(tuple(q15_to_float(v) for v in q_raw))  # type: ignore[arg-type]
+
+        if quat is not None:
+            all_data["quat_valid"].append((time_ms, (1.0 if quat_valid else 0.0,)))
+            if quat_valid:
+                all_data["quat"].append((time_ms, normalize_quat(quat)))  # type: ignore[arg-type]
 
     def _add_status(self, r: dict, all_status: list[tuple[int, int, int, int]]) -> None:
         try:

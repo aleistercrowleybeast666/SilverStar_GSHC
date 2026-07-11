@@ -56,7 +56,8 @@ python main.py
 ├─ config.py                       # 全局配置与用户数据路径
 ├─ requirements.txt                # Python 依赖
 ├─ README.md                       # 开发说明
-├─ README.txt                      # 用户使用说明
+├─ docs/
+│  └─ air_protocol_v0_6.md         # 当前 AIR/GSP 无线协议
 ├─ config/                         # 绿色版配置目录，可放 user_paths.json
 ├─ protocol/
 │  ├─ air.py                       # AIR 无线协议解析/构造
@@ -153,10 +154,15 @@ PC 上位机 <-> 地面站：GSP-MIN
 
 ```text
 AIR_FLIGHT_STATE = 0x10
+AIR_QUAT_STATE   = 0x11
 AIR_STATUS       = 0x20
 AIR_CMD          = 0x30
 AIR_ACK          = 0x40
 ```
+
+当前协议以 [docs/air_protocol_v0_6.md](docs/air_protocol_v0_6.md) 为准。START 前允许
+ACK、STATUS 和可选的 14B QUAT_STATE；START ACK OK 后进入 mission UI state，主要接收
+50B FLIGHT_STATE 和 STATUS。
 
 实时主遥测 `AIR_FLIGHT_STATE` 包含：
 
@@ -193,7 +199,7 @@ ACK timeout/error:
   不切状态，只更新提示；pending 清除后允许重发
 ```
 
-未匹配本机 pending 的 ACK 不改变按钮状态。`STATUS LOCKED/UNLOCKED` 只在没有 LOCK/UNLOCK pending 时同步按钮，避免状态事件早于 ACK 让 UI 提前切换。`STATUS MISSION_START/LAUNCH/PARACHUTE_DEPLOY/LANDING` 可视为任务已开始；若 START pending 尚未 ACK，上位机会清除 START pending 并进入 mission 禁用态。
+未匹配本机 pending 的 ACK 不改变按钮状态。`STATUS LOCKED/UNLOCKED` 只在没有 LOCK/UNLOCK pending 时同步按钮，避免状态事件早于 ACK 让 UI 提前切换。`STATUS MISSION_START/LAUNCH/PARACHUTE_DEPLOY/LANDING` 不代替 START ACK，也不会提前切换 mission UI state。
 
 ## 7. 日志格式
 
@@ -218,7 +224,7 @@ SIMULATION      # 模拟验证数据标记
 
 离线处理结果的 `summary.txt`、`processed_data.txt`、`manifest.json` 也会区分真实数据和模拟数据。
 
-AIR_PARSED 的 FLIGHT_STATE 记录包含 `quat_q15`、归一化 fallback 后的 `quat`，以及 `quat_raw_zero` / `quat_valid`。当 `quat_valid=false` 时，后处理不会把 fallback 单位四元数当作有效姿态。
+AIR_PARSED 的 FLIGHT_STATE 和 QUAT_STATE 记录包含 `quat_q15`、归一化 fallback 后的 `quat`，以及 `quat_raw_zero` / `quat_valid`。QUAT_STATE 不生成 acc/gyro/vel/pos 字段；当 `quat_valid=false` 时，后处理不会把 fallback 单位四元数当作有效姿态。
 
 ## 8. 数据处理模块
 

@@ -24,6 +24,7 @@ from protocol.air import (
     AirAckMessage,
     AirCmdId,
     AirFlightStateMessage,
+    AirQuatStateMessage,
     AirStatusId,
     build_air_cmd,
     parse_air_frame,
@@ -644,7 +645,7 @@ class Controller(QObject):
                 )
 
     def _handle_air_message(self, msg) -> None:
-        from protocol.air import AirAckMessage, AirFlightStateMessage, AirStatusMessage
+        from protocol.air import AirAckMessage, AirFlightStateMessage, AirQuatStateMessage, AirStatusMessage
 
         if isinstance(msg, AirFlightStateMessage):
             accel = self._accel_raw_to_mps2(msg.accel_raw)
@@ -685,6 +686,41 @@ class Controller(QObject):
                 }
             )
 
+        elif isinstance(msg, AirQuatStateMessage):
+            self.window.update_quat(
+                msg.quat,
+                raw=msg.quat_q15,
+                valid=msg.quat_valid,
+                source="short",
+            )
+
+            if not msg.quat_valid:
+                now = time.monotonic()
+                if now - self._last_quat_invalid_hint_monotonic >= 2.0:
+                    self._last_quat_invalid_hint_monotonic = now
+                    self.window.set_radio_state_hint("QUAT_STATE quat raw is zero; check IMU 0x59 output")
+
+            self.logger.write(
+                {
+                    "ts": time.time(),
+                    "dir": "RX",
+                    "layer": "AIR_PARSED",
+                    "kind": "QUAT_STATE",
+                    "seq": msg.seq,
+                    "time_ms": msg.time_ms,
+                    "quat_q15": list(msg.quat_q15),
+                    "quat": list(msg.quat),
+                    "quat_raw_zero": msg.quat_raw_zero,
+                    "quat_valid": msg.quat_valid,
+                    "message": (
+                        f"AIR_QUAT_STATE seq={msg.seq} time_ms={msg.time_ms} "
+                        f"qw={msg.quat_q15[0]} qx={msg.quat_q15[1]} "
+                        f"qy={msg.quat_q15[2]} qz={msg.quat_q15[3]} "
+                        f"quat_valid={msg.quat_valid}"
+                    ),
+                }
+            )
+
         elif isinstance(msg, AirStatusMessage):
             text = STATUS_MAP.get(msg.status_id, f"0x{msg.status_id:02X}")
             self.window.set_last_status(f"{text} @ {msg.time_ms} ms")
@@ -701,24 +737,8 @@ class Controller(QObject):
                 AirStatusId.PARACHUTE_DEPLOY,
                 AirStatusId.LANDING,
             ):
-                pending_start = self._pop_pending_air_cmd(int(AirCmdId.START_MISSION))
-                if pending_start is not None:
-                    self.window.set_last_air_ack(
-                        f"START pending cleared by STATUS {text} @ {msg.time_ms} ms"
-                    )
-                    self.logger.write(
-                        {
-                            "ts": time.time(),
-                            "dir": "RX",
-                            "layer": "AIR_PARSED",
-                            "kind": "ACK_CANCELLED",
-                            "reason": f"STATUS_{text}",
-                            "ack_seq": pending_start.seq,
-                            "ack_cmd_id": pending_start.cmd_id,
-                            "sent_count": pending_start.sent_count,
-                        }
-                    )
-                self.window.set_command_state_mission()
+                if self._has_pending_air_cmd(int(AirCmdId.START_MISSION)):
+                    self.window.set_radio_state_hint(f"已收到 {text}，等待匹配的 START ACK")
 
             self.logger.write(
                 {
