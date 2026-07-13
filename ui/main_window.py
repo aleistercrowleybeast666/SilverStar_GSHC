@@ -38,6 +38,10 @@ class MainWindow(QMainWindow):
             "vel": [deque(maxlen=self.max_points) for _ in range(3)],
             "pos": [deque(maxlen=self.max_points) for _ in range(3)],
         }
+        self.series_time = {
+            "vel": deque(maxlen=self.max_points),
+            "pos": deque(maxlen=self.max_points),
+        }
 
         self.latest_quat = (1.0, 0.0, 0.0, 0.0)
         self.latest_euler = (0.0, 0.0, 0.0)
@@ -451,6 +455,7 @@ class MainWindow(QMainWindow):
         ]
 
         self.curves = {}
+        self.plot_widgets = {}
 
         for idx, (title, key, axis) in enumerate(titles):
             row, col = divmod(idx, 3)
@@ -459,8 +464,7 @@ class MainWindow(QMainWindow):
             plot_widget.setMinimumSize(240, 190)
             plot_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            plot_widget.setLabel("bottom", "sample")
-            plot_widget.setXRange(0, max(self.max_points - 1, 1), padding=0)
+            plot_widget.setLabel("bottom", "任务时间 / s")
             plot_widget.disableAutoRange(axis=pg.ViewBox.XAxis)
             plot_widget.getAxis("left").setWidth(72)
             plot_widget.getAxis("bottom").setHeight(32)
@@ -469,6 +473,7 @@ class MainWindow(QMainWindow):
 
             self.plot_layout.addWidget(plot_widget, row, col)
             self.curves[(key, axis)] = curve
+            self.plot_widgets[(key, axis)] = plot_widget
 
     def set_ports(self, ports: list[str]) -> None:
         current = self.port_combo.currentText()
@@ -580,6 +585,7 @@ class MainWindow(QMainWindow):
 
     def set_command_state_mission(self) -> None:
         self._command_state_mission_started = True
+        self.clear_vector_series()
         self.set_data_tools_mission_disabled(True)
         self.set_command_buttons_enabled(
             ping=False,
@@ -609,11 +615,7 @@ class MainWindow(QMainWindow):
         self._set_dynamic_label_text(self.lbl_vel, "X: —  Y: —  Z: —")
         self._set_dynamic_label_text(self.lbl_pos, "X: —  Y: —  Z: —")
 
-        for key in self.series:
-            for axis in range(3):
-                self.series[key][axis].clear()
-
-        self.refresh_plots()
+        self.clear_vector_series()
 
         self.latest_quat = (1.0, 0.0, 0.0, 0.0)
         self.latest_euler = (0.0, 0.0, 0.0)
@@ -683,8 +685,21 @@ class MainWindow(QMainWindow):
 
         self._apply_quat_to_mesh(values)
 
-    def push_vector_sample(self, key: str, values: tuple[float, float, float]) -> None:
+    def clear_vector_series(self) -> None:
+        for key in self.series:
+            self.series_time[key].clear()
+            for axis in range(3):
+                self.series[key][axis].clear()
+        self.refresh_plots()
+
+    def push_vector_sample(
+        self,
+        key: str,
+        values: tuple[float, float, float],
+        time_s: float,
+    ) -> None:
         if key in self.series:
+            self.series_time[key].append(time_s)
             for i in range(3):
                 self.series[key][i].append(values[i])
             self.refresh_plots()
@@ -712,8 +727,11 @@ class MainWindow(QMainWindow):
 
     def refresh_plots(self) -> None:
         for (key, axis), curve in self.curves.items():
+            x = list(self.series_time[key])
             y = list(self.series[key][axis])
-            curve.setData(list(range(len(y))), y)
+            curve.setData(x, y)
+            if x:
+                self.plot_widgets[(key, axis)].setXRange(min(x), max(x), padding=0)
 
     def _normalize_quat(
         self,

@@ -81,6 +81,7 @@ ACK_RESULT_MAP = {
 AIR_CMD_ACK_TIMEOUT_MS = 800
 AIR_CMD_MAX_RETRIES = 3
 AIR_CMD_RETRY_CHECK_MS = 100
+FLIGHT_TELEMETRY_PERIOD_MS = 200
 
 
 @dataclass
@@ -145,6 +146,10 @@ class Controller(QObject):
         self._processing_success_out_dir: str | None = None
         self._processing_error_text: str | None = None
         self._last_quat_invalid_hint_monotonic = 0.0
+        self.mission_packet_tracking_active = False
+        self.last_flight_time_ms: int | None = None
+        self.received_flight_packets = 0
+        self.estimated_lost_packets = 0
 
         self.window.on_refresh_ports = self.refresh_ports
         self.window.on_connect_clicked = self.connect
@@ -177,6 +182,7 @@ class Controller(QObject):
         self.air_seq = 0
         self._last_quat_invalid_hint_monotonic = 0.0
         self._clear_pending_air_cmds("重新连接")
+        self._clear_mission_packet_stats()
         self.window.reset_runtime_display()
 
         self.worker = self.link.open(SerialConfig(port=port, baudrate=baud))
@@ -186,12 +192,15 @@ class Controller(QObject):
 
     def disconnect(self) -> None:
         self._clear_pending_air_cmds("串口断开")
+        self._clear_mission_packet_stats()
         self.link.close()
         self.worker = None
         self.window.reset_runtime_display()
         self.window.set_connection_status("未连接")
 
     def on_connection_changed(self, ok: bool, text: str) -> None:
+        if not ok:
+            self._clear_mission_packet_stats()
         self.window.set_connection_status(text if ok else f"断开: {text}")
 
     def on_error(self, text: str) -> None:
@@ -320,6 +329,71 @@ class Controller(QObject):
         cmd_id &= 0xFF
         return any(pending.cmd_id == cmd_id for pending in self.pending_air_cmds.values())
 
+    def _clear_mission_packet_stats(self) -> None:
+        self.mission_packet_tracking_active = False
+        self.last_flight_time_ms = None
+        self.received_flight_packets = 0
+        self.estimated_lost_packets = 0
+
+    def _reset_mission_packet_stats(self, source: str) -> None:
+        if self.mission_packet_tracking_active:
+            return
+
+        self.mission_packet_tracking_active = True
+        self.last_flight_time_ms = None
+        self.received_flight_packets = 0
+        self.estimated_lost_packets = 0
+        self.logger.write(
+            {
+                "ts": time.time(),
+                "dir": "LOCAL",
+                "layer": "MISSION",
+                "kind": "MISSION_PACKET_TRACKING_START",
+                "source": source,
+                "expected_period_ms": FLIGHT_TELEMETRY_PERIOD_MS,
+                "received_flight_packets": 0,
+                "estimated_lost_packets": 0,
+                "expected_flight_packets": 0,
+                "packet_loss_rate": 0.0,
+            }
+        )
+
+    def _track_flight_packet(self, current_time_ms: int) -> dict[str, int | float | bool]:
+        lost_since_previous = 0
+        time_non_monotonic = False
+
+        if self.mission_packet_tracking_active:
+            if self.last_flight_time_ms is None:
+                self.last_flight_time_ms = current_time_ms
+            else:
+                delta_ms = current_time_ms - self.last_flight_time_ms
+                if delta_ms > 0:
+                    expected_steps = max(1, round(delta_ms / FLIGHT_TELEMETRY_PERIOD_MS))
+                    lost_since_previous = max(0, expected_steps - 1)
+                    self.last_flight_time_ms = current_time_ms
+                else:
+                    time_non_monotonic = True
+
+            self.received_flight_packets += 1
+            self.estimated_lost_packets += lost_since_previous
+
+        expected_flight_packets = self.received_flight_packets + self.estimated_lost_packets
+        packet_loss_rate = (
+            self.estimated_lost_packets / expected_flight_packets
+            if expected_flight_packets > 0
+            else 0.0
+        )
+        return {
+            "mission_time_ms": current_time_ms,
+            "mission_time_s": current_time_ms / 1000.0,
+            "lost_since_previous": lost_since_previous,
+            "received_flight_packets": self.received_flight_packets,
+            "estimated_lost_packets": self.estimated_lost_packets,
+            "expected_flight_packets": expected_flight_packets,
+            "packet_loss_rate": packet_loss_rate,
+            "time_non_monotonic": time_non_monotonic,
+        }
+
     def _has_pending_lock_state_cmd(self) -> bool:
         return self._has_pending_air_cmd(int(AirCmdId.LOCK)) or self._has_pending_air_cmd(int(AirCmdId.UNLOCK))
 
@@ -354,6 +428,7 @@ class Controller(QObject):
                 self.window.set_command_state_unlocked()
                 self.window.set_radio_state_hint("UNLOCK 已确认")
             elif msg.ack_cmd_id == int(AirCmdId.START_MISSION):
+                self._reset_mission_packet_stats("start_ack_ok")
                 self.window.set_command_state_mission()
                 self.window.set_radio_state_hint("START 已确认，任务开始")
             else:
@@ -648,14 +723,22 @@ class Controller(QObject):
         from protocol.air import AirAckMessage, AirFlightStateMessage, AirQuatStateMessage, AirStatusMessage
 
         if isinstance(msg, AirFlightStateMessage):
+            if (
+                not self.mission_packet_tracking_active
+                and self._has_pending_air_cmd(int(AirCmdId.START_MISSION))
+            ):
+                self._reset_mission_packet_stats("first_flight_state_after_start")
+
+            packet_stats = self._track_flight_packet(msg.time_ms)
+            mission_time_s = msg.time_ms / 1000.0
             accel = self._accel_raw_to_mps2(msg.accel_raw)
             gyro = self._gyro_raw_to_radps(msg.gyro_raw)
 
-            self.window.push_vector_sample("accel", accel)
-            self.window.push_vector_sample("gyro", gyro)
+            self.window.push_vector_sample("accel", accel, mission_time_s)
+            self.window.push_vector_sample("gyro", gyro, mission_time_s)
             self.window.update_quat(msg.quat, raw=msg.quat_q15, valid=msg.quat_valid)
-            self.window.push_vector_sample("vel", msg.vel_mps)
-            self.window.push_vector_sample("pos", msg.pos_m)
+            self.window.push_vector_sample("vel", msg.vel_mps, mission_time_s)
+            self.window.push_vector_sample("pos", msg.pos_m, mission_time_s)
 
             if not msg.quat_valid:
                 now = time.monotonic()
@@ -683,6 +766,7 @@ class Controller(QObject):
                     "gyro_full_scale_dps": self.window.current_gyro_full_scale_dps(),
                     "vel_mps": list(msg.vel_mps),
                     "pos_m": list(msg.pos_m),
+                    **packet_stats,
                 }
             )
 
@@ -724,6 +808,9 @@ class Controller(QObject):
         elif isinstance(msg, AirStatusMessage):
             text = STATUS_MAP.get(msg.status_id, f"0x{msg.status_id:02X}")
             self.window.set_last_status(f"{text} @ {msg.time_ms} ms")
+
+            if msg.status_id == AirStatusId.MISSION_START:
+                self._reset_mission_packet_stats("mission_start_status")
 
             if msg.status_id == AirStatusId.LOCKED:
                 if not self._has_pending_lock_state_cmd():

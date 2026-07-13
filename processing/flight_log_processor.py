@@ -31,6 +31,7 @@ STATUS_UNLOCKED = 0x08
 ACCEL_FULL_SCALE_G_DEFAULT = 16.0
 GYRO_FULL_SCALE_DPS_DEFAULT = 2000.0
 STANDARD_GRAVITY_MPS2 = 9.80665
+FLIGHT_TELEMETRY_PERIOD_MS = 200
 
 STATUS_NAME = {
     STATUS_BOOT: "BOOT",
@@ -71,6 +72,18 @@ class LinkSample:
 
 
 @dataclass
+class PacketLossStats:
+    expected_period_ms: int = FLIGHT_TELEMETRY_PERIOD_MS
+    expected_rate_hz: int = 5
+    received_packets: int = 0
+    expected_packets: int = 0
+    lost_packets: int = 0
+    packet_loss_rate: float = 0.0
+    loss_window_end_basis: str = "last_received_flight_state"
+    loss_per_second: list[tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
 class FlightData:
     mission_start_ms: int
     landing_ms: Optional[int]
@@ -89,6 +102,7 @@ class FlightData:
     vel: list[TimedVector] = field(default_factory=list)
     pos: list[TimedVector] = field(default_factory=list)
     link: list[LinkSample] = field(default_factory=list)
+    packet_loss: PacketLossStats = field(default_factory=PacketLossStats)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -176,6 +190,57 @@ def raw_gyro_to_radps(raw: Iterable[object], full_scale_dps: float = GYRO_FULL_S
     vals = tuple(int(v) for v in raw)
     scale = full_scale_dps * math.pi / 180.0 / 32768.0
     return vals[0] * scale, vals[1] * scale, vals[2] * scale
+
+
+def calculate_packet_loss_stats(
+    flight_time_ms: Iterable[int],
+    landing_ms: int | None,
+    period_ms: int = FLIGHT_TELEMETRY_PERIOD_MS,
+) -> PacketLossStats:
+    if period_ms <= 0:
+        raise ValueError("period_ms must be positive")
+
+    valid_times = sorted({int(time_ms) for time_ms in flight_time_ms if int(time_ms) >= 0})
+    end_basis = "landing" if landing_ms is not None else "last_received_flight_state"
+    end_ms = int(landing_ms) if landing_ms is not None else (valid_times[-1] if valid_times else None)
+    expected_rate_hz = int(round(1000 / period_ms))
+
+    if end_ms is None or end_ms < 0:
+        return PacketLossStats(
+            expected_period_ms=period_ms,
+            expected_rate_hz=expected_rate_hz,
+            loss_window_end_basis=end_basis,
+        )
+
+    last_tick = end_ms // period_ms
+    expected_ticks = set(range(last_tick + 1))
+    received_ticks: set[int] = set()
+    for time_ms in valid_times:
+        tick_index = round(time_ms / period_ms)
+        if tick_index in expected_ticks:
+            received_ticks.add(tick_index)
+    lost_ticks = expected_ticks - received_ticks
+
+    last_second = (last_tick * period_ms) // 1000
+    loss_counts = [0] * (last_second + 1)
+    for tick_index in lost_ticks:
+        expected_time_ms = tick_index * period_ms
+        loss_counts[expected_time_ms // 1000] += 1
+
+    expected_packets = len(expected_ticks)
+    received_packets = len(received_ticks)
+    lost_packets = max(0, expected_packets - received_packets)
+    packet_loss_rate = lost_packets / expected_packets if expected_packets > 0 else 0.0
+    return PacketLossStats(
+        expected_period_ms=period_ms,
+        expected_rate_hz=expected_rate_hz,
+        received_packets=received_packets,
+        expected_packets=expected_packets,
+        lost_packets=lost_packets,
+        packet_loss_rate=packet_loss_rate,
+        loss_window_end_basis=end_basis,
+        loss_per_second=list(enumerate(loss_counts)),
+    )
 
 
 def parse_air_frame(frame: bytes) -> tuple[str, dict] | None:
@@ -294,7 +359,7 @@ class FlightLogProcessor:
         )
 
         frame_count = plotter.estimate_gif_frame_count(data)
-        total_steps = 2 + 6 + frame_count + 1
+        total_steps = 2 + 7 + frame_count + 1
         done = 0
 
         def step(msg: str) -> None:
@@ -326,6 +391,12 @@ class FlightLogProcessor:
 
         plotter.plot_link_quality(output_dir / "link_quality.png", data.link, data.parachute_time_s)
         step("link_quality.png")
+
+        plotter.plot_packet_loss_per_second(
+            output_dir / "packet_loss_per_second.png",
+            data.packet_loss.loss_per_second,
+        )
+        step("packet_loss_per_second.png")
 
         frames_dir = output_dir / "gif_frames"
         frames_dir.mkdir(exist_ok=True)
@@ -417,6 +488,7 @@ class FlightLogProcessor:
         }
         all_status: list[tuple[int, int, int, int]] = []
         all_link: list[tuple[int, float, float]] = []
+        all_flight_time_ms: list[int] = []
 
         for r in records:
             if r.get("dir") != "RX":
@@ -425,7 +497,7 @@ class FlightLogProcessor:
             layer = r.get("layer")
 
             if layer == "AIR_PARSED":
-                self._add_air_parsed_record(r, all_data, all_status)
+                self._add_air_parsed_record(r, all_data, all_status, all_flight_time_ms)
 
             elif layer == "GSP" and self._is_gsp_air_rx(r):
                 link = self._extract_link_from_gsp(r)
@@ -438,7 +510,7 @@ class FlightLogProcessor:
                     if parsed is not None:
                         kind, info = parsed
                         if kind == "FLIGHT_STATE":
-                            self._add_flight_state(info, all_data)
+                            self._add_flight_state(info, all_data, all_flight_time_ms)
                         elif kind == "QUAT_STATE":
                             self._add_quat_state(info, all_data)
                         elif kind == "STATUS":
@@ -469,6 +541,9 @@ class FlightLogProcessor:
             simulated=simulated,
             simulation_label=simulation_label,
         )
+        task_flight_time_ms = [time_ms - start_ms for time_ms in all_flight_time_ms]
+        task_landing_ms = landing_ms - start_ms if landing_ms is not None else None
+        data.packet_loss = calculate_packet_loss_stats(task_flight_time_ms, task_landing_ms)
 
         if landing_ms is None:
             data.warnings.append("LANDING not found; using last data timestamp as end.")
@@ -520,10 +595,11 @@ class FlightLogProcessor:
         r: dict,
         all_data: dict[str, list[tuple[int, tuple[float, ...]]]],
         all_status: list[tuple[int, int, int, int]],
+        all_flight_time_ms: list[int],
     ) -> None:
         kind = r.get("kind")
         if kind == "FLIGHT_STATE":
-            self._add_flight_state(r, all_data)
+            self._add_flight_state(r, all_data, all_flight_time_ms)
         elif kind == "QUAT_STATE":
             self._add_quat_state(r, all_data)
         elif kind == "STATUS":
@@ -533,11 +609,14 @@ class FlightLogProcessor:
         self,
         r: dict,
         all_data: dict[str, list[tuple[int, tuple[float, ...]]]],
+        all_flight_time_ms: list[int],
     ) -> None:
         try:
             time_ms = int(r["time_ms"])
         except (KeyError, TypeError, ValueError):
             return
+
+        all_flight_time_ms.append(time_ms)
 
         accel = safe_float_tuple(r.get("accel_mps2", ()), 3)
         if accel is None and "accel_raw" in r:
@@ -777,6 +856,17 @@ class FlightLogProcessor:
                 f.write(f"time_s: {t:.6f}\n")
                 f.write(f"z_m: {z:.6g}\n")
 
+            packet_loss = data.packet_loss
+            f.write("\npacket_loss:\n")
+            f.write(f"expected_period_ms: {packet_loss.expected_period_ms}\n")
+            f.write(f"expected_rate_hz: {packet_loss.expected_rate_hz}\n")
+            f.write(f"received_packets: {packet_loss.received_packets}\n")
+            f.write(f"expected_packets: {packet_loss.expected_packets}\n")
+            f.write(f"lost_packets: {packet_loss.lost_packets}\n")
+            f.write(f"packet_loss_rate: {packet_loss.packet_loss_rate:.9g}\n")
+            f.write(f"packet_loss_percent: {packet_loss.packet_loss_rate * 100.0:.6g}%\n")
+            f.write(f"loss_window_end_basis: {packet_loss.loss_window_end_basis}\n")
+
     def _max_norm(self, samples: list[TimedVector]) -> tuple[float, tuple[float, ...], float] | None:
         if not samples:
             return None
@@ -813,6 +903,16 @@ class FlightLogProcessor:
             "landing_ms": data.landing_ms,
             "parachute_ms": data.parachute_ms,
             "duration_s": data.duration_s,
+            "packet_loss": {
+                "expected_period_ms": data.packet_loss.expected_period_ms,
+                "expected_rate_hz": data.packet_loss.expected_rate_hz,
+                "received_packets": data.packet_loss.received_packets,
+                "expected_packets": data.packet_loss.expected_packets,
+                "lost_packets": data.packet_loss.lost_packets,
+                "packet_loss_rate": data.packet_loss.packet_loss_rate,
+                "packet_loss_percent": data.packet_loss.packet_loss_rate * 100.0,
+                "loss_window_end_basis": data.packet_loss.loss_window_end_basis,
+            },
             "warnings": data.warnings,
         }
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -9,6 +9,7 @@ from typing import Generator, Optional
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 from PIL import Image
 
@@ -111,6 +112,35 @@ class FlightPlotter:
         fig.tight_layout()
         fig.savefig(output_path, dpi=160)
         plt.close(fig)
+
+    def plot_packet_loss_per_second(self, output_path: Path, loss_per_second: list[tuple[int, int]]) -> None:
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        seconds = [second for second, _lost in loss_per_second]
+        lost_counts = [lost for _second, lost in loss_per_second]
+        cjk_font = self._find_cjk_font()
+
+        ax.bar(seconds, lost_counts, width=0.8)
+        ax.set_title("FLIGHT_STATE Packet Loss per Second")
+        ax.set_xlabel("任务时间 / s", fontproperties=cjk_font)
+        ax.set_ylabel("该秒丢包数", fontproperties=cjk_font)
+        ax.set_ylim(0, 5)
+        ax.set_yticks(range(6))
+        if seconds:
+            ax.set_xlim(min(seconds) - 0.5, max(seconds) + 0.5)
+        ax.grid(True, axis="y", alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=160)
+        plt.close(fig)
+
+    def _find_cjk_font(self) -> font_manager.FontProperties | None:
+        for family in ("Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "SimHei", "SimSun"):
+            try:
+                path = font_manager.findfont(family, fallback_to_default=False)
+            except ValueError:
+                continue
+            return font_manager.FontProperties(fname=path)
+        return None
 
     def generate_attitude_motion_gif(self, data, gif_path: Path, frames_dir: Path) -> Generator[Path, None, None]:
         frames_dir.mkdir(parents=True, exist_ok=True)
