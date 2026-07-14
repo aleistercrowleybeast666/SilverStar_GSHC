@@ -8,7 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QVector3D
 from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -27,7 +27,32 @@ from PySide6.QtWidgets import (
 from config import APP_NAME, PLOT_HISTORY, ACCEL_FULL_SCALE_G, GYRO_FULL_SCALE_DPS
 
 
+class AttitudeGLViewWidget(gl.GLViewWidget):
+    """3D attitude view that can lock mouse-driven camera movement."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._camera_locked = True
+
+    def set_camera_locked(self, locked: bool) -> None:
+        self._camera_locked = bool(locked)
+
+    def camera_locked(self) -> bool:
+        return self._camera_locked
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._camera_locked:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+
 class MainWindow(QMainWindow):
+    DEFAULT_CAMERA_DISTANCE = 6.5
+    DEFAULT_CAMERA_ELEVATION = 20.0
+    DEFAULT_CAMERA_AZIMUTH = 35.0
+    DEFAULT_CAMERA_CENTER = (0.0, 0.0, 0.9)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -93,10 +118,26 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.gl_view = gl.GLViewWidget()
+        self.gl_view = AttitudeGLViewWidget()
         self.gl_view.setMinimumSize(360, 360)
         self.gl_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         left_layout.addWidget(self.gl_view, 1)
+
+        camera_controls = QWidget()
+        camera_controls_layout = QHBoxLayout(camera_controls)
+        camera_controls_layout.setContentsMargins(0, 4, 0, 0)
+        camera_controls_layout.setSpacing(8)
+
+        self.btn_toggle_camera_lock = QPushButton("解锁视角")
+        self.btn_toggle_camera_lock.setCheckable(True)
+        self.btn_reset_camera = QPushButton("重置视角")
+        camera_controls_layout.addWidget(self.btn_toggle_camera_lock)
+        camera_controls_layout.addWidget(self.btn_reset_camera)
+        camera_controls_layout.addStretch(1)
+        left_layout.addWidget(camera_controls, 0)
+
+        self.btn_toggle_camera_lock.toggled.connect(self._set_3d_camera_unlocked)
+        self.btn_reset_camera.clicked.connect(self._reset_3d_camera)
 
         splitter.addWidget(left)
 
@@ -381,15 +422,60 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_3d_scene(self) -> None:
-        self.gl_view.setCameraPosition(distance=11, elevation=18, azimuth=35)
+        self._reset_3d_camera()
 
-        grid = gl.GLGridItem()
-        grid.scale(1, 1, 1)
-        self.gl_view.addItem(grid)
+        self.ground_grid = gl.GLGridItem()
+        self.ground_grid.setSize(8, 8)
+        self.ground_grid.setSpacing(1, 1)
+        self.gl_view.addItem(self.ground_grid)
 
-        axes = gl.GLAxisItem()
-        axes.setSize(2, 2, 2)
-        self.gl_view.addItem(axes)
+        world_origin = np.array([0.0, 0.0, 0.0], dtype=float)
+        world_axis_endpoints = np.array(
+            [
+                [3.2, 0.0, 0.0],
+                [0.0, 3.2, 0.0],
+                [0.0, 0.0, 3.2],
+            ],
+            dtype=float,
+        )
+        axis_colors = (
+            (1.0, 0.20, 0.20, 1.0),
+            (0.20, 1.0, 0.30, 1.0),
+            (0.25, 0.55, 1.0, 1.0),
+        )
+
+        self.world_axis_items = []
+        for endpoint, color in zip(world_axis_endpoints, axis_colors):
+            axis_item = gl.GLLinePlotItem(
+                pos=np.vstack((world_origin, endpoint)),
+                color=color,
+                width=5.0,
+                antialias=True,
+                mode="lines",
+            )
+            self.gl_view.addItem(axis_item)
+            self.world_axis_items.append(axis_item)
+
+        world_label_font = QFont()
+        world_label_font.setPointSize(15)
+        world_label_font.setBold(True)
+        world_label_specs = (
+            ("E", (3.4, 0.0, 0.05), "#ff4d4d"),
+            ("W", (-3.4, 0.0, 0.05), "#ffdddd"),
+            ("N", (0.0, 3.4, 0.05), "#4dff66"),
+            ("S", (0.0, -3.4, 0.05), "#ddffdd"),
+            ("U", (0.0, 0.0, 3.4), "#66a3ff"),
+        )
+        self.world_direction_labels = {}
+        for text, position, color in world_label_specs:
+            label = gl.GLTextItem(
+                pos=position,
+                text=text,
+                color=color,
+                font=world_label_font,
+            )
+            self.gl_view.addItem(label)
+            self.world_direction_labels[text] = label
 
         verts = np.array(
             [
@@ -441,6 +527,84 @@ class MainWindow(QMainWindow):
         )
 
         self.gl_view.addItem(self.mesh_item)
+
+        self.body_axis_origin = np.array([0.0, 0.0, 0.0], dtype=float)
+        self.body_axis_endpoints = np.array(
+            [
+                [1.1, 0.0, 0.0],
+                [0.0, 1.1, 0.0],
+                [0.0, 0.0, 1.6],
+            ],
+            dtype=float,
+        )
+        self.body_nose_label_position = np.array([0.0, 0.0, 2.45], dtype=float)
+
+        self.body_axis_items = []
+        for endpoint, color in zip(self.body_axis_endpoints, axis_colors):
+            axis_item = gl.GLLinePlotItem(
+                pos=np.vstack((self.body_axis_origin, endpoint)),
+                color=color,
+                width=3.5,
+                antialias=True,
+                mode="lines",
+            )
+            self.gl_view.addItem(axis_item)
+            self.body_axis_items.append(axis_item)
+
+        body_label_font = QFont()
+        body_label_font.setPointSize(12)
+        body_label_font.setBold(True)
+        body_label_specs = (
+            ("Xb", "#ff4d4d"),
+            ("Yb", "#4dff66"),
+            ("Zb", "#66a3ff"),
+        )
+        self.body_axis_labels = []
+        for endpoint, (text, color) in zip(self.body_axis_endpoints, body_label_specs):
+            label = gl.GLTextItem(
+                pos=endpoint * 1.10,
+                text=text,
+                color=color,
+                font=body_label_font,
+            )
+            self.gl_view.addItem(label)
+            self.body_axis_labels.append(label)
+
+        self.body_nose_label = gl.GLTextItem(
+            pos=self.body_nose_label_position,
+            text="NOSE",
+            color="#f2f2f2",
+            font=body_label_font,
+        )
+        self.gl_view.addItem(self.body_nose_label)
+
+    def _set_3d_camera_unlocked(self, unlocked: bool) -> None:
+        """Toggle mouse rotation and panning while preserving wheel zoom."""
+        self.gl_view.set_camera_locked(not unlocked)
+        self.btn_toggle_camera_lock.setText("锁定视角" if unlocked else "解锁视角")
+
+    def _reset_3d_camera(self) -> None:
+        """Restore the shared default camera position and observation center."""
+        self.gl_view.setCameraPosition(
+            pos=QVector3D(*self.DEFAULT_CAMERA_CENTER),
+            distance=self.DEFAULT_CAMERA_DISTANCE,
+            elevation=self.DEFAULT_CAMERA_ELEVATION,
+            azimuth=self.DEFAULT_CAMERA_AZIMUTH,
+        )
+
+    def _update_body_frame_items(self, rot: np.ndarray) -> None:
+        """Apply the rocket rotation matrix to its body axes and labels."""
+        rotated_origin = self.body_axis_origin @ rot.T
+        rotated_endpoints = self.body_axis_endpoints @ rot.T
+
+        for axis_item, endpoint in zip(self.body_axis_items, rotated_endpoints):
+            axis_item.setData(pos=np.vstack((rotated_origin, endpoint)))
+
+        for label, endpoint in zip(self.body_axis_labels, rotated_endpoints):
+            label.setData(pos=endpoint * 1.10)
+
+        rotated_nose_label_position = self.body_nose_label_position @ rot.T
+        self.body_nose_label.setData(pos=rotated_nose_label_position)
 
     def _build_plots(self) -> None:
         pg.setConfigOptions(antialias=True)
@@ -683,7 +847,8 @@ class MainWindow(QMainWindow):
             f"R:{euler[0]:.4f}  P:{euler[1]:.4f}  Y:{euler[2]:.4f}{euler_suffix}",
         )
 
-        self._apply_quat_to_mesh(values)
+        if valid:
+            self._apply_quat_to_mesh(values)
 
     def clear_vector_series(self) -> None:
         for key in self.series:
@@ -775,7 +940,7 @@ class MainWindow(QMainWindow):
 
     def _apply_quat_to_mesh(self, quat: tuple[float, float, float, float]) -> None:
         normalized = self._normalize_quat(quat)
-        if normalized is None:
+        if normalized is None or not np.all(np.isfinite(normalized)):
             return
 
         w, x, y, z = normalized
@@ -798,3 +963,4 @@ class MainWindow(QMainWindow):
         )
 
         self.mesh_item.setMeshData(meshdata=mesh)
+        self._update_body_frame_items(rot)
