@@ -34,6 +34,7 @@ class AirStatusId(IntEnum):
     LANDING = 0x06
     LOCKED = 0x07
     UNLOCKED = 0x08
+    GNSS_POSITION = 0x09
 
 
 class AirCmdId(IntEnum):

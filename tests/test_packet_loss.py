@@ -7,7 +7,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from processing.flight_log_processor import FlightData, FlightLogProcessor, calculate_packet_loss_stats
+from processing.flight_log_processor import (
+    STATUS_GNSS_POSITION,
+    STATUS_LANDING,
+    STATUS_MISSION_START,
+    STATUS_NAME,
+    FlightData,
+    FlightLogProcessor,
+    calculate_packet_loss_stats,
+)
 from processing.flight_plotter import FlightPlotter
 from ui.main_window import MainWindow
 
@@ -46,6 +54,21 @@ class FakePlotWindow:
 
 
 class PacketLossStatsTests(unittest.TestCase):
+    def test_gnss_status_does_not_change_mission_event_lookup(self) -> None:
+        processor = FlightLogProcessor()
+        status_events = [
+            (STATUS_GNSS_POSITION, 50, 0, 0),
+            (STATUS_MISSION_START, 100, 0, 0),
+            (STATUS_GNSS_POSITION, 200, 1, 0),
+            (STATUS_GNSS_POSITION, 250, 1, 0),
+            (STATUS_LANDING, 500, 0, 0),
+        ]
+
+        self.assertEqual(STATUS_NAME[STATUS_GNSS_POSITION], "GNSS_POSITION")
+        self.assertEqual(processor._first_status_time(status_events, STATUS_MISSION_START), 100)
+        self.assertEqual(processor._first_status_time(status_events, STATUS_LANDING, after_ms=100), 500)
+        self.assertEqual(sum(sid == STATUS_GNSS_POSITION for sid, *_rest in status_events), 3)
+
     def test_continuous_time_slots_have_no_loss(self) -> None:
         stats = calculate_packet_loss_stats([0, 200, 400, 600, 800], landing_ms=None)
 
@@ -148,6 +171,28 @@ class PacketLossStatsTests(unittest.TestCase):
                 "time_ms": 0,
             }
         ]
+        records.extend(
+            [
+                {
+                    "dir": "RX",
+                    "layer": "AIR_PARSED",
+                    "kind": "STATUS",
+                    "status_id": STATUS_GNSS_POSITION,
+                    "time_ms": 200,
+                    "arg0": 1,
+                    "arg1": 0,
+                },
+                {
+                    "dir": "RX",
+                    "layer": "AIR_PARSED",
+                    "kind": "STATUS",
+                    "status_id": STATUS_GNSS_POSITION,
+                    "time_ms": 400,
+                    "arg0": 0,
+                    "arg1": 0,
+                },
+            ]
+        )
         for seq, time_ms in enumerate((0, 200, 600), start=1):
             records.append(
                 {
@@ -197,6 +242,8 @@ class PacketLossStatsTests(unittest.TestCase):
             ):
                 self.assertGreater((output_dir / filename).stat().st_size, 0)
             self.assertIn("lost_packets: 1", (output_dir / "summary.txt").read_text(encoding="utf-8"))
+            processed_data = (output_dir / "processed_data.txt").read_text(encoding="utf-8")
+            self.assertEqual(processed_data.count("\tGNSS_POSITION\t"), 2)
             manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["packet_loss"]["lost_packets"], 1)
 

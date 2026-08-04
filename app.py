@@ -25,6 +25,7 @@ from protocol.air import (
     AirCmdId,
     AirFlightStateMessage,
     AirQuatStateMessage,
+    AirStatusMessage,
     AirStatusId,
     build_air_cmd,
     parse_air_frame,
@@ -60,7 +61,22 @@ STATUS_MAP = {
     AirStatusId.LANDING: "LANDING",
     AirStatusId.LOCKED: "LOCKED",
     AirStatusId.UNLOCKED: "UNLOCKED",
+    AirStatusId.GNSS_POSITION: "GNSS_POSITION",
 }
+
+
+def format_air_status_message(msg: AirStatusMessage) -> str:
+    """Format an AIR status event for the existing latest-status label."""
+    status_text = STATUS_MAP.get(msg.status_id, f"0x{msg.status_id:02X}")
+    if msg.status_id == AirStatusId.GNSS_POSITION:
+        if msg.arg0 == 1:
+            status_text += " 定位可用"
+        elif msg.arg0 == 0:
+            status_text += " 定位不可用"
+        else:
+            status_text += f" UNKNOWN(arg0={msg.arg0})"
+    return f"{status_text} @ {msg.time_ms} ms"
+
 
 ACK_RESULT_MAP = {
     0x00: "OK",
@@ -720,7 +736,7 @@ class Controller(QObject):
                 )
 
     def _handle_air_message(self, msg) -> None:
-        from protocol.air import AirAckMessage, AirFlightStateMessage, AirQuatStateMessage, AirStatusMessage
+        from protocol.air import AirAckMessage, AirFlightStateMessage, AirQuatStateMessage
 
         if isinstance(msg, AirFlightStateMessage):
             if (
@@ -807,7 +823,7 @@ class Controller(QObject):
 
         elif isinstance(msg, AirStatusMessage):
             text = STATUS_MAP.get(msg.status_id, f"0x{msg.status_id:02X}")
-            self.window.set_last_status(f"{text} @ {msg.time_ms} ms")
+            self.window.set_last_status(format_air_status_message(msg))
 
             if msg.status_id == AirStatusId.MISSION_START:
                 self._reset_mission_packet_stats("mission_start_status")
@@ -827,19 +843,21 @@ class Controller(QObject):
                 if self._has_pending_air_cmd(int(AirCmdId.START_MISSION)):
                     self.window.set_radio_state_hint(f"已收到 {text}，等待匹配的 START ACK")
 
-            self.logger.write(
-                {
-                    "ts": time.time(),
-                    "dir": "RX",
-                    "layer": "AIR_PARSED",
-                    "kind": "STATUS",
-                    "seq": msg.seq,
-                    "status_id": int(msg.status_id),
-                    "time_ms": msg.time_ms,
-                    "arg0": msg.arg0,
-                    "arg1": msg.arg1,
-                }
-            )
+            status_record = {
+                "ts": time.time(),
+                "dir": "RX",
+                "layer": "AIR_PARSED",
+                "kind": "STATUS",
+                "seq": msg.seq,
+                "status_id": int(msg.status_id),
+                "status_name": text,
+                "time_ms": msg.time_ms,
+                "arg0": msg.arg0,
+                "arg1": msg.arg1,
+            }
+            if msg.status_id == AirStatusId.GNSS_POSITION:
+                status_record["gnss_position_usable"] = {0: False, 1: True}.get(msg.arg0)
+            self.logger.write(status_record)
 
         elif isinstance(msg, AirAckMessage):
             self._on_air_cmd_ack_result(msg)

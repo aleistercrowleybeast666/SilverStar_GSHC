@@ -57,7 +57,8 @@ python main.py
 ├─ requirements.txt                # Python 依赖
 ├─ README.md                       # 开发说明
 ├─ docs/
-│  └─ air_protocol_v0_6.md         # 当前 AIR/GSP 无线协议
+│  ├─ AIR_PROTOCOL.md              # SilverStar 0.0.0 正式 AIR 协议
+│  └─ GSP_MIN_PROTOCOL.md          # PC 与地面站串口封装
 ├─ config/                         # 绿色版配置目录，可放 user_paths.json
 ├─ protocol/
 │  ├─ air.py                       # AIR 无线协议解析/构造
@@ -160,9 +161,12 @@ AIR_CMD          = 0x30
 AIR_ACK          = 0x40
 ```
 
-当前协议以 [docs/air_protocol_v0_6.md](docs/air_protocol_v0_6.md) 为准。START 前允许
+AIR 应用层以 [docs/AIR_PROTOCOL.md](docs/AIR_PROTOCOL.md) 为唯一正式协议，PC 与地面站串口封装见
+[docs/GSP_MIN_PROTOCOL.md](docs/GSP_MIN_PROTOCOL.md)。START 前允许
 ACK、STATUS 和可选的 14B QUAT_STATE；START ACK OK 后进入 mission UI state，主要接收
 50B FLIGHT_STATE 和 STATUS。
+
+SilverStar 0.0.0 通过 AIR STATUS `0x09` 报告 GNSS 定位可用状态；该状态只用于显示和记录，不限制 START。
 
 实时主遥测 `AIR_FLIGHT_STATE` 包含：
 

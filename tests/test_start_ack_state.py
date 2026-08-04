@@ -4,7 +4,7 @@ import unittest
 
 from PySide6.QtCore import QObject
 
-from app import Controller, PendingAirCommand
+from app import Controller, PendingAirCommand, format_air_status_message
 from protocol.air import AirAckMessage, AirFlightStateMessage, AirQuatStateMessage, AirStatusMessage
 from protocol.common import AirCmdId, AirStatusId
 
@@ -12,6 +12,8 @@ from protocol.common import AirCmdId, AirStatusId
 class FakeWindow:
     def __init__(self) -> None:
         self.mission_calls = 0
+        self.locked_calls = 0
+        self.unlocked_calls = 0
         self.last_air_ack = ""
         self.radio_hint = ""
         self.last_status = ""
@@ -35,10 +37,10 @@ class FakeWindow:
         self.connection_status = text
 
     def set_command_state_locked(self) -> None:
-        pass
+        self.locked_calls += 1
 
     def set_command_state_unlocked(self) -> None:
-        pass
+        self.unlocked_calls += 1
 
     def current_accel_full_scale_g(self) -> float:
         return 16.0
@@ -99,6 +101,56 @@ def add_pending_start(controller: Controller, seq: int = 9) -> None:
 
 
 class StartAckStateTests(unittest.TestCase):
+    def test_gnss_status_format(self) -> None:
+        for arg0, expected in (
+            (1, "GNSS_POSITION 定位可用 @ 123 ms"),
+            (0, "GNSS_POSITION 定位不可用 @ 123 ms"),
+            (7, "GNSS_POSITION UNKNOWN(arg0=7) @ 123 ms"),
+        ):
+            with self.subTest(arg0=arg0):
+                msg = AirStatusMessage(
+                    seq=1,
+                    status_id=int(AirStatusId.GNSS_POSITION),
+                    time_ms=123,
+                    arg0=arg0,
+                    arg1=0,
+                )
+                self.assertEqual(format_air_status_message(msg), expected)
+
+    def test_gnss_status_only_updates_display_and_log(self) -> None:
+        controller = make_controller()
+        add_pending_start(controller)
+
+        controller._handle_air_message(
+            AirStatusMessage(
+                seq=1,
+                status_id=int(AirStatusId.GNSS_POSITION),
+                time_ms=100,
+                arg0=1,
+                arg1=0,
+            )
+        )
+        controller._handle_air_message(
+            AirStatusMessage(
+                seq=2,
+                status_id=int(AirStatusId.GNSS_POSITION),
+                time_ms=200,
+                arg0=0,
+                arg1=0,
+            )
+        )
+
+        self.assertEqual(controller.window.last_status, "GNSS_POSITION 定位不可用 @ 200 ms")
+        self.assertEqual(controller.window.mission_calls, 0)
+        self.assertEqual(controller.window.locked_calls, 0)
+        self.assertEqual(controller.window.unlocked_calls, 0)
+        self.assertFalse(controller.mission_packet_tracking_active)
+        self.assertTrue(controller.pending_air_cmds)
+        self.assertEqual(len(controller.logger.records), 2)
+        self.assertTrue(controller.logger.records[0]["gnss_position_usable"])
+        self.assertFalse(controller.logger.records[1]["gnss_position_usable"])
+        self.assertEqual(controller.logger.records[1]["status_name"], "GNSS_POSITION")
+
     def test_quat_state_updates_only_quaternion_display(self) -> None:
         controller = make_controller()
         msg = AirQuatStateMessage(

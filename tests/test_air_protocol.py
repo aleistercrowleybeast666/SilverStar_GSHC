@@ -5,20 +5,43 @@ import unittest
 from protocol.air import (
     AIR_FLIGHT_STATE_LEN,
     AIR_QUAT_STATE_LEN,
+    AIR_STATUS_LEN,
     AIR_TYPE_FLIGHT_STATE,
     AirFlightStateMessage,
     AirQuatStateMessage,
+    AirStatusMessage,
     parse_air_frame,
 )
-from protocol.common import GspType
+from protocol.common import AirStatusId, GspType
 from protocol.gsp_min import GspFrame, GsToPcAirFrame, parse_gsp_frame
 
 
 QUAT_VALID_FRAME = bytes.fromhex("11 01 78 56 34 12 FF 7F 00 00 00 00 00 00")
 QUAT_ZERO_FRAME = bytes.fromhex("11 02 00 00 00 00 00 00 00 00 00 00 00 00")
+GNSS_AVAILABLE_FRAME = bytes.fromhex("20 03 09 78 56 34 12 01 00")
+GNSS_UNAVAILABLE_FRAME = bytes.fromhex("20 04 09 79 56 34 12 00 00")
 
 
 class AirProtocolTests(unittest.TestCase):
+    def test_gnss_position_status_fixed_vectors(self) -> None:
+        for frame, expected_arg0 in (
+            (GNSS_AVAILABLE_FRAME, 1),
+            (GNSS_UNAVAILABLE_FRAME, 0),
+        ):
+            with self.subTest(arg0=expected_arg0):
+                air, msg = parse_air_frame(frame)
+
+                self.assertEqual(len(air.raw), AIR_STATUS_LEN)
+                self.assertIsInstance(msg, AirStatusMessage)
+                self.assertEqual(msg.status_id, int(AirStatusId.GNSS_POSITION))
+                self.assertEqual(msg.arg0, expected_arg0)
+                self.assertEqual(msg.arg1, 0)
+
+    def test_gnss_position_status_length_remains_nine_bytes(self) -> None:
+        self.assertEqual(len(GNSS_AVAILABLE_FRAME), 9)
+        with self.assertRaisesRegex(ValueError, "bad AIR_STATUS length"):
+            parse_air_frame(GNSS_AVAILABLE_FRAME[:-1])
+
     def test_quat_state_fixed_vector(self) -> None:
         air, msg = parse_air_frame(QUAT_VALID_FRAME)
 
