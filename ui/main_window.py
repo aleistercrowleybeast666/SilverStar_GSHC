@@ -1,30 +1,46 @@
 from __future__ import annotations
 
 import math
-from collections import deque
 from typing import Callable
 
 import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QVector3D
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QPushButton,
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from config import APP_NAME, PLOT_HISTORY, ACCEL_FULL_SCALE_G, GYRO_FULL_SCALE_DPS
+from config import PLOT_REFRESH_INTERVAL_MS, PLOT_WINDOW_SECONDS
+from protocol.common import (
+    AirAckResult,
+    AirAlignmentCapability,
+    AirAlignmentState,
+    AirCalibrationMode,
+    AirCalibrationModeMask,
+    AirCalibrationState,
+    AirLifecycleState,
+    AirStatusId,
+    GspAckResult,
+    enum_name,
+)
+from services.i18n import I18n, Language
+from services.state_model import EventHistory, FlightControllerState, HandshakeState
 
 
 class AttitudeGLViewWidget(gl.GLViewWidget):
@@ -47,29 +63,173 @@ class AttitudeGLViewWidget(gl.GLViewWidget):
         super().mouseMoveEvent(event)
 
 
+class CalibrationDialog(QDialog):
+    FACE_NAMES = ("X+", "X-", "Y+", "Y-", "Z+", "Z-")
+
+    def __init__(self, i18n: I18n, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.i18n = i18n
+        self.setMinimumWidth(560)
+
+        self.on_start: Callable[[int], None] | None = None
+        self.on_face: Callable[[int], None] | None = None
+        self.on_stop: Callable[[], None] | None = None
+        self.on_reset: Callable[[], None] | None = None
+        self._last_mode_mask: int | None = None
+
+        root = QVBoxLayout(self)
+        mode_row = QHBoxLayout()
+        self.mode_combo = QComboBox()
+        self.btn_start = QPushButton()
+        self.lbl_supported_modes = QLabel()
+        mode_row.addWidget(self.lbl_supported_modes)
+        mode_row.addWidget(self.mode_combo, 1)
+        mode_row.addWidget(self.btn_start)
+        root.addLayout(mode_row)
+
+        self.lbl_state = QLabel()
+        self.lbl_state.setWordWrap(True)
+        root.addWidget(self.lbl_state)
+
+        self.faces_group = QGroupBox()
+        face_grid = QGridLayout(self.faces_group)
+        self.face_status_labels: list[QLabel] = []
+        self.face_buttons: list[QPushButton] = []
+        for face, name in enumerate(self.FACE_NAMES):
+            status = QLabel("○")
+            button = QPushButton()
+            button.clicked.connect(
+                lambda _checked=False, value=face: self.on_face and self.on_face(value)
+            )
+            face_grid.addWidget(QLabel(name), face, 0)
+            face_grid.addWidget(status, face, 1)
+            face_grid.addWidget(button, face, 2)
+            self.face_status_labels.append(status)
+            self.face_buttons.append(button)
+        face_grid.setColumnStretch(3, 1)
+        root.addWidget(self.faces_group)
+
+        action_row = QHBoxLayout()
+        self.btn_stop = QPushButton()
+        self.btn_reset = QPushButton()
+        self.btn_close = QPushButton()
+        action_row.addWidget(self.btn_stop)
+        action_row.addWidget(self.btn_reset)
+        action_row.addStretch(1)
+        action_row.addWidget(self.btn_close)
+        root.addLayout(action_row)
+
+        self.btn_start.clicked.connect(self._start_selected_mode)
+        self.btn_stop.clicked.connect(lambda: self.on_stop and self.on_stop())
+        self.btn_reset.clicked.connect(lambda: self.on_reset and self.on_reset())
+        self.btn_close.clicked.connect(self.close)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(self.i18n.tr("cal.dialog.title"))
+        self.lbl_supported_modes.setText(self.i18n.tr("cal.supported_modes"))
+        self.btn_start.setText(self.i18n.tr("button.cal_start"))
+        self.faces_group.setTitle(self.i18n.tr("cal.faces_title"))
+        self.btn_stop.setText(self.i18n.tr("button.stop"))
+        self.btn_reset.setText(self.i18n.tr("button.reset"))
+        self.btn_close.setText(self.i18n.tr("button.close"))
+        self.lbl_state.setText(self.i18n.tr("cal.wait_status"))
+        for face, button in enumerate(self.face_buttons):
+            button.setText(self.i18n.tr("button.collect_face", face=self.FACE_NAMES[face]))
+        self._last_mode_mask = None
+
+    def _start_selected_mode(self) -> None:
+        mode = self.mode_combo.currentData()
+        if mode is not None and self.on_start is not None:
+            self.on_start(int(mode))
+
+    def render(self, state: FlightControllerState) -> None:
+        capability = state.capability
+        mask = capability.calibration_mode_mask if capability is not None else 0
+        if mask != self._last_mode_mask:
+            selected = self.mode_combo.currentData()
+            self.mode_combo.clear()
+            for mode in (
+                int(AirCalibrationMode.NONE),
+                int(AirCalibrationMode.ONE_FACE),
+                int(AirCalibrationMode.SIX_FACE),
+            ):
+                if mask & (1 << mode):
+                    canonical = enum_name(AirCalibrationMode, mode)
+                    self.mode_combo.addItem(
+                        f"{canonical}（{self.i18n.enum('calibration_mode', canonical)}）",
+                        mode,
+                    )
+            if selected is not None:
+                index = self.mode_combo.findData(selected)
+                if index >= 0:
+                    self.mode_combo.setCurrentIndex(index)
+            self._last_mode_mask = mask
+
+        calibration = state.calibration
+        mode_name = self.i18n.enum(
+            "calibration_mode", enum_name(AirCalibrationMode, calibration.mode)
+        )
+        state_name = (
+            self.i18n.tr("common.wait")
+            if calibration.state is None
+            else self.i18n.enum(
+                "calibration_state", enum_name(AirCalibrationState, calibration.state)
+            )
+        )
+        current_face = (
+            "—"
+            if calibration.current_face == 0xFF or calibration.current_face >= len(self.FACE_NAMES)
+            else self.FACE_NAMES[calibration.current_face]
+        )
+        if calibration.mode == int(AirCalibrationMode.ONE_FACE):
+            guidance = self.i18n.tr("cal.guidance.one_face")
+        elif calibration.mode == int(AirCalibrationMode.SIX_FACE):
+            guidance = self.i18n.tr("cal.guidance.six_face")
+        elif calibration.mode == int(AirCalibrationMode.NONE):
+            guidance = self.i18n.tr("cal.guidance.none")
+        else:
+            guidance = self.i18n.tr("cal.guidance.select")
+        self.lbl_state.setText(
+            self.i18n.tr(
+                "cal.status",
+                mode=mode_name,
+                state=state_name,
+                face=current_face,
+                ready=self.i18n.tr("common.yes" if calibration.ready else "common.no"),
+                guidance=guidance,
+            )
+        )
+
+        command_ready = bool(
+            state.air_command_link_allowed()
+            and not state.pending_command_name
+        )
+        self.btn_start.setEnabled(command_ready and self.mode_combo.count() > 0)
+        self.btn_stop.setEnabled(command_ready)
+        self.btn_reset.setEnabled(command_ready)
+
+        six_face_active = calibration.mode == int(AirCalibrationMode.SIX_FACE)
+        for face, (status_label, button) in enumerate(
+            zip(self.face_status_labels, self.face_buttons)
+        ):
+            completed = bool(calibration.completed_face_mask & (1 << face))
+            active = calibration.current_face == face
+            status_label.setText("✓" if completed else ("●" if active else "○"))
+            button.setEnabled(command_ready and six_face_active and not completed)
+
+
 class MainWindow(QMainWindow):
     DEFAULT_CAMERA_DISTANCE = 6.5
     DEFAULT_CAMERA_ELEVATION = 20.0
     DEFAULT_CAMERA_AZIMUTH = 35.0
     DEFAULT_CAMERA_CENTER = (0.0, 0.0, 0.9)
 
-    def __init__(self) -> None:
+    def __init__(self, i18n: I18n | None = None) -> None:
         super().__init__()
-        self.setWindowTitle(APP_NAME)
+        self.i18n = i18n or I18n()
+        self._translation_bindings: list[tuple[object, str, dict[str, object]]] = []
         self.resize(1760, 960)
-
-        self.max_points = PLOT_HISTORY
-        self.series = {
-            "vel": [deque(maxlen=self.max_points) for _ in range(3)],
-            "pos": [deque(maxlen=self.max_points) for _ in range(3)],
-        }
-        self.series_time = {
-            "vel": deque(maxlen=self.max_points),
-            "pos": deque(maxlen=self.max_points),
-        }
-
-        self.latest_quat = (1.0, 0.0, 0.0, 0.0)
-        self.latest_euler = (0.0, 0.0, 0.0)
 
         self.on_refresh_ports: Callable[[], None] | None = None
         self.on_connect_clicked: Callable[[], None] | None = None
@@ -78,14 +238,29 @@ class MainWindow(QMainWindow):
         self.on_send_lock: Callable[[], None] | None = None
         self.on_send_unlock: Callable[[], None] | None = None
         self.on_send_start: Callable[[], None] | None = None
+        self.on_cal_start: Callable[[int], None] | None = None
+        self.on_cal_face: Callable[[int], None] | None = None
+        self.on_cal_stop: Callable[[], None] | None = None
+        self.on_cal_reset: Callable[[], None] | None = None
+        self.on_align_start: Callable[[], None] | None = None
+        self.on_align_stop: Callable[[], None] | None = None
+        self.on_align_reset: Callable[[], None] | None = None
         self.on_generate_sim_data: Callable[[], None] | None = None
         self.on_process_data: Callable[[], None] | None = None
         self.on_open_log_dir: Callable[[], None] | None = None
         self.on_open_data_dir: Callable[[], None] | None = None
+        self.on_language_changed: Callable[[], None] | None = None
 
+        self._state: FlightControllerState | None = None
+        self._events: EventHistory | None = None
         self._data_tools_busy = False
-        self._data_tools_mission_disabled = False
-        self._command_state_mission_started = False
+        self._last_sensor_revision = -1
+        self._last_plot_revision = -1
+        self._last_event_revision = -1
+        self._auto_switched_session_generation: int | None = None
+        self.latest_quat = (1.0, 0.0, 0.0, 0.0)
+        self.latest_euler = (0.0, 0.0, 0.0)
+
         self._dynamic_value_font = QFont("Consolas")
         self._dynamic_value_font.setStyleHint(QFont.StyleHint.Monospace)
         self._dynamic_value_font.setFixedPitch(True)
@@ -96,170 +271,497 @@ class MainWindow(QMainWindow):
         self._compact_value_font.setFixedPitch(True)
         self._compact_value_font.setPointSize(9)
 
+        self._cmd_button_style = (
+            "QPushButton { padding: 4px 8px; }"
+            "QPushButton:disabled { background-color: #2b2b2b; color: #8a8a8a; "
+            "border: 1px solid #555555; }"
+        )
+
         self._build_ui()
         self._build_3d_scene()
         self._build_plots()
-        self.reset_runtime_display()
+        self.retranslate_ui()
+
+        self.render_timer = QTimer(self)
+        self.render_timer.setInterval(PLOT_REFRESH_INTERVAL_MS)
+        self.render_timer.timeout.connect(self.render_state)
+        self.render_timer.start()
+
+    def bind_runtime_model(
+        self,
+        state: FlightControllerState,
+        events: EventHistory,
+        *,
+        select_preflight: bool = False,
+    ) -> None:
+        self._state = state
+        self._events = events
+        self._last_sensor_revision = -1
+        self._last_plot_revision = -1
+        self._last_event_revision = -1
+        if select_preflight:
+            self.pages.setCurrentWidget(self.preflight_page)
+        self.render_state()
+
+    def _bind_text(self, widget: object, key: str, **params: object) -> object:
+        self._translation_bindings.append((widget, key, params))
+        return widget
+
+    def _on_language_changed(self, index: int) -> None:
+        language = self.language_combo.itemData(index)
+        if language is not None and self.i18n.set_language(str(language)):
+            self.retranslate_ui()
+            if self.on_language_changed is not None:
+                self.on_language_changed()
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(self.i18n.tr("app.title"))
+        for widget, key, params in self._translation_bindings:
+            text = self.i18n.tr(key, **params)
+            if isinstance(widget, QGroupBox):
+                widget.setTitle(text)
+            else:
+                widget.setText(text)  # type: ignore[attr-defined]
+        self.pages.setTabText(self.pages.indexOf(self.preflight_page), self.i18n.tr("page.preflight"))
+        self.pages.setTabText(self.pages.indexOf(self.flight_page), self.i18n.tr("page.flight"))
+        self.pages.setTabText(
+            self.pages.indexOf(self.post_process_page), self.i18n.tr("page.post_process")
+        )
+        language_index = self.language_combo.findData(self.i18n.language.value)
+        if language_index >= 0 and language_index != self.language_combo.currentIndex():
+            blocked = self.language_combo.blockSignals(True)
+            self.language_combo.setCurrentIndex(language_index)
+            self.language_combo.blockSignals(blocked)
+        self._set_3d_camera_unlocked(self.btn_toggle_camera_lock.isChecked())
+        self.calibration_dialog.retranslate_ui()
+        self._retranslate_plots()
+        self._last_sensor_revision = -1
+        self._last_event_revision = -1
+        self._last_plot_revision = -1
+        self.render_state()
 
     def _build_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
-
         root = QVBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
-
         root.addWidget(self._build_top_bar())
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-
         self.gl_view = AttitudeGLViewWidget()
         self.gl_view.setMinimumSize(360, 360)
         self.gl_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         left_layout.addWidget(self.gl_view, 1)
 
         camera_controls = QWidget()
-        camera_controls_layout = QHBoxLayout(camera_controls)
-        camera_controls_layout.setContentsMargins(0, 4, 0, 0)
-        camera_controls_layout.setSpacing(8)
-
-        self.btn_toggle_camera_lock = QPushButton("解锁视角")
+        camera_layout = QHBoxLayout(camera_controls)
+        camera_layout.setContentsMargins(0, 4, 0, 0)
+        self.btn_toggle_camera_lock = QPushButton()
         self.btn_toggle_camera_lock.setCheckable(True)
-        self.btn_reset_camera = QPushButton("重置视角")
-        camera_controls_layout.addWidget(self.btn_toggle_camera_lock)
-        camera_controls_layout.addWidget(self.btn_reset_camera)
-        camera_controls_layout.addStretch(1)
-        left_layout.addWidget(camera_controls, 0)
-
+        self.btn_reset_camera = QPushButton()
+        self._bind_text(self.btn_reset_camera, "camera.reset")
+        camera_layout.addWidget(self.btn_toggle_camera_lock)
+        camera_layout.addWidget(self.btn_reset_camera)
+        camera_layout.addStretch(1)
+        left_layout.addWidget(camera_controls)
         self.btn_toggle_camera_lock.toggled.connect(self._set_3d_camera_unlocked)
         self.btn_reset_camera.clicked.connect(self._reset_3d_camera)
-
         splitter.addWidget(left)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
-
-        top_info = QWidget()
-        top_info_layout = QHBoxLayout(top_info)
-        top_info_layout.setContentsMargins(0, 0, 0, 0)
-        top_info_layout.setSpacing(8)
-
-        top_info_layout.addWidget(self._build_status_panel(), 1)
-        top_info_layout.addWidget(self._build_data_area_panel(), 2)
-
-        right_layout.addWidget(top_info, 0)
-        right_layout.addWidget(self._build_plot_panel(), 1)
-
-        splitter.addWidget(right)
-        splitter.setChildrenCollapsible(False)
+        self.pages = QTabWidget()
+        self.preflight_page = self._build_preflight_page()
+        self.flight_page = self._build_flight_page()
+        self.post_process_page = self._build_post_process_page()
+        self.pages.addTab(self.preflight_page, "")
+        self.pages.addTab(self.flight_page, "")
+        self.pages.addTab(self.post_process_page, "")
+        splitter.addWidget(self.pages)
         splitter.setSizes([420, 1340])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
-    def _build_top_bar(self) -> QWidget:
-        box = QGroupBox("连接与命令")
-        layout = QHBoxLayout(box)
+        self.calibration_dialog = CalibrationDialog(self.i18n, self)
+        self.calibration_dialog.on_start = lambda mode: self.on_cal_start and self.on_cal_start(mode)
+        self.calibration_dialog.on_face = lambda face: self.on_cal_face and self.on_cal_face(face)
+        self.calibration_dialog.on_stop = lambda: self.on_cal_stop and self.on_cal_stop()
+        self.calibration_dialog.on_reset = lambda: self.on_cal_reset and self.on_cal_reset()
 
+    def _build_top_bar(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.connection")
+        layout = QHBoxLayout(box)
         self.port_combo = QComboBox()
         self.port_combo.setMinimumContentsLength(12)
-        self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-
-        self.btn_refresh = QPushButton("刷新串口")
-        self.btn_connect = QPushButton("连接")
-        self.btn_disconnect = QPushButton("断开")
-
+        self.btn_refresh = QPushButton()
+        self._bind_text(self.btn_refresh, "button.refresh_ports")
         self.baud_spin = QSpinBox()
-        self.baud_spin.setRange(9600, 2000000)
+        self.baud_spin.setRange(9600, 2_000_000)
         self.baud_spin.setValue(230400)
         self.baud_spin.setFixedWidth(100)
+        self.btn_connect = QPushButton()
+        self.btn_disconnect = QPushButton()
+        self._bind_text(self.btn_connect, "button.connect")
+        self._bind_text(self.btn_disconnect, "button.disconnect")
+        self.conn_label = QLabel()
+        self._configure_dynamic_label(self.conn_label, 260, show_tooltip=True)
 
-        self.conn_label = QLabel("未连接")
-        self._configure_dynamic_label(self.conn_label, 180, show_tooltip=True)
-
-        self.accel_fs_combo = QComboBox()
-        self.accel_fs_combo.addItems(["±2g", "±4g", "±8g", "±16g"])
-        self.accel_fs_combo.setCurrentText(f"±{int(ACCEL_FULL_SCALE_G)}g")
-        self.accel_fs_combo.setFixedWidth(84)
-
-        self.gyro_fs_combo = QComboBox()
-        self.gyro_fs_combo.addItems(["±250dps", "±500dps", "±1000dps", "±2000dps"])
-        self.gyro_fs_combo.setCurrentText(f"±{int(GYRO_FULL_SCALE_DPS)}dps")
-        self.gyro_fs_combo.setFixedWidth(112)
-
-        self.btn_ping = QPushButton("PING")
-        self.btn_lock = QPushButton("LOCK")
-        self.btn_unlock = QPushButton("UNLOCK")
-        self.btn_start = QPushButton("START")
-
-        self._cmd_button_disabled_style = (
-            "QPushButton { padding: 4px 8px; }"
-            "QPushButton:disabled {"
-            "background-color: #2b2b2b;"
-            "color: #8a8a8a;"
-            "border: 1px solid #555555;"
-            "}"
-        )
-        for button in (self.btn_ping, self.btn_lock, self.btn_unlock, self.btn_start):
-            button.setStyleSheet(self._cmd_button_disabled_style)
-            button.setFixedWidth(92)
-            button.setMinimumHeight(30)
-
-        layout.addWidget(QLabel("端口"))
+        self.lbl_port_name = QLabel()
+        self._bind_text(self.lbl_port_name, "field.port")
+        layout.addWidget(self.lbl_port_name)
         layout.addWidget(self.port_combo)
         layout.addWidget(self.btn_refresh)
-        layout.addWidget(QLabel("波特率"))
+        self.lbl_baud_name = QLabel()
+        self._bind_text(self.lbl_baud_name, "field.baudrate")
+        layout.addWidget(self.lbl_baud_name)
         layout.addWidget(self.baud_spin)
         layout.addWidget(self.btn_connect)
         layout.addWidget(self.btn_disconnect)
         layout.addWidget(self.conn_label)
-
-        layout.addSpacing(12)
-        layout.addWidget(QLabel("加速度量程"))
-        layout.addWidget(self.accel_fs_combo)
-        layout.addWidget(QLabel("角速度量程"))
-        layout.addWidget(self.gyro_fs_combo)
-
-        layout.addSpacing(20)
-
-        for button in (self.btn_ping, self.btn_lock, self.btn_unlock, self.btn_start):
-            layout.addWidget(button)
-            layout.addSpacing(8)
-
         layout.addStretch(1)
+        self.lbl_language = QLabel()
+        self._bind_text(self.lbl_language, "language.label")
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("简体中文", Language.ZH_CN.value)
+        self.language_combo.addItem("English", Language.EN_US.value)
+        layout.addWidget(self.lbl_language)
+        layout.addWidget(self.language_combo)
 
         self.btn_refresh.clicked.connect(lambda: self.on_refresh_ports and self.on_refresh_ports())
         self.btn_connect.clicked.connect(lambda: self.on_connect_clicked and self.on_connect_clicked())
-        self.btn_disconnect.clicked.connect(lambda: self.on_disconnect_clicked and self.on_disconnect_clicked())
+        self.btn_disconnect.clicked.connect(
+            lambda: self.on_disconnect_clicked and self.on_disconnect_clicked()
+        )
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        return box
+
+    def _build_preflight_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(8)
+
+        summary_row = QHBoxLayout()
+        summary_row.addWidget(self._build_preflight_system_panel(), 1)
+        summary_row.addWidget(self._build_calibration_panel(), 1)
+        summary_row.addWidget(self._build_alignment_panel(), 1)
+        root.addLayout(summary_row)
+
+        detail_row = QHBoxLayout()
+        detail_row.addWidget(self._build_preflight_sensor_panel(), 2)
+        detail_row.addWidget(self._build_preflight_gnss_panel(), 1)
+        root.addLayout(detail_row)
+        root.addWidget(self._build_preflight_command_panel())
+        root.addStretch(1)
+        return page
+
+    def _build_preflight_system_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.system")
+        grid = QGridLayout(box)
+        self.lbl_pf_lifecycle = QLabel("—")
+        self.lbl_pf_system_ready = QLabel("—")
+        self.lbl_pf_selftest = QLabel("—")
+        self.lbl_pf_capability = QLabel()
+        self._bind_text(self.lbl_pf_capability, "capability.waiting")
+        self.lbl_pf_air_link = QLabel("—")
+        self.lbl_pf_policy = QLabel("—")
+        self.lbl_pf_start_block = QLabel("CAPABILITY_REQUIRED")
+        self.lbl_pf_lock = QLabel("—")
+        self.lbl_pf_processing = QLabel("NORMAL")
+        self.lbl_pf_ground_link = QLabel("—")
+        self.lbl_pf_air_ack = QLabel("—")
+        for row, (name, label) in enumerate(
+            (
+                ("field.lifecycle", self.lbl_pf_lifecycle),
+                ("field.system_ready", self.lbl_pf_system_ready),
+                ("field.selftest", self.lbl_pf_selftest),
+                ("field.capability", self.lbl_pf_capability),
+                ("field.air_link", self.lbl_pf_air_link),
+                ("field.command_policy", self.lbl_pf_policy),
+                ("field.start_block", self.lbl_pf_start_block),
+                ("field.lock_state", self.lbl_pf_lock),
+                ("field.pc_processing", self.lbl_pf_processing),
+                ("field.gs_radio", self.lbl_pf_ground_link),
+                ("field.last_air_ack", self.lbl_pf_air_ack),
+            )
+        ):
+            self._add_value_pair(grid, row, name, label, 150, True)
+        return box
+
+    def _build_calibration_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.calibration")
+        layout = QVBoxLayout(box)
+        grid = QGridLayout()
+        self.lbl_cal_mode = QLabel("NOT_SELECTED")
+        self.lbl_cal_state = QLabel("—")
+        self.lbl_cal_ready = QLabel("NO")
+        self.lbl_cal_face = QLabel("—")
+        self.lbl_cal_progress = QLabel("○ ○ ○ ○ ○ ○")
+        for row, (name, label) in enumerate(
+            (
+                ("field.mode", self.lbl_cal_mode),
+                ("field.state", self.lbl_cal_state),
+                ("field.ready", self.lbl_cal_ready),
+                ("field.current_face", self.lbl_cal_face),
+                ("field.six_face", self.lbl_cal_progress),
+            )
+        ):
+            self._add_value_pair(grid, row, name, label, 130, True)
+        layout.addLayout(grid)
+        actions = QHBoxLayout()
+        self.btn_calibration = QPushButton()
+        self._bind_text(self.btn_calibration, "button.calibration")
+        self.btn_calibration.setStyleSheet(self._cmd_button_style)
+        actions.addWidget(self.btn_calibration)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.btn_calibration.clicked.connect(self._show_calibration_dialog)
+        return box
+
+    def _build_alignment_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.alignment")
+        layout = QVBoxLayout(box)
+        grid = QGridLayout()
+        self.lbl_align_state = QLabel("—")
+        self.lbl_align_ready = QLabel("NO")
+        self.lbl_align_attitude = QLabel("—")
+        self.lbl_align_gnss = QLabel("—")
+        self.lbl_align_baro = QLabel("—")
+        self._add_value_pair(grid, 0, "field.state", self.lbl_align_state, 125, True)
+        self._add_value_pair(grid, 1, "field.ready", self.lbl_align_ready, 125, True)
+        self.lbl_align_attitude_name = self._add_value_pair(
+            grid, 2, "field.attitude", self.lbl_align_attitude, 125, True
+        )
+        self.lbl_align_gnss_name = self._add_value_pair(
+            grid, 3, "field.gnss_origin", self.lbl_align_gnss, 125, True
+        )
+        self.lbl_align_baro_name = self._add_value_pair(
+            grid, 4, "field.baro_origin", self.lbl_align_baro, 125, True
+        )
+        layout.addLayout(grid)
+        actions = QHBoxLayout()
+        self.btn_align_start = QPushButton()
+        self.btn_align_stop = QPushButton()
+        self.btn_align_reset = QPushButton()
+        self._bind_text(self.btn_align_start, "button.align_start")
+        self._bind_text(self.btn_align_stop, "button.stop")
+        self._bind_text(self.btn_align_reset, "button.reset")
+        for button in (self.btn_align_start, self.btn_align_stop, self.btn_align_reset):
+            button.setStyleSheet(self._cmd_button_style)
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        self.btn_align_start.clicked.connect(lambda: self.on_align_start and self.on_align_start())
+        self.btn_align_stop.clicked.connect(lambda: self.on_align_stop and self.on_align_stop())
+        self.btn_align_reset.clicked.connect(lambda: self.on_align_reset and self.on_align_reset())
+        return box
+
+    def _build_preflight_sensor_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.sensor_preflight")
+        grid = QGridLayout(box)
+        self.lbl_pf_accel = QLabel()
+        self.lbl_pf_gyro = QLabel()
+        self._bind_text(self.lbl_pf_accel, "capability.waiting")
+        self._bind_text(self.lbl_pf_gyro, "capability.waiting")
+        self.lbl_pf_quat_raw = QLabel("W: —  X: —  Y: —  Z: —")
+        self.lbl_pf_quat = QLabel("W: —  X: —  Y: —  Z: —")
+        self.lbl_pf_euler = QLabel("R: —  P: —  Y: —")
+        for row, (name, label) in enumerate(
+            (
+                ("field.accel_mps2", self.lbl_pf_accel),
+                ("field.gyro_radps", self.lbl_pf_gyro),
+                ("field.quat_raw", self.lbl_pf_quat_raw),
+                ("field.quat_wxyz", self.lbl_pf_quat),
+                ("field.euler_rpy_rad", self.lbl_pf_euler),
+            )
+        ):
+            self._add_value_pair(grid, row, name, label, 420, True)
+        return box
+
+    def _build_preflight_gnss_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.gnss")
+        grid = QGridLayout(box)
+        self.lbl_pf_gnss_usable = QLabel("—")
+        self.lbl_pf_gnss_origin = QLabel("—")
+        self._add_value_pair(grid, 0, "field.position_usable", self.lbl_pf_gnss_usable, 120, True)
+        self._add_value_pair(grid, 1, "field.origin_ready", self.lbl_pf_gnss_origin, 120, True)
+        self.lbl_gnss_note = QLabel()
+        self._bind_text(self.lbl_gnss_note, "note.gnss_profile")
+        self.lbl_gnss_note.setWordWrap(True)
+        grid.addWidget(self.lbl_gnss_note, 2, 0, 1, 2)
+        return box
+
+    def _build_preflight_command_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.preflight_commands")
+        layout = QHBoxLayout(box)
+        self.btn_ping = QPushButton()
+        self.btn_lock = QPushButton()
+        self.btn_unlock = QPushButton()
+        self.btn_start = QPushButton()
+        self._bind_text(self.btn_ping, "button.ping")
+        self._bind_text(self.btn_lock, "button.lock")
+        self._bind_text(self.btn_unlock, "button.unlock")
+        self._bind_text(self.btn_start, "button.start")
+        for button in (self.btn_ping, self.btn_lock, self.btn_unlock, self.btn_start):
+            button.setStyleSheet(self._cmd_button_style)
+            button.setMinimumWidth(100)
+            button.setMinimumHeight(34)
+            layout.addWidget(button)
+        layout.addSpacing(16)
+        self.lbl_start_reason_name = QLabel()
+        self._bind_text(self.lbl_start_reason_name, "field.start_reason")
+        layout.addWidget(self.lbl_start_reason_name)
+        self.lbl_start_reason = QLabel()
+        self._bind_text(self.lbl_start_reason, "start.wait_capability")
+        self._configure_dynamic_label(self.lbl_start_reason, 360, show_tooltip=True)
+        layout.addWidget(self.lbl_start_reason, 1)
         self.btn_ping.clicked.connect(lambda: self.on_send_ping and self.on_send_ping())
         self.btn_lock.clicked.connect(lambda: self.on_send_lock and self.on_send_lock())
         self.btn_unlock.clicked.connect(lambda: self.on_send_unlock and self.on_send_unlock())
         self.btn_start.clicked.connect(lambda: self.on_send_start and self.on_send_start())
-
         return box
+
+    def _build_flight_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(8)
+        top = QHBoxLayout()
+        top.addWidget(self._build_flight_status_panel(), 1)
+        top.addWidget(self._build_flight_data_panel(), 2)
+        top.addWidget(self._build_event_panel(), 2)
+        root.addLayout(top)
+        root.addWidget(self._build_plot_panel(), 1)
+        return page
+
+    def _build_flight_status_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.important_status")
+        grid = QGridLayout(box)
+        self.lbl_flight_lifecycle = QLabel("—")
+        self.lbl_mission_time = QLabel("—")
+        self.lbl_rssi = QLabel("— dBm")
+        self.lbl_snr = QLabel("— dB")
+        self.lbl_packet_loss = QLabel("0 / 0 (0.00%)")
+        self.lbl_last_packet_age = QLabel("— ms")
+        self.lbl_flight_processing = QLabel("NORMAL")
+        for row, (name, label) in enumerate(
+            (
+                ("field.lifecycle", self.lbl_flight_lifecycle),
+                ("field.mission_time", self.lbl_mission_time),
+                ("field.rssi", self.lbl_rssi),
+                ("field.snr", self.lbl_snr),
+                ("field.packet_loss", self.lbl_packet_loss),
+                ("field.last_packet_age", self.lbl_last_packet_age),
+                ("field.pc_processing", self.lbl_flight_processing),
+            )
+        ):
+            self._add_value_pair(grid, row, name, label, 150, True)
+        return box
+
+    def _build_flight_data_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.current_data")
+        grid = QGridLayout(box)
+        self.lbl_flight_accel = QLabel("—")
+        self.lbl_flight_gyro = QLabel("—")
+        self.lbl_flight_quat = QLabel("—")
+        self.lbl_flight_euler = QLabel("—")
+        self.lbl_flight_vel = QLabel("—")
+        self.lbl_flight_pos = QLabel("—")
+        for row, (name, label) in enumerate(
+            (
+                ("field.accel_xyz", self.lbl_flight_accel),
+                ("field.gyro_xyz", self.lbl_flight_gyro),
+                ("field.quaternion", self.lbl_flight_quat),
+                ("field.euler_rpy", self.lbl_flight_euler),
+                ("field.velocity_enu", self.lbl_flight_vel),
+                ("field.position_enu", self.lbl_flight_pos),
+            )
+        ):
+            self._add_value_pair(grid, row, name, label, 300, True)
+        return box
+
+    def _build_event_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.event_history")
+        layout = QVBoxLayout(box)
+        self.event_list = QListWidget()
+        self.event_list.setFont(self._compact_value_font)
+        layout.addWidget(self.event_list)
+        return box
+
+    def _build_plot_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.live_plots", seconds=PLOT_WINDOW_SECONDS)
+        self.plot_layout = QGridLayout(box)
+        self.plot_layout.setHorizontalSpacing(8)
+        self.plot_layout.setVerticalSpacing(8)
+        return box
+
+    def _build_post_process_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        box = QGroupBox()
+        self._bind_text(box, "group.post_process")
+        layout = QVBoxLayout(box)
+        self.btn_generate_sim = QPushButton()
+        self.btn_process_data = QPushButton()
+        self.btn_open_log_dir = QPushButton()
+        self.btn_open_data_dir = QPushButton()
+        self._bind_text(self.btn_generate_sim, "button.generate_sim")
+        self._bind_text(self.btn_process_data, "button.process_data")
+        self._bind_text(self.btn_open_log_dir, "button.open_logs")
+        self._bind_text(self.btn_open_data_dir, "button.open_data")
+        for button in (
+            self.btn_generate_sim,
+            self.btn_process_data,
+            self.btn_open_log_dir,
+            self.btn_open_data_dir,
+        ):
+            button.setMinimumHeight(42)
+            button.setStyleSheet(self._cmd_button_style)
+            layout.addWidget(button)
+        layout.addStretch(1)
+        root.addWidget(box)
+        root.addStretch(1)
+        self.btn_generate_sim.clicked.connect(
+            lambda: self.on_generate_sim_data and self.on_generate_sim_data()
+        )
+        self.btn_process_data.clicked.connect(lambda: self.on_process_data and self.on_process_data())
+        self.btn_open_log_dir.clicked.connect(
+            lambda: self.on_open_log_dir and self.on_open_log_dir()
+        )
+        self.btn_open_data_dir.clicked.connect(
+            lambda: self.on_open_data_dir and self.on_open_data_dir()
+        )
+        return page
 
     def _configure_dynamic_label(
         self,
         label: QLabel,
         min_width: int,
         *,
-        monospace: bool = True,
         show_tooltip: bool = False,
-        compact: bool = False,
+        compact: bool = True,
     ) -> None:
         label.setMinimumWidth(min_width)
         label.setWordWrap(False)
         label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         label.setProperty("showFullTextToolTip", show_tooltip)
-        if monospace:
-            label.setFont(self._compact_value_font if compact else self._dynamic_value_font)
+        label.setFont(self._compact_value_font if compact else self._dynamic_value_font)
 
     def _set_dynamic_label_text(self, label: QLabel, text: str) -> None:
         label.setText(text)
@@ -270,156 +772,522 @@ class MainWindow(QMainWindow):
         self,
         grid: QGridLayout,
         row: int,
-        col_group: int,
-        name: str,
+        name_key: str,
         value_label: QLabel,
-        value_min_width: int = 96,
-        value_tooltip: bool = False,
-        compact: bool = False,
-    ) -> None:
-        base_col = col_group * 2
-
-        name_label = QLabel(name)
+        value_min_width: int,
+        value_tooltip: bool,
+    ) -> QLabel:
+        name_label = QLabel()
+        self._bind_text(name_label, name_key)
         name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        if compact:
-            name_label.setFont(self._compact_label_font)
-
+        name_label.setFont(self._compact_label_font)
         self._configure_dynamic_label(
             value_label,
             value_min_width,
             show_tooltip=value_tooltip,
-            compact=compact,
+        )
+        grid.addWidget(name_label, row, 0)
+        grid.addWidget(value_label, row, 1)
+        grid.setColumnStretch(1, 1)
+        return name_label
+
+    def _show_calibration_dialog(self) -> None:
+        if self._state is not None:
+            self.calibration_dialog.render(self._state)
+        self.calibration_dialog.show()
+        self.calibration_dialog.raise_()
+        self.calibration_dialog.activateWindow()
+
+    def set_ports(self, ports: list[str]) -> None:
+        current = self.port_combo.currentText()
+        self.port_combo.clear()
+        self.port_combo.addItems(ports)
+        if current:
+            index = self.port_combo.findText(current)
+            if index >= 0:
+                self.port_combo.setCurrentIndex(index)
+
+    def current_port(self) -> str:
+        return self.port_combo.currentText().strip()
+
+    def current_baudrate(self) -> int:
+        return int(self.baud_spin.value())
+
+    def set_connection_status(self, text: str) -> None:
+        self._set_dynamic_label_text(self.conn_label, text)
+
+    def set_data_tools_busy(self, busy: bool) -> None:
+        self._data_tools_busy = bool(busy)
+        self._render_data_tool_buttons()
+
+    def _render_data_tool_buttons(self) -> None:
+        mission = bool(self._state and self._state.mission_started)
+        high_load_enabled = not self._data_tools_busy and not mission
+        self.btn_generate_sim.setEnabled(high_load_enabled)
+        self.btn_process_data.setEnabled(high_load_enabled)
+        # Merely opening the folders is not a high-load operation.
+        self.btn_open_log_dir.setEnabled(True)
+        self.btn_open_data_dir.setEnabled(True)
+
+    def render_state(self) -> None:
+        state = self._state
+        if state is None:
+            return
+
+        self.set_connection_status(self.i18n.format_message(state.connection_message))
+        lifecycle_name = (
+            "UNKNOWN"
+            if state.lifecycle_state is None
+            else enum_name(AirLifecycleState, state.lifecycle_state)
+        )
+        lifecycle = (
+            "—" if state.lifecycle_state is None else self.i18n.enum("lifecycle", lifecycle_name)
+        )
+        yes_no = lambda value: self.i18n.tr("common.yes" if value else "common.no")
+
+        self.lbl_pf_lifecycle.setText(lifecycle)
+        self.lbl_flight_lifecycle.setText(lifecycle)
+        self.lbl_pf_system_ready.setText(yes_no(state.system_ready))
+        self.lbl_pf_selftest.setText(
+            self.i18n.tr("common.pass" if state.selftest_passed else "common.not_ready")
+        )
+        if state.capability_error:
+            capability_text = self.i18n.tr(f"capability.error.{state.capability_error}")
+        elif state.profile_supported is None:
+            capability_text = self.i18n.tr("capability.waiting")
+        elif not state.profile_supported:
+            profile = state.capability.air_profile_id if state.capability else "?"
+            capability_text = self.i18n.tr("capability.unsupported", profile=profile)
+        elif state.capability is not None:
+            capability_text = self.i18n.tr(
+                "capability.profile",
+                profile=state.capability.air_profile_id,
+                accel=state.capability.accel_full_scale_g,
+                gyro=state.capability.gyro_full_scale_dps,
+            )
+        else:
+            capability_text = self.i18n.tr("capability.waiting")
+        self.lbl_pf_capability.setText(capability_text)
+        self._set_semantic_style(
+            self.lbl_pf_capability,
+            "error"
+            if state.capability_error or state.profile_supported is False
+            else "ready"
+            if state.profile_supported is True
+            else "waiting",
+        )
+        self._set_semantic_style(
+            self.lbl_pf_system_ready, "ready" if state.system_ready else "waiting"
+        )
+        self._set_semantic_style(
+            self.lbl_pf_selftest, "ready" if state.selftest_passed else "waiting"
+        )
+        self._render_air_link(state)
+        policy_name = state.command_policy_name()
+        self.lbl_pf_policy.setText(self.i18n.enum("command_policy", policy_name))
+        self.lbl_pf_start_block.setText(
+            self.i18n.enum("ack_result", state.start_block_reason_name())
+        )
+        self.lbl_pf_lock.setText(
+            self.i18n.tr("common.unlocked" if state.start_unlocked else "common.locked")
+        )
+        self.lbl_pf_ground_link.setText(
+            f"{self.i18n.enum('gs_state', state.gs_state)} / "
+            f"{self.i18n.enum('radio_state', state.radio_state)}  "
+            f"TX={state.gs_tx_count} RX={state.gs_rx_count} CRC={state.gs_crc_error_count}"
+        )
+        self.lbl_pf_air_ack.setText(self.i18n.format_message(state.last_air_ack_message))
+
+        calibration = state.calibration
+        self.lbl_cal_mode.setText(
+            self.i18n.enum("calibration_mode", enum_name(AirCalibrationMode, calibration.mode))
+        )
+        self.lbl_cal_state.setText(
+            "—"
+            if calibration.state is None
+            else self.i18n.enum(
+                "calibration_state", enum_name(AirCalibrationState, calibration.state)
+            )
+        )
+        self.lbl_cal_ready.setText(yes_no(calibration.ready))
+        self._set_semantic_style(
+            self.lbl_cal_ready,
+            "error"
+            if calibration.state == int(AirCalibrationState.FAILED)
+            else "ready"
+            if calibration.ready
+            else "waiting",
+        )
+        face_names = CalibrationDialog.FACE_NAMES
+        self.lbl_cal_face.setText(
+            "—"
+            if calibration.current_face == 0xFF or calibration.current_face >= len(face_names)
+            else face_names[calibration.current_face]
+        )
+        self.lbl_cal_progress.setText(
+            " ".join(
+                f"{face_names[face]}{'✓' if calibration.completed_face_mask & (1 << face) else '○'}"
+                for face in range(6)
+            )
         )
 
-        grid.addWidget(name_label, row, base_col)
-        grid.addWidget(value_label, row, base_col + 1)
-
-    def _build_status_panel(self) -> QWidget:
-        box = QGroupBox("状态与链路")
-        grid = QGridLayout(box)
-        grid.setContentsMargins(8, 10, 8, 8)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(2)
-
-        self.lbl_gs_state = QLabel("—")
-        self.lbl_radio_state = QLabel("—")
-        self.lbl_tx_cnt = QLabel("0")
-        self.lbl_rx_cnt = QLabel("0")
-        self.lbl_crc_err = QLabel("0")
-
-        self.lbl_rssi = QLabel("— dBm")
-        self.lbl_snr = QLabel("— dB")
-        self.lbl_last_status = QLabel("—")
-        self.lbl_last_gs_ack = QLabel("—")
-        self.lbl_last_air_ack = QLabel("—")
-
-        self._add_value_pair(grid, 0, 0, "地面站状态", self.lbl_gs_state, 260, True, True)
-        self._add_value_pair(grid, 1, 0, "无线状态", self.lbl_radio_state, 260, True, True)
-        self._add_value_pair(grid, 2, 0, "TX计数", self.lbl_tx_cnt, 260, True, True)
-        self._add_value_pair(grid, 3, 0, "RX计数", self.lbl_rx_cnt, 260, True, True)
-        self._add_value_pair(grid, 4, 0, "CRC错误", self.lbl_crc_err, 260, True, True)
-        self._add_value_pair(grid, 5, 0, "信号强度", self.lbl_rssi, 260, True, True)
-        self._add_value_pair(grid, 6, 0, "信噪比", self.lbl_snr, 260, True, True)
-        self._add_value_pair(grid, 7, 0, "最近状态事件", self.lbl_last_status, 260, True, True)
-        self._add_value_pair(grid, 8, 0, "最近地面站ACK", self.lbl_last_gs_ack, 260, True, True)
-        self._add_value_pair(grid, 9, 0, "最近天空端ACK", self.lbl_last_air_ack, 260, True, True)
-
-        grid.setColumnStretch(1, 1)
-
-        return box
-
-    def _build_data_area_panel(self) -> QWidget:
-        wrapper = QWidget()
-        layout = QHBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        layout.addWidget(self._build_data_panel(), 1)
-        layout.addWidget(self._build_data_tool_panel(), 0)
-
-        return wrapper
-
-    def _build_data_tool_panel(self) -> QWidget:
-        box = QGroupBox("数据处理")
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(8)
-
-        self.btn_generate_sim = QPushButton("生成模拟\n验证数据")
-        self.btn_process_data = QPushButton("处理数据")
-        self.btn_open_log_dir = QPushButton("打开 logs")
-        self.btn_open_data_dir = QPushButton("打开 data")
-
-        for button in (
-            self.btn_generate_sim,
-            self.btn_process_data,
-            self.btn_open_log_dir,
-            self.btn_open_data_dir,
-        ):
-            button.setMinimumWidth(130)
-            button.setMinimumHeight(36)
-            button.setStyleSheet(
-                "QPushButton { padding: 6px 8px; }"
-                "QPushButton:disabled {"
-                "background-color: #2b2b2b;"
-                "color: #8a8a8a;"
-                "border: 1px solid #555555;"
-                "}"
+        alignment = state.alignment
+        self.lbl_align_state.setText(
+            "—"
+            if alignment.state is None
+            else self.i18n.enum(
+                "alignment_state", enum_name(AirAlignmentState, alignment.state)
             )
+        )
+        self.lbl_align_ready.setText(yes_no(alignment.ready))
+        self._set_semantic_style(
+            self.lbl_align_ready,
+            "error"
+            if alignment.state == int(AirAlignmentState.FAILED)
+            else "ready"
+            if alignment.ready
+            else "waiting",
+        )
+        capability_mask = state.capability.alignment_capability_mask if state.capability else 0
+        self._render_alignment_source(
+            self.lbl_align_attitude_name,
+            self.lbl_align_attitude,
+            capability_mask,
+            int(AirAlignmentCapability.ATTITUDE),
+            alignment.attitude_ready,
+        )
+        self._render_alignment_source(
+            self.lbl_align_gnss_name,
+            self.lbl_align_gnss,
+            capability_mask,
+            int(AirAlignmentCapability.GNSS_ORIGIN),
+            alignment.gnss_origin_ready,
+        )
+        self._render_alignment_source(
+            self.lbl_align_baro_name,
+            self.lbl_align_baro,
+            capability_mask,
+            int(AirAlignmentCapability.BARO_ORIGIN),
+            alignment.baro_origin_ready,
+        )
+        self.lbl_pf_gnss_usable.setText(yes_no(state.gnss_position_usable))
+        self.lbl_pf_gnss_origin.setText(
+            self.i18n.tr("common.not_supported")
+            if not (capability_mask & int(AirAlignmentCapability.GNSS_ORIGIN))
+            else yes_no(alignment.gnss_origin_ready)
+        )
 
-        self.btn_generate_sim.setMinimumHeight(44)
-        self.btn_process_data.setMinimumHeight(44)
+        health = state.receive_health
+        health_text = self.i18n.tr("common.backlog" if health.is_backlogged() else "common.normal")
+        health_style = "color: #ff5555; font-weight: bold;" if health.is_backlogged() else ""
+        for label in (self.lbl_pf_processing, self.lbl_flight_processing):
+            label.setText(health_text)
+            label.setStyleSheet(health_style)
+            label.setToolTip(health.tooltip())
 
-        layout.addWidget(self.btn_generate_sim)
-        layout.addWidget(self.btn_process_data)
-        layout.addSpacing(8)
-        layout.addWidget(self.btn_open_log_dir)
-        layout.addWidget(self.btn_open_data_dir)
-        layout.addStretch(1)
+        self.lbl_rssi.setText("— dBm" if state.rssi_dbm is None else f"{state.rssi_dbm} dBm")
+        self.lbl_snr.setText("— dB" if state.snr_db is None else f"{state.snr_db:.2f} dB")
+        self.lbl_packet_loss.setText(
+            f"{state.estimated_lost_packets} / {state.expected_flight_packets} "
+            f"({state.packet_loss_rate * 100.0:.2f}%)"
+        )
+        age_ms = (
+            None
+            if state.sensor.host_rx_monotonic_ns is None
+            else max(
+                0.0,
+                (time_monotonic_ns() - state.sensor.host_rx_monotonic_ns) / 1_000_000.0,
+            )
+        )
+        self.lbl_last_packet_age.setText("— ms" if age_ms is None else f"{age_ms:.1f} ms")
+        if state.latest_flight_time_ms is None or state.mission_first_time_ms is None:
+            self.lbl_mission_time.setText("—")
+        else:
+            mission_s = max(0.0, (state.latest_flight_time_ms - state.mission_first_time_ms) / 1000.0)
+            self.lbl_mission_time.setText(f"{mission_s:.1f} s")
 
-        self.btn_generate_sim.clicked.connect(lambda: self.on_generate_sim_data and self.on_generate_sim_data())
-        self.btn_process_data.clicked.connect(lambda: self.on_process_data and self.on_process_data())
-        self.btn_open_log_dir.clicked.connect(lambda: self.on_open_log_dir and self.on_open_log_dir())
-        self.btn_open_data_dir.clicked.connect(lambda: self.on_open_data_dir and self.on_open_data_dir())
+        self._render_sensor(state)
+        self._render_commands(state)
+        self._render_events()
+        self._render_plots(state)
+        self._render_data_tool_buttons()
+        if self.calibration_dialog.isVisible():
+            self.calibration_dialog.render(state)
 
-        return box
+        if (
+            state.mission_started
+            and self._auto_switched_session_generation != state.session_generation
+        ):
+            self.pages.setCurrentWidget(self.flight_page)
+            self._auto_switched_session_generation = state.session_generation
 
-    def _build_data_panel(self) -> QWidget:
-        box = QGroupBox("实时数据")
-        grid = QGridLayout(box)
-        grid.setContentsMargins(8, 10, 8, 8)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(2)
+    def _render_air_link(self, state: FlightControllerState) -> None:
+        diagnostics = state.handshake
+        handshake_state = diagnostics.handshake_state
+        localized_state = self.i18n.tr(f"handshake.{handshake_state.value}")
+        air_result_name = (
+            "—"
+            if diagnostics.air_ack_result is None
+            else self.i18n.enum(
+                "ack_result", enum_name(AirAckResult, diagnostics.air_ack_result)
+            )
+        )
+        if handshake_state is HandshakeState.ACKED:
+            text = localized_state
+        else:
+            text = self.i18n.tr(
+                "handshake.summary",
+                cap_seq="—" if diagnostics.last_capability_seq is None else diagnostics.last_capability_seq,
+                cmd_seq="—" if diagnostics.capability_ack_cmd_seq is None else diagnostics.capability_ack_cmd_seq,
+                attempts=diagnostics.capability_ack_attempts,
+                gsp_ok=diagnostics.gsp_air_tx_ack_ok,
+                gsp_fail=diagnostics.gsp_air_tx_ack_fail,
+                air_result=air_result_name,
+            )
+        self.lbl_pf_air_link.setText(text)
+        gsp_result = (
+            "—"
+            if diagnostics.last_gsp_air_tx_ack_result is None
+            else self.i18n.enum(
+                "gsp_ack_result",
+                enum_name(GspAckResult, diagnostics.last_gsp_air_tx_ack_result),
+            )
+        )
+        self.lbl_pf_air_link.setToolTip(
+            self.i18n.tr(
+                "handshake.tooltip",
+                state=localized_state,
+                cap_seq="—" if diagnostics.last_capability_seq is None else diagnostics.last_capability_seq,
+                accepted_cap_seq=(
+                    "—"
+                    if diagnostics.accepted_capability_seq is None
+                    else diagnostics.accepted_capability_seq
+                ),
+                cmd_seq="—" if diagnostics.capability_ack_cmd_seq is None else diagnostics.capability_ack_cmd_seq,
+                attempts=diagnostics.capability_ack_attempts,
+                requests=diagnostics.gsp_air_tx_requests,
+                serial_writes=diagnostics.gsp_air_tx_serial_writes,
+                serial_bytes=diagnostics.serial_tx_bytes,
+                gsp_ok=diagnostics.gsp_air_tx_ack_ok,
+                gsp_fail=diagnostics.gsp_air_tx_ack_fail,
+                gs_tx=state.gs_tx_count,
+                gs_rx=state.gs_rx_count,
+                gs_crc=state.gs_crc_error_count,
+                air_ack_rx=diagnostics.air_ack_rx,
+                air_result=air_result_name,
+                pstatus=yes_no_text(self.i18n, diagnostics.preflight_status_capability_acked),
+                by_air_ack=yes_no_text(self.i18n, diagnostics.capability_acked_by_air_ack),
+                by_pstatus=yes_no_text(
+                    self.i18n, diagnostics.capability_acked_by_preflight_status
+                ),
+                duplicates=diagnostics.duplicate_capability_after_ack,
+                error=diagnostics.last_handshake_error or "—",
+                gsp_result=gsp_result,
+            )
+        )
+        color = {
+            HandshakeState.ACKED: "#35b96f",
+            HandshakeState.HANDSHAKING: "#d7a928",
+            HandshakeState.ERROR: "#e04b4b",
+            HandshakeState.WAITING: "#888888",
+        }[handshake_state]
+        self.lbl_pf_air_link.setStyleSheet(f"color: {color}; font-weight: bold;")
 
-        self.lbl_accel = QLabel("X: —  Y: —  Z: —")
-        self.lbl_gyro = QLabel("X: —  Y: —  Z: —")
-        self.lbl_quat_raw = QLabel("W: —  X: —  Y: —  Z: —")
-        self.lbl_quat = QLabel("W: —  X: —  Y: —  Z: —  valid=—")
-        self.lbl_euler = QLabel("R: —  P: —  Y: —")
+    @staticmethod
+    def _set_semantic_style(label: QLabel, state: str) -> None:
+        color = {
+            "ready": "#35b96f",
+            "waiting": "#d7a928",
+            "error": "#e04b4b",
+            "unknown": "#888888",
+        }.get(state, "#888888")
+        label.setStyleSheet(f"color: {color}; font-weight: bold;")
 
-        self.lbl_vel = QLabel("X: —  Y: —  Z: —")
-        self.lbl_pos = QLabel("X: —  Y: —  Z: —")
+    def _render_alignment_source(
+        self,
+        name_label: QLabel,
+        label: QLabel,
+        capability_mask: int,
+        source_bit: int,
+        ready: bool,
+    ) -> None:
+        supported = bool(capability_mask & source_bit)
+        name_label.setVisible(supported)
+        label.setVisible(supported)
+        if supported:
+            label.setText(self.i18n.tr("common.ready" if ready else "common.wait"))
 
-        self._add_value_pair(grid, 0, 0, "加速度 (m/s²)", self.lbl_accel, 360, False, True)
-        self._add_value_pair(grid, 1, 0, "角速度 (rad/s)", self.lbl_gyro, 360, False, True)
-        self._add_value_pair(grid, 2, 0, "Q raw", self.lbl_quat_raw, 460, True, True)
-        self._add_value_pair(grid, 3, 0, "Q norm", self.lbl_quat, 460, True, True)
-        self._add_value_pair(grid, 4, 0, "欧拉角 (rad)", self.lbl_euler, 460, True, True)
-        self._add_value_pair(grid, 5, 0, "速度 (m/s)", self.lbl_vel, 360, False, True)
-        self._add_value_pair(grid, 6, 0, "位置 (m)", self.lbl_pos, 360, False, True)
+    def _render_sensor(self, state: FlightControllerState) -> None:
+        sensor = state.sensor
+        if sensor.revision == self._last_sensor_revision:
+            return
+        self._last_sensor_revision = sensor.revision
 
-        grid.setColumnStretch(1, 1)
+        accel_text = self._format_vector(sensor.accel_mps2, "X", "Y", "Z")
+        gyro_text = self._format_vector(sensor.gyro_radps, "X", "Y", "Z")
+        if sensor.accel_mps2 is None and sensor.accel_raw is not None:
+            accel_text = self.i18n.tr("sensor.wait_capability_raw", raw=sensor.accel_raw)
+        if sensor.gyro_radps is None and sensor.gyro_raw is not None:
+            gyro_text = self.i18n.tr("sensor.wait_capability_raw", raw=sensor.gyro_raw)
+        quat_raw_text = self._format_int_vector(sensor.quat_q15, ("W", "X", "Y", "Z"))
+        quat_text = self._format_vector(sensor.quat, "W", "X", "Y", "Z")
+        if sensor.quat is not None:
+            quat_text += "  " + self.i18n.tr(
+                "sensor.quat_valid" if sensor.quat_valid else "sensor.quat_invalid"
+            )
+        euler_text = self._format_vector(sensor.euler_rpy, "R", "P", "Y")
 
-        return box
+        self.lbl_pf_accel.setText(accel_text)
+        self.lbl_pf_gyro.setText(gyro_text)
+        self.lbl_pf_quat_raw.setText(quat_raw_text)
+        self.lbl_pf_quat.setText(quat_text)
+        self.lbl_pf_euler.setText(euler_text)
+        self.lbl_flight_accel.setText(accel_text)
+        self.lbl_flight_gyro.setText(gyro_text)
+        self.lbl_flight_quat.setText(quat_text)
+        self.lbl_flight_euler.setText(euler_text)
+        self.lbl_flight_vel.setText(self._format_vector(sensor.velocity_mps, "E", "N", "U"))
+        self.lbl_flight_pos.setText(self._format_vector(sensor.position_m, "E", "N", "U"))
 
-    def _build_plot_panel(self) -> QWidget:
-        box = QGroupBox("实时曲线（速度 / 位置）")
+        if sensor.quat is not None:
+            self.latest_quat = sensor.quat
+            if sensor.euler_rpy is not None:
+                self.latest_euler = sensor.euler_rpy
+            if sensor.quat_valid:
+                self._apply_quat_to_mesh(sensor.quat)
 
-        self.plot_layout = QGridLayout(box)
-        self.plot_layout.setHorizontalSpacing(8)
-        self.plot_layout.setVerticalSpacing(8)
+    def _render_commands(self, state: FlightControllerState) -> None:
+        link_allowed = state.air_command_link_allowed()
+        preflight_allowed = link_allowed and not state.pending_command_name
+        self.btn_ping.setEnabled(link_allowed and not state.pending_command_name)
+        self.btn_lock.setEnabled(preflight_allowed and state.start_unlocked)
+        self.btn_unlock.setEnabled(preflight_allowed and not state.start_unlocked)
+        self.btn_start.setEnabled(state.start_ready())
+        self.btn_calibration.setEnabled(preflight_allowed)
+        self.btn_align_start.setEnabled(preflight_allowed and state.calibration.ready)
+        self.btn_align_stop.setEnabled(preflight_allowed)
+        self.btn_align_reset.setEnabled(preflight_allowed)
 
-        return box
+        if state.capability_error:
+            reason = self.i18n.tr(f"capability.error.{state.capability_error}")
+        elif state.profile_supported is False:
+            reason = self.i18n.tr(
+                "capability.unsupported",
+                profile=state.capability.air_profile_id if state.capability else "?",
+            )
+        elif not state.capability_acked:
+            reason = self.i18n.tr("start.wait_capability")
+        elif state.pending_command_name:
+            reason = self.i18n.tr("start.wait_pending", command=state.pending_command_name)
+        elif not state.calibration.ready:
+            reason = self.i18n.enum("ack_result", "CALIBRATION_REQUIRED")
+        elif not state.alignment.ready:
+            reason = self.i18n.enum("ack_result", "ALIGNMENT_REQUIRED")
+        elif not state.system_ready:
+            reason = self.i18n.enum("ack_result", "SYSTEM_NOT_READY")
+        elif not state.start_unlocked:
+            reason = self.i18n.enum("ack_result", "LOCKED_REQUIRED")
+        else:
+            reason = self.i18n.enum("ack_result", state.start_block_reason_name())
+        self._set_dynamic_label_text(self.lbl_start_reason, reason)
+        self.lbl_start_reason.setToolTip(
+            self.i18n.tr(
+                "start.tooltip",
+                reason=reason,
+                hint=self.i18n.format_message(state.radio_message),
+                ack=self.i18n.format_message(state.last_air_ack_message),
+            )
+        )
+
+    def _render_events(self) -> None:
+        if self._events is None or self._events.revision == self._last_event_revision:
+            return
+        self._last_event_revision = self._events.revision
+        self.event_list.clear()
+        for event in reversed(self._events.snapshot()):
+            self.event_list.addItem(self._format_event(event))
+
+    def _format_event(self, event) -> str:
+        name = self.i18n.enum("status", event.name)
+        detail = ""
+        if event.status_id == int(AirStatusId.GNSS_POSITION):
+            value = (
+                self.i18n.tr("event.gnss.usable")
+                if event.arg0 == 1
+                else self.i18n.tr("event.gnss.unusable")
+                if event.arg0 == 0
+                else f"UNKNOWN({event.arg0})"
+            )
+            detail = self.i18n.tr("event.detail.gnss", value=value)
+        elif event.status_id == int(AirStatusId.CALIBRATION_FACE):
+            faces = CalibrationDialog.FACE_NAMES
+            face = faces[event.arg0] if 0 <= event.arg0 < len(faces) else str(event.arg0)
+            result = self.i18n.tr(
+                "event.face.passed" if event.arg1 == 1 else "event.face.failed"
+            )
+            detail = self.i18n.tr("event.detail.face", face=face, result=result)
+        elif event.status_id == int(AirStatusId.CALIBRATION):
+            detail = self.i18n.tr(
+                "event.detail.calibration",
+                state=self.i18n.enum(
+                    "calibration_state", enum_name(AirCalibrationState, event.arg0)
+                ),
+            )
+        elif event.status_id == int(AirStatusId.ALIGNMENT):
+            detail = self.i18n.tr(
+                "event.detail.alignment",
+                state=self.i18n.enum(
+                    "alignment_state", enum_name(AirAlignmentState, event.arg0)
+                ),
+            )
+        if detail:
+            name = f"{name} {detail}"
+        return self.i18n.tr(
+            "event.line",
+            time_ms=event.time_ms,
+            name=name,
+            arg0=event.arg0,
+            arg1=event.arg1,
+        )
+
+    def _render_plots(self, state: FlightControllerState) -> None:
+        plot = state.live_plot
+        if plot.revision == self._last_plot_revision:
+            return
+        self._last_plot_revision = plot.revision
+        times, velocity, position = plot.snapshot()
+        values = {"vel": velocity, "pos": position}
+        for (key, axis), curve in self.curves.items():
+            curve.setData(times, values[key][axis])
+            if times:
+                latest = times[-1]
+                self.plot_widgets[(key, axis)].setXRange(
+                    latest - PLOT_WINDOW_SECONDS,
+                    latest,
+                    padding=0,
+                )
+
+    def refresh_plots(self) -> None:
+        if self._state is not None:
+            self._last_plot_revision = -1
+            self._render_plots(self._state)
+
+    def clear_vector_series(self) -> None:
+        if self._state is not None:
+            self._state.live_plot.clear()
+            self.refresh_plots()
+
+    @staticmethod
+    def _format_vector(values, *labels: str) -> str:
+        if values is None:
+            return "—"
+        return "  ".join(f"{label}:{float(value):.4f}" for label, value in zip(labels, values))
+
+    @staticmethod
+    def _format_int_vector(values, labels: tuple[str, ...]) -> str:
+        if values is None:
+            return "—"
+        return "  ".join(f"{label}:{int(value)}" for label, value in zip(labels, values))
 
     def _build_3d_scene(self) -> None:
         self._reset_3d_camera()
@@ -517,7 +1385,6 @@ class MainWindow(QMainWindow):
         self.base_colors = colors.copy()
 
         mesh_data = gl.MeshData(vertexes=verts, faces=faces, faceColors=colors)
-
         self.mesh_item = gl.GLMeshItem(
             meshdata=mesh_data,
             smooth=False,
@@ -525,7 +1392,6 @@ class MainWindow(QMainWindow):
             edgeColor=(1, 1, 1, 1),
             shader="shaded",
         )
-
         self.gl_view.addItem(self.mesh_item)
 
         self.body_axis_origin = np.array([0.0, 0.0, 0.0], dtype=float)
@@ -581,7 +1447,9 @@ class MainWindow(QMainWindow):
     def _set_3d_camera_unlocked(self, unlocked: bool) -> None:
         """Toggle mouse rotation and panning while preserving wheel zoom."""
         self.gl_view.set_camera_locked(not unlocked)
-        self.btn_toggle_camera_lock.setText("锁定视角" if unlocked else "解锁视角")
+        self.btn_toggle_camera_lock.setText(
+            self.i18n.tr("camera.lock" if unlocked else "camera.unlock")
+        )
 
     def _reset_3d_camera(self) -> None:
         """Restore the shared default camera position and observation center."""
@@ -608,295 +1476,39 @@ class MainWindow(QMainWindow):
 
     def _build_plots(self) -> None:
         pg.setConfigOptions(antialias=True)
-
         titles = [
-            ("速度 X (m/s)", "vel", 0),
-            ("速度 Y (m/s)", "vel", 1),
-            ("速度 Z (m/s)", "vel", 2),
-            ("位置 X (m)", "pos", 0),
-            ("位置 Y (m)", "pos", 1),
-            ("位置 Z (m)", "pos", 2),
+            ("plot.velocity_e", "vel", 0),
+            ("plot.velocity_n", "vel", 1),
+            ("plot.velocity_u", "vel", 2),
+            ("plot.position_e", "pos", 0),
+            ("plot.position_n", "pos", 1),
+            ("plot.position_u", "pos", 2),
         ]
-
         self.curves = {}
         self.plot_widgets = {}
-
-        for idx, (title, key, axis) in enumerate(titles):
-            row, col = divmod(idx, 3)
-
-            plot_widget = pg.PlotWidget(title=title)
+        self.plot_title_keys = {}
+        for index, (title_key, key, axis) in enumerate(titles):
+            row, column = divmod(index, 3)
+            plot_widget = pg.PlotWidget(title=self.i18n.tr(title_key))
             plot_widget.setMinimumSize(240, 190)
             plot_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            plot_widget.setLabel("bottom", "任务时间 / s")
+            plot_widget.setLabel("bottom", self.i18n.tr("plot.mission_time"))
             plot_widget.disableAutoRange(axis=pg.ViewBox.XAxis)
             plot_widget.getAxis("left").setWidth(72)
             plot_widget.getAxis("bottom").setHeight(32)
-
             curve = plot_widget.plot(pen=pg.mkPen(width=2))
-
-            self.plot_layout.addWidget(plot_widget, row, col)
+            self.plot_layout.addWidget(plot_widget, row, column)
             self.curves[(key, axis)] = curve
             self.plot_widgets[(key, axis)] = plot_widget
+            self.plot_title_keys[(key, axis)] = title_key
 
-    def set_ports(self, ports: list[str]) -> None:
-        current = self.port_combo.currentText()
-
-        self.port_combo.clear()
-        self.port_combo.addItems(ports)
-
-        if current:
-            idx = self.port_combo.findText(current)
-            if idx >= 0:
-                self.port_combo.setCurrentIndex(idx)
-
-    def current_port(self) -> str:
-        return self.port_combo.currentText().strip()
-
-    def current_baudrate(self) -> int:
-        return int(self.baud_spin.value())
-
-    def current_accel_full_scale_g(self) -> float:
-        text = self.accel_fs_combo.currentText().strip().replace("±", "").replace("g", "")
-        try:
-            return float(text)
-        except ValueError:
-            return float(ACCEL_FULL_SCALE_G)
-
-    def current_gyro_full_scale_dps(self) -> float:
-        text = self.gyro_fs_combo.currentText().strip().replace("±", "").replace("dps", "")
-        try:
-            return float(text)
-        except ValueError:
-            return float(GYRO_FULL_SCALE_DPS)
-
-    def set_connection_status(self, text: str) -> None:
-        self._set_dynamic_label_text(self.conn_label, text)
-
-    def set_radio_state_hint(self, text: str) -> None:
-        self._set_dynamic_label_text(self.lbl_radio_state, text)
-
-    def set_command_buttons_enabled(
-        self,
-        *,
-        ping: bool,
-        lock: bool,
-        unlock: bool,
-        start: bool,
-    ) -> None:
-        self.btn_ping.setEnabled(ping)
-        self.btn_lock.setEnabled(lock)
-        self.btn_unlock.setEnabled(unlock)
-        self.btn_start.setEnabled(start)
-
-    def _refresh_data_tool_buttons(self) -> None:
-        if not hasattr(self, "btn_generate_sim") or not hasattr(self, "btn_process_data"):
+    def _retranslate_plots(self) -> None:
+        if not hasattr(self, "plot_widgets"):
             return
-
-        process_enabled = (not self._data_tools_busy) and (not self._data_tools_mission_disabled)
-        folder_enabled = not self._data_tools_mission_disabled
-
-        self.btn_generate_sim.setEnabled(process_enabled)
-        self.btn_process_data.setEnabled(process_enabled)
-
-        if hasattr(self, "btn_open_log_dir"):
-            self.btn_open_log_dir.setEnabled(folder_enabled)
-        if hasattr(self, "btn_open_data_dir"):
-            self.btn_open_data_dir.setEnabled(folder_enabled)
-
-    def set_data_tools_busy(self, busy: bool) -> None:
-        self._data_tools_busy = bool(busy)
-        self._refresh_data_tool_buttons()
-
-    def set_data_tools_mission_disabled(self, disabled: bool) -> None:
-        self._data_tools_mission_disabled = bool(disabled)
-        self._refresh_data_tool_buttons()
-
-    def set_command_state_initial(self) -> None:
-        """Initial UI state: air side is assumed LOCKED."""
-        self._command_state_mission_started = False
-        self.set_data_tools_mission_disabled(False)
-        self.set_command_buttons_enabled(
-            ping=True,
-            lock=False,
-            unlock=True,
-            start=False,
-        )
-
-    def set_command_state_locked(self) -> None:
-        if self._command_state_mission_started:
-            return
-
-        self.set_data_tools_mission_disabled(False)
-        self.set_command_buttons_enabled(
-            ping=True,
-            lock=False,
-            unlock=True,
-            start=False,
-        )
-
-    def set_command_state_unlocked(self) -> None:
-        if self._command_state_mission_started:
-            return
-
-        self.set_data_tools_mission_disabled(False)
-        self.set_command_buttons_enabled(
-            ping=True,
-            lock=True,
-            unlock=False,
-            start=True,
-        )
-
-    def set_command_state_mission(self) -> None:
-        self._command_state_mission_started = True
-        self.clear_vector_series()
-        self.set_data_tools_mission_disabled(True)
-        self.set_command_buttons_enabled(
-            ping=False,
-            lock=False,
-            unlock=False,
-            start=False,
-        )
-
-    def reset_runtime_display(self) -> None:
-        self._set_dynamic_label_text(self.lbl_gs_state, "—")
-        self._set_dynamic_label_text(self.lbl_radio_state, "—")
-        self._set_dynamic_label_text(self.lbl_tx_cnt, "0")
-        self._set_dynamic_label_text(self.lbl_rx_cnt, "0")
-        self._set_dynamic_label_text(self.lbl_crc_err, "0")
-
-        self._set_dynamic_label_text(self.lbl_rssi, "— dBm")
-        self._set_dynamic_label_text(self.lbl_snr, "— dB")
-        self._set_dynamic_label_text(self.lbl_last_status, "—")
-        self._set_dynamic_label_text(self.lbl_last_gs_ack, "—")
-        self._set_dynamic_label_text(self.lbl_last_air_ack, "—")
-
-        self._set_dynamic_label_text(self.lbl_accel, "X: —  Y: —  Z: —")
-        self._set_dynamic_label_text(self.lbl_gyro, "X: —  Y: —  Z: —")
-        self._set_dynamic_label_text(self.lbl_quat_raw, "W: —  X: —  Y: —  Z: —")
-        self._set_dynamic_label_text(self.lbl_quat, "W: —  X: —  Y: —  Z: —  valid=—")
-        self._set_dynamic_label_text(self.lbl_euler, "R: —  P: —  Y: —")
-        self._set_dynamic_label_text(self.lbl_vel, "X: —  Y: —  Z: —")
-        self._set_dynamic_label_text(self.lbl_pos, "X: —  Y: —  Z: —")
-
-        self.clear_vector_series()
-
-        self.latest_quat = (1.0, 0.0, 0.0, 0.0)
-        self.latest_euler = (0.0, 0.0, 0.0)
-        self._apply_quat_to_mesh(self.latest_quat)
-        self.set_command_state_initial()
-
-    def update_gs_status(
-        self,
-        gs_state: str,
-        radio_state: str,
-        tx_cnt: int,
-        rx_cnt: int,
-        crc_err: int,
-    ) -> None:
-        self._set_dynamic_label_text(self.lbl_gs_state, gs_state)
-        self._set_dynamic_label_text(self.lbl_radio_state, radio_state)
-        self._set_dynamic_label_text(self.lbl_tx_cnt, str(tx_cnt))
-        self._set_dynamic_label_text(self.lbl_rx_cnt, str(rx_cnt))
-        self._set_dynamic_label_text(self.lbl_crc_err, str(crc_err))
-
-    def update_link_quality(self, rssi_dbm: int | None, snr_db: float | None) -> None:
-        self._set_dynamic_label_text(self.lbl_rssi, "— dBm" if rssi_dbm is None else f"{rssi_dbm} dBm")
-        self._set_dynamic_label_text(self.lbl_snr, "— dB" if snr_db is None else f"{snr_db:.2f} dB")
-
-    def set_last_status(self, text: str) -> None:
-        self._set_dynamic_label_text(self.lbl_last_status, text)
-
-    def set_last_gs_ack(self, text: str) -> None:
-        self._set_dynamic_label_text(self.lbl_last_gs_ack, text)
-
-    def set_last_air_ack(self, text: str) -> None:
-        self._set_dynamic_label_text(self.lbl_last_air_ack, text)
-
-    def update_quat(
-        self,
-        values: tuple[float, float, float, float],
-        raw: tuple[int, int, int, int] | None = None,
-        valid: bool = True,
-        source: str | None = None,
-    ) -> None:
-        self.latest_quat = values
-        source_prefix = f"{source} " if source else ""
-        if raw is None:
-            self._set_dynamic_label_text(self.lbl_quat_raw, f"{source_prefix}W: —  X: —  Y: —  Z: —")
-        else:
-            self._set_dynamic_label_text(
-                self.lbl_quat_raw,
-                f"{source_prefix}W:{raw[0]}  X:{raw[1]}  Y:{raw[2]}  Z:{raw[3]}",
-            )
-
-        valid_suffix = "valid=1" if valid else "valid=0 INVALID/raw=0"
-        self._set_dynamic_label_text(
-            self.lbl_quat,
-            (
-                f"{source_prefix}W:{values[0]:.4f}  X:{values[1]:.4f}  "
-                f"Y:{values[2]:.4f}  Z:{values[3]:.4f}  {valid_suffix}"
-            ),
-        )
-
-        euler = self._quat_to_euler_rpy(values)
-        self.latest_euler = euler
-        euler_suffix = "" if valid else "  INVALID/raw=0"
-        self._set_dynamic_label_text(
-            self.lbl_euler,
-            f"R:{euler[0]:.4f}  P:{euler[1]:.4f}  Y:{euler[2]:.4f}{euler_suffix}",
-        )
-
-        if valid:
-            self._apply_quat_to_mesh(values)
-
-    def clear_vector_series(self) -> None:
-        for key in self.series:
-            self.series_time[key].clear()
-            for axis in range(3):
-                self.series[key][axis].clear()
-        self.refresh_plots()
-
-    def push_vector_sample(
-        self,
-        key: str,
-        values: tuple[float, float, float],
-        time_s: float,
-    ) -> None:
-        if key in self.series:
-            self.series_time[key].append(time_s)
-            for i in range(3):
-                self.series[key][i].append(values[i])
-            self.refresh_plots()
-
-        if key == "accel":
-            self._set_dynamic_label_text(
-                self.lbl_accel,
-                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
-            )
-        elif key == "gyro":
-            self._set_dynamic_label_text(
-                self.lbl_gyro,
-                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
-            )
-        elif key == "vel":
-            self._set_dynamic_label_text(
-                self.lbl_vel,
-                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
-            )
-        elif key == "pos":
-            self._set_dynamic_label_text(
-                self.lbl_pos,
-                f"X:{values[0]:.4f}  Y:{values[1]:.4f}  Z:{values[2]:.4f}",
-            )
-
-    def refresh_plots(self) -> None:
-        for (key, axis), curve in self.curves.items():
-            x = list(self.series_time[key])
-            y = list(self.series[key][axis])
-            curve.setData(x, y)
-            if x:
-                self.plot_widgets[(key, axis)].setXRange(min(x), max(x), padding=0)
+        for key, plot_widget in self.plot_widgets.items():
+            plot_widget.setTitle(self.i18n.tr(self.plot_title_keys[key]))
+            plot_widget.setLabel("bottom", self.i18n.tr("plot.mission_time"))
 
     def _normalize_quat(
         self,
@@ -904,39 +1516,9 @@ class MainWindow(QMainWindow):
     ) -> tuple[float, float, float, float] | None:
         w, x, y, z = quat
         norm = (w * w + x * x + y * y + z * z) ** 0.5
-
         if norm == 0:
             return None
-
         return w / norm, x / norm, y / norm, z / norm
-
-    def _quat_to_euler_rpy(
-        self,
-        quat: tuple[float, float, float, float],
-    ) -> tuple[float, float, float]:
-        normalized = self._normalize_quat(quat)
-        if normalized is None:
-            return self.latest_euler
-
-        w, x, y, z = normalized
-
-        sinr_cosp = 2.0 * (w * x + y * z)
-        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-        roll = math.atan2(sinr_cosp, cosr_cosp)
-
-        sinp = 2.0 * (w * y - z * x)
-        if sinp >= 1.0:
-            pitch = math.pi / 2.0
-        elif sinp <= -1.0:
-            pitch = -math.pi / 2.0
-        else:
-            pitch = math.asin(sinp)
-
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-
-        return roll, pitch, yaw
 
     def _apply_quat_to_mesh(self, quat: tuple[float, float, float, float]) -> None:
         normalized = self._normalize_quat(quat)
@@ -944,7 +1526,6 @@ class MainWindow(QMainWindow):
             return
 
         w, x, y, z = normalized
-
         rot = np.array(
             [
                 [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -953,14 +1534,26 @@ class MainWindow(QMainWindow):
             ],
             dtype=float,
         )
-
         rotated = self.base_vertices @ rot.T
-
         mesh = gl.MeshData(
             vertexes=rotated,
             faces=self.base_faces,
             faceColors=self.base_colors,
         )
-
         self.mesh_item.setMeshData(meshdata=mesh)
         self._update_body_frame_items(rot)
+
+
+def time_monotonic_ns() -> int:
+    # Kept as a tiny indirection so GUI age rendering can be deterministic in
+    # tests without changing the state model.
+    import time
+
+    return time.monotonic_ns()
+
+
+def yes_no_text(i18n: I18n, value: bool) -> str:
+    return i18n.tr("common.yes" if value else "common.no")
+
+
+__all__ = ["AttitudeGLViewWidget", "CalibrationDialog", "MainWindow"]

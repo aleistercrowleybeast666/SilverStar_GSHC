@@ -11,28 +11,50 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QProgressDialog
 
-from config import (
-    ACCEL_FULL_SCALE_G,
-    APP_NAME,
-    DATA_DIR,
-    DEFAULT_BAUDRATE,
-    GYRO_FULL_SCALE_DPS,
-    LOG_DIR,
-    STANDARD_GRAVITY_MPS2,
-)
+from config import DATA_DIR, DEFAULT_BAUDRATE, LOG_DIR
 from protocol.air import (
+    TOKEN_ALIGNMENT,
+    TOKEN_CALIBRATION,
+    TOKEN_LOCK,
+    TOKEN_START_MISSION,
+    TOKEN_UNLOCK,
     AirAckMessage,
-    AirCmdId,
+    AirCapabilityMessage,
     AirFlightStateMessage,
-    AirQuatStateMessage,
+    AirPreflightStateMessage,
+    AirPreflightStatusMessage,
     AirStatusMessage,
-    AirStatusId,
+    accel_raw_to_mps2,
     build_air_cmd,
-    parse_air_frame,
+    gyro_raw_to_radps,
 )
-from protocol.common import GspType
-from protocol.gsp_min import GspParser, build_pc_to_gs_air_frame, parse_gsp_frame
-from services.logger import JsonlLogger
+from protocol.common import (
+    AirAckResult,
+    AirAlignmentState,
+    AirCalibrationMode,
+    AirCalibrationState,
+    AirCmdId,
+    AirCommandPolicy,
+    GspAckResult,
+    GspType,
+    AirLifecycleState,
+    AirStatusId,
+    enum_name,
+)
+from protocol.gsp_min import GsStatus, GspAck, build_pc_to_gs_air_frame
+from protocol.receive_pipeline import ProtocolEvent
+from services.logger import AsyncJsonlLogger
+from services.i18n import EnumParam, I18n
+from services.state_model import (
+    EventHistory,
+    FlightControllerState,
+    FlightEvent,
+    HandshakeState,
+    SensorSnapshot,
+    UiMessage,
+    quat_to_euler_rpy,
+)
+from transport.protocol_worker import ProtocolBatch, ProtocolWorker, ProtocolWorkerDiagnostics
 from transport.serial_backend import SerialConfig, SerialLink, list_serial_port_names
 from ui.main_window import MainWindow
 
@@ -52,52 +74,58 @@ RADIO_STATE_MAP = {
     0x04: "BUSY",
 }
 
-STATUS_MAP = {
-    AirStatusId.BOOT: "BOOT",
-    AirStatusId.SELFTEST_OK: "SELFTEST_OK",
-    AirStatusId.MISSION_START: "MISSION_START",
-    AirStatusId.LAUNCH: "LAUNCH",
-    AirStatusId.PARACHUTE_DEPLOY: "PARACHUTE_DEPLOY",
-    AirStatusId.LANDING: "LANDING",
-    AirStatusId.LOCKED: "LOCKED",
-    AirStatusId.UNLOCKED: "UNLOCKED",
-    AirStatusId.GNSS_POSITION: "GNSS_POSITION",
-}
-
-
-def format_air_status_message(msg: AirStatusMessage) -> str:
-    """Format an AIR status event for the existing latest-status label."""
-    status_text = STATUS_MAP.get(msg.status_id, f"0x{msg.status_id:02X}")
-    if msg.status_id == AirStatusId.GNSS_POSITION:
-        if msg.arg0 == 1:
-            status_text += " 定位可用"
-        elif msg.arg0 == 0:
-            status_text += " 定位不可用"
-        else:
-            status_text += f" UNKNOWN(arg0={msg.arg0})"
-    return f"{status_text} @ {msg.time_ms} ms"
-
-
-ACK_RESULT_MAP = {
-    0x00: "OK",
-    0x01: "BAD_LEN",
-    0x02: "BAD_CMD",
-    0x03: "BAD_TOKEN",
-    0x04: "BUSY",
-    0x05: "REJECTED",
-    0x06: "BAD_STATE",
-    0x07: "LOCKED_REQUIRED",
-    0x08: "ALREADY_LOCKED",
-    0x09: "ALREADY_UNLOCKED",
-}
-
-
-# AIR_CMD 是低频人工命令。这里按协议建议实现：等待 AIR_ACK，超时重发。
-# MAX_RETRIES 表示“重发次数”，所以总发送次数 = 1 + MAX_RETRIES。
 AIR_CMD_ACK_TIMEOUT_MS = 800
 AIR_CMD_MAX_RETRIES = 3
 AIR_CMD_RETRY_CHECK_MS = 100
 FLIGHT_TELEMETRY_PERIOD_MS = 200
+
+
+def format_air_status_message(msg: AirStatusMessage, i18n: I18n | None = None) -> str:
+    if i18n is None:
+        status_text = enum_name(AirStatusId, msg.status_id)
+        if msg.status_id == int(AirStatusId.GNSS_POSITION):
+            if msg.arg0 == 1:
+                status_text += " 定位可用"
+            elif msg.arg0 == 0:
+                status_text += " 定位不可用"
+            else:
+                status_text += f" UNKNOWN(arg0={msg.arg0})"
+        elif msg.status_id == int(AirStatusId.CALIBRATION_FACE):
+            face_names = ("X+", "X-", "Y+", "Y-", "Z+", "Z-")
+            face = face_names[msg.arg0] if 0 <= msg.arg0 < len(face_names) else str(msg.arg0)
+            status_text += f" {face} {'PASSED' if msg.arg1 == 1 else 'FAILED'}"
+        elif msg.status_id == int(AirStatusId.CALIBRATION):
+            status_text += f" {enum_name(AirCalibrationState, msg.arg0)}"
+        elif msg.status_id == int(AirStatusId.ALIGNMENT):
+            status_text += f" {enum_name(AirAlignmentState, msg.arg0)}"
+        return f"{status_text} @ {msg.time_ms} ms"
+
+    translator = i18n
+    status_text = translator.enum("status", enum_name(AirStatusId, msg.status_id))
+    if msg.status_id == int(AirStatusId.GNSS_POSITION):
+        if msg.arg0 == 1:
+            status_text += " " + translator.tr("event.gnss.usable")
+        elif msg.arg0 == 0:
+            status_text += " " + translator.tr("event.gnss.unusable")
+        else:
+            status_text += f" UNKNOWN(arg0={msg.arg0})"
+    elif msg.status_id == int(AirStatusId.CALIBRATION_FACE):
+        face_names = ("X+", "X-", "Y+", "Y-", "Z+", "Z-")
+        face = face_names[msg.arg0] if 0 <= msg.arg0 < len(face_names) else str(msg.arg0)
+        status_text += " " + translator.tr(
+            "event.detail.face",
+            face=face,
+            result=translator.tr("event.face.passed" if msg.arg1 == 1 else "event.face.failed"),
+        )
+    elif msg.status_id == int(AirStatusId.CALIBRATION):
+        status_text += " " + translator.enum(
+            "calibration_state", enum_name(AirCalibrationState, msg.arg0)
+        )
+    elif msg.status_id == int(AirStatusId.ALIGNMENT):
+        status_text += " " + translator.enum(
+            "alignment_state", enum_name(AirAlignmentState, msg.arg0)
+        )
+    return f"{status_text} @ {msg.time_ms} ms"
 
 
 @dataclass
@@ -112,6 +140,18 @@ class PendingAirCommand:
     sent_count: int
     max_retries: int
     last_send_monotonic: float
+
+
+@dataclass
+class PendingCapabilityAck:
+    capability_seq: int
+    air_profile_id: int
+    command_seq: int
+    air_frame: bytes
+    gsp_frame: bytes
+    sent_count: int = 0
+    max_retries: int = AIR_CMD_MAX_RETRIES
+    last_send_monotonic: float = 0.0
 
 
 class ProcessingWorker(QObject):
@@ -130,11 +170,11 @@ class ProcessingWorker(QObject):
 
             processor = FlightLogProcessor(output_root=self.output_root, gif_fps=5)
 
-            def progress(done: int, total: int, msg: str) -> None:
-                self.progress.emit(int(done), int(total), str(msg))
+            def progress(done: int, total: int, message: str) -> None:
+                self.progress.emit(int(done), int(total), str(message))
 
-            out_dir = processor.process_file(self.log_path, progress=progress)
-            self.finished.emit(str(out_dir))
+            output_dir = processor.process_file(self.log_path, progress=progress)
+            self.finished.emit(str(output_dir))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -145,23 +185,30 @@ class Controller(QObject):
         self.window = window
         self.link = SerialLink()
         self.worker = None
+        self.protocol_worker: ProtocolWorker | None = None
+        self.logger = AsyncJsonlLogger(auto_start_session=False)
 
-        self.gsp_parser = GspParser()
-        self.logger = JsonlLogger()
+        self._connection_generation = 0
+        self._state_generation = 0
+        self.state = FlightControllerState(session_generation=self._next_state_generation())
+        self.events = EventHistory()
+        self.window.bind_runtime_model(self.state, self.events, select_preflight=True)
 
         self.air_seq = 0
         self.pending_air_cmds: dict[tuple[int, int], PendingAirCommand] = {}
+        self.pending_capability_ack: PendingCapabilityAck | None = None
         self.air_cmd_retry_timer = QTimer(self)
         self.air_cmd_retry_timer.setInterval(AIR_CMD_RETRY_CHECK_MS)
         self.air_cmd_retry_timer.timeout.connect(self._check_air_cmd_timeouts)
         self.air_cmd_retry_timer.start()
+        self.protocol_drain_timer = QTimer(self)
+        self.protocol_drain_timer.setInterval(20)
+        self.protocol_drain_timer.timeout.connect(self._drain_protocol_mailbox)
+        self.protocol_drain_timer.start()
 
         self.processing_thread: QThread | None = None
         self.processing_worker: ProcessingWorker | None = None
         self.processing_dialog: QProgressDialog | None = None
-        self._processing_success_out_dir: str | None = None
-        self._processing_error_text: str | None = None
-        self._last_quat_invalid_hint_monotonic = 0.0
         self.mission_packet_tracking_active = False
         self.last_flight_time_ms: int | None = None
         self.received_flight_packets = 0
@@ -174,12 +221,73 @@ class Controller(QObject):
         self.window.on_send_lock = self.send_lock
         self.window.on_send_unlock = self.send_unlock
         self.window.on_send_start = self.send_start
+        self.window.on_cal_start = self.send_cal_start
+        self.window.on_cal_face = self.send_cal_face
+        self.window.on_cal_stop = self.send_cal_stop
+        self.window.on_cal_reset = self.send_cal_reset
+        self.window.on_align_start = self.send_align_start
+        self.window.on_align_stop = self.send_align_stop
+        self.window.on_align_reset = self.send_align_reset
         self.window.on_generate_sim_data = self.generate_sim_validation_data
         self.window.on_process_data = self.choose_and_process_data
         self.window.on_open_log_dir = self.open_log_dir
         self.window.on_open_data_dir = self.open_data_dir
-
+        self.window.on_language_changed = self._on_language_changed
         self.refresh_ports()
+
+    def _next_state_generation(self) -> int:
+        self._state_generation += 1
+        return self._state_generation
+
+    def _replace_state(self, *, connected: bool, connection_text: str) -> None:
+        self.state = FlightControllerState(
+            session_generation=self._next_state_generation(),
+            connected=connected,
+            connection_text=connection_text,
+        )
+        self.events = EventHistory()
+        self.window.bind_runtime_model(self.state, self.events, select_preflight=True)
+
+    def _set_ui_message(
+        self,
+        message_attr: str,
+        legacy_attr: str,
+        key: str,
+        **params: object,
+    ) -> None:
+        message = UiMessage(key, dict(params))
+        setattr(self.state, message_attr, message)
+        setattr(self.state, legacy_attr, self._translator().format_message(message))
+
+    def _set_connection_message(self, key: str, **params: object) -> None:
+        self._set_ui_message("connection_message", "connection_text", key, **params)
+
+    def _set_radio_message(self, key: str, **params: object) -> None:
+        self._set_ui_message("radio_message", "radio_hint", key, **params)
+
+    def _set_air_ack_message(self, key: str, **params: object) -> None:
+        self._set_ui_message("last_air_ack_message", "last_air_ack", key, **params)
+
+    def _set_gsp_ack_message(self, key: str, **params: object) -> None:
+        self._set_ui_message("last_gs_ack_message", "last_gs_ack", key, **params)
+
+    def _tr(self, key: str, **params: object) -> str:
+        return self._translator().tr(key, **params)
+
+    def _translator(self) -> I18n:
+        window = getattr(self, "window", None)
+        translator = getattr(window, "i18n", None)
+        if translator is None:
+            translator = getattr(self, "_fallback_i18n", None)
+        if translator is None:
+            translator = I18n()
+            self._fallback_i18n = translator
+        return translator
+
+    def _on_language_changed(self) -> None:
+        if self.processing_dialog is not None:
+            self.processing_dialog.setWindowTitle(self._tr("message.processing_title"))
+            self.processing_dialog.setLabelText(self._tr("message.processing"))
 
     def refresh_ports(self) -> None:
         self.window.set_ports(list_serial_port_names())
@@ -187,67 +295,293 @@ class Controller(QObject):
     def connect(self) -> None:
         port = self.window.current_port()
         baud = self.window.current_baudrate() or DEFAULT_BAUDRATE
-
         if not port:
-            QMessageBox.warning(self.window, APP_NAME, "请先选择串口")
+            QMessageBox.warning(
+                self.window, self._tr("app.title"), self._tr("message.select_port")
+            )
             return
 
         self.disconnect()
-
-        self.gsp_parser = GspParser()
+        if (
+            self.worker is not None
+            or self.protocol_worker is not None
+            or self.logger.session_active
+        ):
+            QMessageBox.warning(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.previous_session_stopping"),
+            )
+            return
+        self._connection_generation += 1
+        generation = self._connection_generation
+        self._replace_state(connected=False, connection_text=f"正在连接 {port}@{baud}")
+        self._set_connection_message("connection.connecting", endpoint=f"{port}@{baud}")
         self.air_seq = 0
-        self._last_quat_invalid_hint_monotonic = 0.0
         self._clear_pending_air_cmds("重新连接")
+        self._clear_capability_ack("重新连接")
         self._clear_mission_packet_stats()
-        self.window.reset_runtime_display()
+
+        try:
+            self.logger.open_session(
+                "serial_connect",
+                {"port": port, "baudrate": baud, "pc_connection_generation": generation},
+            )
+        except Exception as exc:
+            self._set_connection_message("connection.error", detail=str(exc))
+            self.state.touch()
+            QMessageBox.critical(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.log_open_failed", error=exc),
+            )
+            return
+
+        self.protocol_worker = ProtocolWorker(generation, self.logger)
+        self.protocol_worker.diagnostics_ready.connect(
+            self.on_protocol_diagnostics,
+            Qt.QueuedConnection,
+        )
+        self.protocol_worker.warning_occurred.connect(self.on_protocol_warning, Qt.QueuedConnection)
+        self.protocol_worker.error_occurred.connect(self.on_error, Qt.QueuedConnection)
+        self.protocol_worker.start()
 
         self.worker = self.link.open(SerialConfig(port=port, baudrate=baud))
-        self.worker.bytes_chunk_received.connect(self.on_bytes_received)
-        self.worker.connection_changed.connect(self.on_connection_changed)
-        self.worker.error_occurred.connect(self.on_error)
+        self.worker.bytes_chunk_received.connect(
+            self.protocol_worker.enqueue_chunk,
+            Qt.DirectConnection,
+        )
+        self.worker.bytes_sent.connect(
+            lambda byte_count, current_generation=generation: self._on_serial_bytes_sent(
+                current_generation,
+                byte_count,
+            )
+        )
+        self.worker.connection_changed.connect(
+            lambda ok, text, current_generation=generation: self._on_serial_connection_changed(
+                current_generation,
+                ok,
+                text,
+            )
+        )
+        self.worker.error_occurred.connect(
+            lambda text, current_generation=generation: self._on_serial_error(
+                current_generation,
+                text,
+            )
+        )
 
     def disconnect(self) -> None:
+        self._connection_generation += 1
         self._clear_pending_air_cmds("串口断开")
+        self._clear_capability_ack("串口断开")
         self._clear_mission_packet_stats()
-        self.link.close()
+
+        if not self.link.close():
+            self.worker = self.link.worker
+            self.state.connected = False
+            self._set_connection_message(
+                "connection.error", detail="serial worker shutdown timeout"
+            )
+            self.state.receive_health.warning = self.state.connection_text
+            self.state.touch()
+            return
         self.worker = None
-        self.window.reset_runtime_display()
-        self.window.set_connection_status("未连接")
+
+        protocol_worker = self.protocol_worker
+        if protocol_worker is not None:
+            protocol_worker.request_stop()
+            if not protocol_worker.wait(15000):
+                self.state.connected = False
+                self._set_connection_message(
+                    "connection.error", detail="protocol worker drain timeout"
+                )
+                self.state.receive_health.warning = self.state.connection_text
+                self.state.touch()
+                return
+            self.protocol_worker = None
+
+        if self.logger.session_active:
+            try:
+                self.logger.close_session()
+            except Exception as exc:
+                self.state.connected = False
+                self._set_connection_message(
+                    "connection.error", detail=f"logger close failed: {exc}"
+                )
+                self.state.receive_health.warning = f"日志关闭失败: {exc}"
+                self.state.touch()
+                return
+
+        self._replace_state(connected=False, connection_text="未连接")
+
+    def shutdown(self) -> None:
+        self.disconnect()
+        # A normal disconnect has already drained the producer/consumer chain.
+        # If a slow disk or driver exceeded the interactive timeout, make one
+        # final bounded attempt while retaining every running QThread object.
+        if self.link.worker is not None:
+            self.link.close()
+            self.worker = self.link.worker
+        protocol_worker = self.protocol_worker
+        if protocol_worker is not None:
+            protocol_worker.request_stop()
+            if protocol_worker.wait(30000):
+                self.protocol_worker = None
+        if self.protocol_worker is None:
+            self.logger.close()
 
     def on_connection_changed(self, ok: bool, text: str) -> None:
+        self.state.connected = bool(ok)
+        self._set_connection_message(
+            "connection.connected" if ok else "connection.disconnected",
+            detail=text,
+        )
         if not ok:
             self._clear_mission_packet_stats()
-        self.window.set_connection_status(text if ok else f"断开: {text}")
+        self.state.touch()
+
+    def _on_serial_connection_changed(self, generation: int, ok: bool, text: str) -> None:
+        if generation == self._connection_generation:
+            self.on_connection_changed(ok, text)
+
+    def _on_serial_error(self, generation: int, text: str) -> None:
+        if generation == self._connection_generation:
+            self.on_error(text)
+
+    def _on_serial_bytes_sent(self, generation: int, byte_count: int) -> None:
+        if generation != self._connection_generation:
+            return
+        diagnostics = self.state.handshake
+        diagnostics.gsp_air_tx_serial_writes += 1
+        diagnostics.serial_tx_bytes += max(0, int(byte_count))
+        self.state.touch()
 
     def on_error(self, text: str) -> None:
-        self.window.set_connection_status(text)
+        self._set_connection_message("connection.error", detail=str(text))
+        self.state.receive_health.warning = str(text)
+        self.state.touch()
+
+    def on_protocol_warning(self, text: str) -> None:
+        self.state.receive_health.warning = str(text)
+        self.state.touch()
+
+    def on_protocol_diagnostics(self, diagnostics: ProtocolWorkerDiagnostics) -> None:
+        if diagnostics.session_generation != self._connection_generation:
+            return
+        health = self.state.receive_health
+        health.serial_rx_bytes = diagnostics.serial_rx_bytes
+        health.serial_rx_chunks = diagnostics.serial_rx_chunks
+        health.gsp_frames = diagnostics.gsp_frames
+        health.gsp_parse_errors = diagnostics.gsp_parse_errors
+        health.gsp_crc_errors = diagnostics.gsp_crc_errors
+        health.gsp_resyncs = diagnostics.gsp_resyncs
+        health.parser_buffer_size = diagnostics.parser_buffer_size
+        health.air_frames = diagnostics.air_frames
+        health.air_parse_errors = diagnostics.air_parse_errors
+        health.protocol_queue_depth = diagnostics.protocol_queue_depth
+        health.protocol_queue_capacity = diagnostics.protocol_queue_capacity
+        health.ui_mailbox_depth = diagnostics.ui_mailbox_depth
+        health.ui_mailbox_capacity = diagnostics.ui_mailbox_capacity
+        health.ui_coalesced_events = diagnostics.ui_coalesced_events
+        health.logger_queue_depth = self.logger.queue_depth
+        health.logger_queue_capacity = self.logger.queue_max_records
+        health.last_rx_monotonic_ns = diagnostics.last_rx_monotonic_ns
+        health.max_processing_lag_ms = diagnostics.max_processing_lag_ms
+        health.warning = self.logger.last_error or diagnostics.warning
+        self.state.touch()
+
+    def _drain_protocol_mailbox(self) -> None:
+        worker = self.protocol_worker
+        if worker is None:
+            return
+        batch = worker.take_batch(512)
+        if batch is not None:
+            self.on_protocol_batch(batch)
+
+    def on_protocol_batch(self, batch: ProtocolBatch) -> None:
+        if batch.session_generation != self._connection_generation:
+            return
+        for event in batch.events:
+            if event.rssi_dbm is not None:
+                self.state.rssi_dbm = event.rssi_dbm
+                self.state.snr_db = event.snr_db
+            if isinstance(event.parsed_gsp, GsStatus):
+                self._handle_gs_status(event.parsed_gsp)
+            elif isinstance(event.parsed_gsp, GspAck):
+                self._handle_gsp_ack(event.parsed_gsp)
+            if event.air_message is not None:
+                self._handle_air_message(event.air_message, event)
+        self.state.touch()
+
+    def _handle_gsp_ack(self, ack: GspAck) -> None:
+        self._set_gsp_ack_message(
+            "gsp.ack",
+            type=ack.ack_gsp_type,
+            result=enum_name(GspAckResult, ack.result),
+            detail=ack.detail,
+        )
+        if ack.ack_gsp_type != int(GspType.AIR_TX):
+            return
+        diagnostics = self.state.handshake
+        diagnostics.last_gsp_air_tx_ack_result = ack.result
+        if ack.result == int(GspAckResult.OK):
+            diagnostics.gsp_air_tx_ack_ok += 1
+        else:
+            diagnostics.gsp_air_tx_ack_fail += 1
+            if self.pending_capability_ack is not None and not self.state.capability_acked:
+                diagnostics.last_handshake_error = f"GSP_AIR_TX_{enum_name(GspAckResult, ack.result)}"
+
+    def _handle_gs_status(self, status: GsStatus) -> None:
+        self.state.gs_state = GS_STATE_MAP.get(status.gs_state, f"0x{status.gs_state:02X}")
+        self.state.radio_state = RADIO_STATE_MAP.get(
+            status.radio_state,
+            f"0x{status.radio_state:02X}",
+        )
+        self.state.gs_tx_count = status.tx_cnt
+        self.state.gs_rx_count = status.rx_cnt
+        self.state.gs_crc_error_count = status.crc_err_cnt
 
     def _next_air_seq(self) -> int:
         value = self.air_seq
         self.air_seq = (self.air_seq + 1) & 0xFF
         return value
 
-    def _send_air_cmd(self, cmd_id: int, token: int, param0: int = 0, param1: int = 0) -> None:
-        if self.worker is None:
-            QMessageBox.warning(self.window, APP_NAME, "请先连接地面站串口")
+    def _send_air_cmd(
+        self,
+        cmd_id: int,
+        token: int,
+        param0: int = 0,
+        param1: int = 0,
+    ) -> None:
+        if self.worker is None or not self.state.connected:
+            QMessageBox.warning(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.connect_ground_station_first"),
+            )
             return
-
+        if self.pending_capability_ack is not None:
+            self._set_radio_message("radio.capability_priority")
+            return
         if self.pending_air_cmds:
-            self.window.set_radio_state_hint("已有 AIR_CMD 等待 ACK，暂不发送新命令")
+            self._set_radio_message("radio.command_pending")
+            return
+        if not self.state.air_command_link_allowed():
+            self._set_radio_message("radio.command_not_allowed")
             return
 
         seq = self._next_air_seq()
-        air = build_air_cmd(seq, cmd_id, token, param0, param1)
-        gsp = build_pc_to_gs_air_frame(air)
-
+        air_frame = build_air_cmd(seq, cmd_id, token, param0, param1)
+        gsp_frame = build_pc_to_gs_air_frame(air_frame)
         pending = PendingAirCommand(
             seq=seq,
             cmd_id=cmd_id & 0xFF,
             token=token & 0xFFFFFFFF,
             param0=param0 & 0xFF,
             param1=param1 & 0xFF,
-            air_frame=air,
-            gsp_frame=gsp,
+            air_frame=air_frame,
+            gsp_frame=gsp_frame,
             sent_count=0,
             max_retries=AIR_CMD_MAX_RETRIES,
             last_send_monotonic=0.0,
@@ -255,64 +589,196 @@ class Controller(QObject):
         self.pending_air_cmds[(pending.seq, pending.cmd_id)] = pending
         self._transmit_pending_air_cmd(pending, is_retry=False)
 
-    def _transmit_pending_air_cmd(self, pending: PendingAirCommand, *, is_retry: bool) -> None:
+    def _transmit_pending_air_cmd(
+        self,
+        pending: PendingAirCommand,
+        *,
+        is_retry: bool,
+    ) -> None:
         if self.worker is None:
             return
+        self.worker.send_bytes(pending.gsp_frame)
+        self.state.handshake.gsp_air_tx_requests += 1
+        pending.sent_count += 1
+        pending.last_send_monotonic = time.monotonic()
+        command_name = enum_name(AirCmdId, pending.cmd_id)
+        self.state.pending_command_name = command_name
+        self._set_radio_message(
+            "radio.command_tx",
+            command=command_name,
+            action="RETRY" if is_retry else "TX",
+            attempt=pending.sent_count,
+            total=1 + pending.max_retries,
+        )
+        self._set_air_ack_message(
+            "ack.waiting",
+            seq=pending.seq,
+            command=command_name,
+            attempt=pending.sent_count,
+            total=1 + pending.max_retries,
+        )
+        self._log_tx_command(
+            pending.air_frame,
+            pending.gsp_frame,
+            pending.seq,
+            pending.cmd_id,
+            pending.token,
+            pending.param0,
+            pending.param1,
+            pending.sent_count,
+            is_retry,
+        )
 
+    def _update_capability_ack(self, capability: AirCapabilityMessage) -> None:
+        pending = self.pending_capability_ack
+        if (
+            pending is not None
+            and pending.capability_seq == capability.seq
+            and pending.air_profile_id == capability.air_profile_id
+        ):
+            return
+        if pending is not None:
+            self._log(
+                {
+                    "dir": "LOCAL",
+                    "layer": "HANDSHAKE",
+                    "kind": "CAPABILITY_ACK_REPLACED",
+                    "old_capability_seq": pending.capability_seq,
+                    "new_capability_seq": capability.seq,
+                }
+            )
+
+        command_seq = self._next_air_seq()
+        air_frame = build_air_cmd(
+            command_seq,
+            int(AirCmdId.CAPABILITY_ACK),
+            0,
+            capability.seq,
+            capability.air_profile_id,
+        )
+        self.pending_capability_ack = PendingCapabilityAck(
+            capability_seq=capability.seq,
+            air_profile_id=capability.air_profile_id,
+            command_seq=command_seq,
+            air_frame=air_frame,
+            gsp_frame=build_pc_to_gs_air_frame(air_frame),
+        )
+        diagnostics = self.state.handshake
+        diagnostics.handshake_state = HandshakeState.HANDSHAKING
+        diagnostics.accepted_capability_seq = capability.seq
+        diagnostics.capability_ack_cmd_seq = command_seq
+        diagnostics.capability_ack_attempts = 0
+        diagnostics.last_handshake_error = ""
+        self._transmit_capability_ack(is_retry=False)
+
+    def _transmit_capability_ack(self, *, is_retry: bool) -> None:
+        pending = self.pending_capability_ack
+        if pending is None or self.worker is None:
+            return
         self.worker.send_bytes(pending.gsp_frame)
         pending.sent_count += 1
         pending.last_send_monotonic = time.monotonic()
-
-        action = "RETRY" if is_retry else "TX"
-        self.window.set_radio_state_hint(
-            f"AIR_CMD {action}: seq={pending.seq} cmd=0x{pending.cmd_id:02X} "
-            f"attempt={pending.sent_count}/{1 + pending.max_retries}"
+        diagnostics = self.state.handshake
+        diagnostics.handshake_state = HandshakeState.HANDSHAKING
+        diagnostics.capability_ack_cmd_seq = pending.command_seq
+        diagnostics.capability_ack_attempts = pending.sent_count
+        diagnostics.last_capability_ack_tx_time = time.time()
+        diagnostics.gsp_air_tx_requests += 1
+        self.state.pending_command_name = "CAPABILITY_ACK"
+        self._set_radio_message(
+            "radio.capability_tx",
+            action="RETRY" if is_retry else "TX",
+            cap_seq=pending.capability_seq,
+            cmd_seq=pending.command_seq,
         )
-        self.window.set_last_air_ack(
-            f"等待 ACK: seq={pending.seq} cmd=0x{pending.cmd_id:02X} "
-            f"attempt={pending.sent_count}/{1 + pending.max_retries}"
+        self._log_tx_command(
+            pending.air_frame,
+            pending.gsp_frame,
+            pending.command_seq,
+            int(AirCmdId.CAPABILITY_ACK),
+            0,
+            pending.capability_seq,
+            pending.air_profile_id,
+            pending.sent_count,
+            is_retry,
         )
-
-        self.logger.write(
+        self._log(
             {
-                "ts": time.time(),
                 "dir": "TX",
-                "layer": "GSP",
-                "kind": "GSP_AIR_TX",
-                "retry": bool(is_retry),
-                "air_seq": pending.seq,
-                "air_cmd_id": pending.cmd_id,
+                "layer": "HANDSHAKE",
+                "kind": "CAPABILITY_ACK_TX",
+                "cmd_seq": pending.command_seq,
+                "capability_seq": pending.capability_seq,
+                "air_profile_id": pending.air_profile_id,
                 "attempt": pending.sent_count,
-                "max_attempts": 1 + pending.max_retries,
-                "air_hex": pending.air_frame.hex(),
+                "retry": bool(is_retry),
+            }
+        )
+
+    def _complete_capability_ack(self, source: str) -> None:
+        self.pending_capability_ack = None
+        diagnostics = self.state.handshake
+        diagnostics.handshake_state = HandshakeState.ACKED
+        diagnostics.last_handshake_error = ""
+        if source == "AIR_ACK":
+            diagnostics.capability_acked_by_air_ack = True
+        elif source == "PREFLIGHT_STATUS":
+            diagnostics.capability_acked_by_preflight_status = True
+        self.state.pending_command_name = ""
+        self._set_radio_message("radio.capability_complete", source=source)
+        self._log(
+            {
+                "dir": "LOCAL",
+                "layer": "HANDSHAKE",
+                "kind": "CAPABILITY_HANDSHAKE_COMPLETE",
+                "source": source,
             }
         )
 
     def _check_air_cmd_timeouts(self) -> None:
-        if not self.pending_air_cmds:
-            return
-
         now = time.monotonic()
         timeout_s = AIR_CMD_ACK_TIMEOUT_MS / 1000.0
+
+        capability_pending = self.pending_capability_ack
+        if (
+            capability_pending is not None
+            and now - capability_pending.last_send_monotonic >= timeout_s
+        ):
+            if capability_pending.sent_count <= capability_pending.max_retries:
+                self._transmit_capability_ack(is_retry=True)
+            else:
+                self._log(
+                    {
+                        "dir": "LOCAL",
+                        "layer": "HANDSHAKE",
+                        "kind": "CAPABILITY_ACK_TIMEOUT",
+                        "capability_seq": capability_pending.capability_seq,
+                        "sent_count": capability_pending.sent_count,
+                    }
+                )
+                self.pending_capability_ack = None
+                self.state.pending_command_name = ""
+                self._set_radio_message("radio.capability_timeout")
+                self.state.handshake.handshake_state = HandshakeState.ERROR
+                self.state.handshake.last_handshake_error = "CAPABILITY_ACK_TIMEOUT"
 
         for key, pending in list(self.pending_air_cmds.items()):
             if now - pending.last_send_monotonic < timeout_s:
                 continue
-
             if pending.sent_count <= pending.max_retries:
                 self._transmit_pending_air_cmd(pending, is_retry=True)
                 continue
-
             del self.pending_air_cmds[key]
-            self.window.set_last_air_ack(
-                f"ACK超时: seq={pending.seq} cmd=0x{pending.cmd_id:02X} "
-                f"已发送{pending.sent_count}次"
+            self._set_air_ack_message(
+                "ack.timeout",
+                seq=pending.seq,
+                command=enum_name(AirCmdId, pending.cmd_id),
+                attempts=pending.sent_count,
             )
-            self.window.set_radio_state_hint("AIR_CMD ACK超时")
-            self.logger.write(
+            self._set_radio_message("radio.air_ack_timeout")
+            self._log(
                 {
-                    "ts": time.time(),
-                    "dir": "RX",
+                    "dir": "LOCAL",
                     "layer": "AIR_PARSED",
                     "kind": "ACK_TIMEOUT",
                     "ack_seq": pending.seq,
@@ -320,17 +786,14 @@ class Controller(QObject):
                     "sent_count": pending.sent_count,
                 }
             )
+        self._refresh_pending_command_name()
 
     def _clear_pending_air_cmds(self, reason: str) -> None:
-        if not self.pending_air_cmds:
-            return
-
-        pending_list = list(self.pending_air_cmds.values())
+        pending_values = list(self.pending_air_cmds.values())
         self.pending_air_cmds.clear()
-        for pending in pending_list:
-            self.logger.write(
+        for pending in pending_values:
+            self._log(
                 {
-                    "ts": time.time(),
                     "dir": "LOCAL",
                     "layer": "AIR_PARSED",
                     "kind": "ACK_CANCELLED",
@@ -340,10 +803,428 @@ class Controller(QObject):
                     "sent_count": pending.sent_count,
                 }
             )
+        self._refresh_pending_command_name()
+
+    def _clear_capability_ack(self, reason: str) -> None:
+        pending = self.pending_capability_ack
+        self.pending_capability_ack = None
+        if pending is not None:
+            self._log(
+                {
+                    "dir": "LOCAL",
+                    "layer": "HANDSHAKE",
+                    "kind": "CAPABILITY_ACK_CANCELLED",
+                    "reason": reason,
+                    "capability_seq": pending.capability_seq,
+                    "sent_count": pending.sent_count,
+                }
+            )
+        self._refresh_pending_command_name()
+
+    def _refresh_pending_command_name(self) -> None:
+        if self.pending_capability_ack is not None:
+            self.state.pending_command_name = "CAPABILITY_ACK"
+        elif self.pending_air_cmds:
+            pending = next(iter(self.pending_air_cmds.values()))
+            self.state.pending_command_name = enum_name(AirCmdId, pending.cmd_id)
+        else:
+            self.state.pending_command_name = ""
 
     def _has_pending_air_cmd(self, cmd_id: int) -> bool:
-        cmd_id &= 0xFF
-        return any(pending.cmd_id == cmd_id for pending in self.pending_air_cmds.values())
+        return any(pending.cmd_id == (cmd_id & 0xFF) for pending in self.pending_air_cmds.values())
+
+    def _pop_pending_air_cmd(self, cmd_id: int) -> PendingAirCommand | None:
+        for key, pending in list(self.pending_air_cmds.items()):
+            if pending.cmd_id == (cmd_id & 0xFF):
+                del self.pending_air_cmds[key]
+                self._refresh_pending_command_name()
+                return pending
+        return None
+
+    def send_ping(self) -> None:
+        self._send_air_cmd(int(AirCmdId.PING), token=int(time.time()) & 0xFFFFFFFF)
+
+    def send_lock(self) -> None:
+        self._send_air_cmd(int(AirCmdId.LOCK), token=TOKEN_LOCK)
+
+    def send_unlock(self) -> None:
+        self._send_air_cmd(int(AirCmdId.UNLOCK), token=TOKEN_UNLOCK)
+
+    def send_start(self) -> None:
+        if not self.state.start_ready():
+            self._set_radio_message(
+                "radio.start_blocked",
+                reason=EnumParam("ack_result", self.state.start_block_reason_name()),
+            )
+            return
+        self._send_air_cmd(int(AirCmdId.START_MISSION), token=TOKEN_START_MISSION)
+
+    def send_cal_start(self, mode: int) -> None:
+        capability = self.state.capability
+        if capability is None or not (capability.calibration_mode_mask & (1 << int(mode))):
+            self._set_radio_message("radio.calibration_mode_unsupported")
+            return
+        self._send_air_cmd(int(AirCmdId.CAL_START), TOKEN_CALIBRATION, int(mode), 0)
+
+    def send_cal_face(self, face: int) -> None:
+        if not 0 <= int(face) <= 5:
+            self._set_radio_message("radio.calibration_face_invalid")
+            return
+        self._send_air_cmd(int(AirCmdId.CAL_FACE), TOKEN_CALIBRATION, int(face), 0)
+
+    def send_cal_stop(self) -> None:
+        self._send_air_cmd(int(AirCmdId.CAL_STOP), TOKEN_CALIBRATION)
+
+    def send_cal_reset(self) -> None:
+        self._send_air_cmd(int(AirCmdId.CAL_RESET), TOKEN_CALIBRATION)
+
+    def send_align_start(self) -> None:
+        if not self.state.calibration.ready:
+            self._set_radio_message("radio.alignment_requires_calibration")
+            return
+        self._send_air_cmd(int(AirCmdId.ALIGN_START), TOKEN_ALIGNMENT)
+
+    def send_align_stop(self) -> None:
+        self._send_air_cmd(int(AirCmdId.ALIGN_STOP), TOKEN_ALIGNMENT)
+
+    def send_align_reset(self) -> None:
+        self._send_air_cmd(int(AirCmdId.ALIGN_RESET), TOKEN_ALIGNMENT)
+
+    def _handle_air_message(self, message, event: ProtocolEvent | None = None) -> None:
+        if isinstance(message, AirCapabilityMessage):
+            self._handle_capability(message, event)
+        elif isinstance(message, AirPreflightStatusMessage):
+            self._handle_preflight_status(message)
+        elif isinstance(message, AirPreflightStateMessage):
+            self._handle_sensor_message(message, event, source="PREFLIGHT_STATE")
+        elif isinstance(message, AirFlightStateMessage):
+            self._handle_flight_state(message, event)
+        elif isinstance(message, AirStatusMessage):
+            self._handle_status_message(message, event)
+        elif isinstance(message, AirAckMessage):
+            self._handle_ack_message(message)
+
+    def _handle_capability(
+        self,
+        message: AirCapabilityMessage,
+        event: ProtocolEvent | None = None,
+    ) -> None:
+        diagnostics = self.state.handshake
+        diagnostics.last_capability_seq = message.seq
+        diagnostics.last_capability_rx_time = time.time()
+        if self.state.capability_acked:
+            diagnostics.duplicate_capability_after_ack += 1
+            self._log(
+                {
+                    "dir": "LOCAL",
+                    "layer": "HANDSHAKE",
+                    "kind": "STALE_OR_DUPLICATE_CAPABILITY_AFTER_ACK",
+                    "received_capability_seq": message.seq,
+                    "accepted_capability_seq": (
+                        self.state.capability.seq if self.state.capability is not None else None
+                    ),
+                    "host_rx_monotonic_ns": (
+                        event.host_rx_monotonic_ns if event is not None else None
+                    ),
+                    "duplicate_count": diagnostics.duplicate_capability_after_ack,
+                }
+            )
+            return
+
+        self.state.capability = message
+        self.state.profile_supported = message.profile_supported
+        self.state.capability_error = ""
+        if not message.profile_supported:
+            self._clear_capability_ack("unsupported_profile")
+            diagnostics.handshake_state = HandshakeState.ERROR
+            diagnostics.last_handshake_error = "UNSUPPORTED_PROFILE"
+            self.state.capability_error = "UNSUPPORTED_PROFILE"
+            self._set_radio_message("capability.error.UNSUPPORTED_PROFILE")
+            return
+        if message.accel_full_scale_g <= 0 or message.gyro_full_scale_dps <= 0:
+            self._clear_capability_ack("invalid_scale")
+            diagnostics.handshake_state = HandshakeState.ERROR
+            diagnostics.last_handshake_error = "INVALID_IMU_FULL_SCALE"
+            self.state.capability_error = "INVALID_IMU_FULL_SCALE"
+            self._set_radio_message("capability.error.INVALID_IMU_FULL_SCALE")
+            return
+        if message.command_policy not in {
+            int(AirCommandPolicy.PREFLIGHT_ONLY),
+            int(AirCommandPolicy.MISSION_ALLOWED),
+        }:
+            self._clear_capability_ack("invalid_command_policy")
+            diagnostics.handshake_state = HandshakeState.ERROR
+            diagnostics.last_handshake_error = "INVALID_COMMAND_POLICY"
+            self.state.capability_error = "INVALID_COMMAND_POLICY"
+            self._set_radio_message("capability.error.INVALID_COMMAND_POLICY")
+            return
+        self._update_capability_ack(message)
+
+    def _handle_preflight_status(self, message: AirPreflightStatusMessage) -> None:
+        diagnostics = self.state.handshake
+        diagnostics.preflight_status_capability_acked = bool(message.capability_acked)
+        self.state.lifecycle_state = message.lifecycle_state
+        self.state.calibration.state = message.calibration_state
+        self.state.calibration.mode = message.calibration_mode
+        self.state.calibration.completed_face_mask = message.completed_face_mask
+        self.state.calibration.current_face = message.current_face
+        self.state.calibration.ready = message.calibration_ready
+        self.state.alignment.state = message.alignment_state
+        self.state.alignment.attitude_ready = message.attitude_ready
+        self.state.alignment.gnss_origin_ready = message.gnss_origin_ready
+        self.state.alignment.baro_origin_ready = message.baro_origin_ready
+        self.state.alignment.ready = message.alignment_ready
+        self.state.system_ready = message.system_ready
+        self.state.start_unlocked = message.start_unlocked
+        self.state.selftest_passed = message.selftest_passed
+        self.state.gnss_position_usable = message.gnss_position_usable
+        self.state.start_block_reason = message.start_block_reason
+        if message.capability_acked and not self.state.capability_acked:
+            self._complete_capability_ack("PREFLIGHT_STATUS")
+
+    def _handle_sensor_message(
+        self,
+        message: AirPreflightStateMessage | AirFlightStateMessage,
+        event: ProtocolEvent | None,
+        *,
+        source: str,
+    ) -> None:
+        # The controller's accepted Capability is authoritative. A queued,
+        # stale Capability may have changed parser-side conversion context,
+        # but must never change the live controller session after ACK.
+        accel = None
+        gyro = None
+        if self.state.capability is not None and self.state.capability.profile_supported:
+            try:
+                accel = accel_raw_to_mps2(
+                    message.accel_raw,
+                    self.state.capability.accel_full_scale_g,
+                )
+                gyro = gyro_raw_to_radps(
+                    message.gyro_raw,
+                    self.state.capability.gyro_full_scale_dps,
+                )
+            except ValueError:
+                accel = None
+                gyro = None
+        host_ns = event.host_rx_monotonic_ns if event is not None else time.monotonic_ns()
+        revision = self.state.sensor.revision + 1
+        velocity = message.vel_mps if isinstance(message, AirFlightStateMessage) else None
+        position = message.pos_m if isinstance(message, AirFlightStateMessage) else None
+        self.state.sensor = SensorSnapshot(
+            source=source,
+            seq=message.seq,
+            time_ms=message.time_ms,
+            accel_raw=message.accel_raw,
+            gyro_raw=message.gyro_raw,
+            accel_mps2=accel,
+            gyro_radps=gyro,
+            quat_q15=message.quat_q15,
+            quat=message.quat,
+            quat_valid=message.quat_valid,
+            euler_rpy=quat_to_euler_rpy(message.quat),
+            velocity_mps=velocity,
+            position_m=position,
+            host_rx_monotonic_ns=host_ns,
+            revision=revision,
+        )
+
+    def _handle_flight_state(
+        self,
+        message: AirFlightStateMessage,
+        event: ProtocolEvent | None,
+    ) -> None:
+        self._mark_mission_started("first_flight_state", message.time_ms)
+        self._handle_sensor_message(message, event, source="FLIGHT_STATE")
+        if self.state.mission_first_time_ms is None:
+            self.state.mission_first_time_ms = message.time_ms
+        self.state.latest_flight_time_ms = message.time_ms
+        mission_time_s = max(
+            0.0,
+            (message.time_ms - self.state.mission_first_time_ms) / 1000.0,
+        )
+        self.state.live_plot.append(mission_time_s, message.vel_mps, message.pos_m)
+
+        stats = event.packet_stats if event is not None else None
+        if stats is None:
+            stats = self._track_flight_packet(message.time_ms)
+        self.state.received_flight_packets = int(stats["received_flight_packets"])
+        self.state.estimated_lost_packets = int(stats["estimated_lost_packets"])
+        self.state.expected_flight_packets = int(stats["expected_flight_packets"])
+        self.state.packet_loss_rate = float(stats["packet_loss_rate"])
+
+    def _handle_status_message(
+        self,
+        message: AirStatusMessage,
+        event: ProtocolEvent | None,
+    ) -> None:
+        text = format_air_status_message(message, self._translator())
+        self.state.last_status = text
+        host_ns = event.host_rx_monotonic_ns if event is not None else time.monotonic_ns()
+        self.events.append(
+            FlightEvent(
+                seq=message.seq,
+                status_id=message.status_id,
+                name=enum_name(AirStatusId, message.status_id),
+                time_ms=message.time_ms,
+                arg0=message.arg0,
+                arg1=message.arg1,
+                host_rx_monotonic_ns=host_ns,
+            )
+        )
+
+        status_id = message.status_id
+        if status_id == int(AirStatusId.BOOT):
+            self.state.lifecycle_state = int(AirLifecycleState.BOOT)
+        elif status_id == int(AirStatusId.SELFTEST_COMPLETE):
+            self.state.selftest_passed = bool(message.arg0)
+        elif status_id == int(AirStatusId.MISSION_START):
+            self._mark_mission_started("mission_start_status", message.time_ms)
+            self.state.lifecycle_state = int(AirLifecycleState.FLIGHT)
+        elif status_id == int(AirStatusId.LAUNCH):
+            self._mark_mission_started("launch_status", message.time_ms)
+            self.state.lifecycle_state = int(AirLifecycleState.FLIGHT)
+        elif status_id == int(AirStatusId.PARACHUTE_DEPLOY):
+            self.state.lifecycle_state = int(AirLifecycleState.RECOVERY)
+        elif status_id == int(AirStatusId.LANDING):
+            self.state.lifecycle_state = int(AirLifecycleState.LANDED)
+        elif status_id == int(AirStatusId.LOCKED):
+            self.state.start_unlocked = False
+        elif status_id == int(AirStatusId.UNLOCKED):
+            self.state.start_unlocked = True
+        elif status_id == int(AirStatusId.GNSS_POSITION):
+            if message.arg0 in (0, 1):
+                self.state.gnss_position_usable = bool(message.arg0)
+        elif status_id == int(AirStatusId.ALIGNMENT):
+            self.state.alignment.state = message.arg0
+            self.state.alignment.ready = message.arg0 == int(AirAlignmentState.READY)
+            self.state.alignment.attitude_ready = bool(message.arg1 & (1 << 0))
+            self.state.alignment.gnss_origin_ready = bool(message.arg1 & (1 << 1))
+            self.state.alignment.baro_origin_ready = bool(message.arg1 & (1 << 2))
+        elif status_id == int(AirStatusId.CALIBRATION):
+            self.state.calibration.state = message.arg0
+            self.state.calibration.mode = message.arg1
+            self.state.calibration.ready = message.arg0 == int(AirCalibrationState.READY)
+        elif status_id == int(AirStatusId.CALIBRATION_FACE):
+            if 0 <= message.arg0 <= 5 and message.arg1 == 1:
+                self.state.calibration.completed_face_mask |= 1 << message.arg0
+
+    def _handle_ack_message(self, message: AirAckMessage) -> None:
+        self.state.handshake.air_ack_rx += 1
+        result_name = enum_name(AirAckResult, message.result)
+        command_name = enum_name(AirCmdId, message.ack_cmd_id)
+        if message.ack_cmd_id == int(AirCmdId.CAPABILITY_ACK):
+            diagnostics = self.state.handshake
+            diagnostics.air_ack_result = message.result
+            pending = self.pending_capability_ack
+            matched = pending is not None and message.ack_seq == pending.command_seq
+            self._set_air_ack_message(
+                "ack.received" if matched else "ack.received_unmatched_capability",
+                seq=message.ack_seq,
+                command=command_name,
+                result=EnumParam("ack_result", result_name),
+            )
+            if not matched:
+                diagnostics.last_handshake_error = "AIR_ACK_SEQUENCE_MISMATCH"
+                self._log(
+                    {
+                        "dir": "LOCAL",
+                        "layer": "HANDSHAKE",
+                        "kind": "CAPABILITY_ACK_MISMATCH",
+                        "ack_seq": message.ack_seq,
+                        "expected_cmd_seq": pending.command_seq if pending is not None else None,
+                        "result": message.result,
+                    }
+                )
+                return
+            if message.result == int(AirAckResult.OK):
+                self._complete_capability_ack("AIR_ACK")
+            else:
+                self.pending_capability_ack = None
+                diagnostics.handshake_state = HandshakeState.ERROR
+                diagnostics.last_handshake_error = f"AIR_ACK_{result_name}"
+                self.state.pending_command_name = ""
+                self._set_radio_message(
+                    "radio.ack_failed",
+                    command="CAPABILITY_ACK",
+                    result=EnumParam("ack_result", result_name),
+                )
+            return
+
+        key = (message.ack_seq & 0xFF, message.ack_cmd_id & 0xFF)
+        pending = self.pending_air_cmds.pop(key, None)
+        matched = pending is not None
+        self._refresh_pending_command_name()
+        self._set_air_ack_message(
+            "ack.received" if matched else "ack.received_unmatched_command",
+            seq=message.ack_seq,
+            command=command_name,
+            result=EnumParam("ack_result", result_name),
+        )
+        if not matched:
+            return
+
+        if message.result == int(AirAckResult.OK):
+            if message.ack_cmd_id == int(AirCmdId.START_MISSION):
+                self._mark_mission_started("start_ack_ok", message.time_ms)
+                self._set_radio_message("radio.start_confirmed")
+            elif message.ack_cmd_id == int(AirCmdId.LOCK):
+                self.state.start_unlocked = False
+                self._set_radio_message("radio.lock_confirmed")
+            elif message.ack_cmd_id == int(AirCmdId.UNLOCK):
+                self.state.start_unlocked = True
+                self._set_radio_message("radio.unlock_confirmed")
+            elif message.ack_cmd_id in {
+                int(AirCmdId.CAL_START),
+                int(AirCmdId.CAL_FACE),
+                int(AirCmdId.CAL_STOP),
+                int(AirCmdId.CAL_RESET),
+            }:
+                self._set_radio_message("radio.calibration_accepted", command=command_name)
+            elif message.ack_cmd_id in {
+                int(AirCmdId.ALIGN_START),
+                int(AirCmdId.ALIGN_STOP),
+                int(AirCmdId.ALIGN_RESET),
+            }:
+                self._set_radio_message("radio.alignment_accepted", command=command_name)
+            else:
+                self._set_radio_message("radio.ack_ok", command=command_name)
+        elif (
+            message.result == int(AirAckResult.ALREADY_LOCKED)
+            and message.ack_cmd_id == int(AirCmdId.LOCK)
+        ):
+            self.state.start_unlocked = False
+            self._set_radio_message("radio.already_locked")
+        elif (
+            message.result == int(AirAckResult.ALREADY_UNLOCKED)
+            and message.ack_cmd_id == int(AirCmdId.UNLOCK)
+        ):
+            self.state.start_unlocked = True
+            self._set_radio_message("radio.already_unlocked")
+        else:
+            self._set_radio_message(
+                "radio.ack_failed",
+                command=command_name,
+                result=EnumParam("ack_result", result_name),
+            )
+
+    def _mark_mission_started(self, source: str, time_ms: int | None = None) -> None:
+        first_transition = not self.state.mission_started
+        if first_transition:
+            self.state.mission_started = True
+            self.state.mission_start_source = source
+            self._reset_mission_packet_stats(source)
+            self._pop_pending_air_cmd(int(AirCmdId.START_MISSION))
+            if (
+                self.state.capability is not None
+                and self.state.capability.command_policy == int(AirCommandPolicy.PREFLIGHT_ONLY)
+            ):
+                self._clear_pending_air_cmds("PREFLIGHT_ONLY mission started")
+        if time_ms is not None and (
+            self.state.mission_first_time_ms is None or source == "mission_start_status"
+        ):
+            self.state.mission_first_time_ms = int(time_ms)
+        self._refresh_pending_command_name()
 
     def _clear_mission_packet_stats(self) -> None:
         self.mission_packet_tracking_active = False
@@ -354,121 +1235,94 @@ class Controller(QObject):
     def _reset_mission_packet_stats(self, source: str) -> None:
         if self.mission_packet_tracking_active:
             return
-
         self.mission_packet_tracking_active = True
         self.last_flight_time_ms = None
         self.received_flight_packets = 0
         self.estimated_lost_packets = 0
-        self.logger.write(
+        self._log(
             {
-                "ts": time.time(),
                 "dir": "LOCAL",
                 "layer": "MISSION",
                 "kind": "MISSION_PACKET_TRACKING_START",
                 "source": source,
                 "expected_period_ms": FLIGHT_TELEMETRY_PERIOD_MS,
-                "received_flight_packets": 0,
-                "estimated_lost_packets": 0,
-                "expected_flight_packets": 0,
-                "packet_loss_rate": 0.0,
             }
         )
 
     def _track_flight_packet(self, current_time_ms: int) -> dict[str, int | float | bool]:
         lost_since_previous = 0
         time_non_monotonic = False
-
-        if self.mission_packet_tracking_active:
-            if self.last_flight_time_ms is None:
+        if not self.mission_packet_tracking_active:
+            self._reset_mission_packet_stats("first_flight_state")
+        if self.last_flight_time_ms is None:
+            self.last_flight_time_ms = current_time_ms
+        else:
+            delta_ms = current_time_ms - self.last_flight_time_ms
+            if delta_ms > 0:
+                expected_steps = max(1, round(delta_ms / FLIGHT_TELEMETRY_PERIOD_MS))
+                lost_since_previous = max(0, expected_steps - 1)
                 self.last_flight_time_ms = current_time_ms
             else:
-                delta_ms = current_time_ms - self.last_flight_time_ms
-                if delta_ms > 0:
-                    expected_steps = max(1, round(delta_ms / FLIGHT_TELEMETRY_PERIOD_MS))
-                    lost_since_previous = max(0, expected_steps - 1)
-                    self.last_flight_time_ms = current_time_ms
-                else:
-                    time_non_monotonic = True
-
-            self.received_flight_packets += 1
-            self.estimated_lost_packets += lost_since_previous
-
-        expected_flight_packets = self.received_flight_packets + self.estimated_lost_packets
-        packet_loss_rate = (
-            self.estimated_lost_packets / expected_flight_packets
-            if expected_flight_packets > 0
-            else 0.0
-        )
+                time_non_monotonic = True
+        self.received_flight_packets += 1
+        self.estimated_lost_packets += lost_since_previous
+        expected = self.received_flight_packets + self.estimated_lost_packets
         return {
-            "mission_time_ms": current_time_ms,
-            "mission_time_s": current_time_ms / 1000.0,
             "lost_since_previous": lost_since_previous,
             "received_flight_packets": self.received_flight_packets,
             "estimated_lost_packets": self.estimated_lost_packets,
-            "expected_flight_packets": expected_flight_packets,
-            "packet_loss_rate": packet_loss_rate,
+            "expected_flight_packets": expected,
+            "packet_loss_rate": self.estimated_lost_packets / expected if expected else 0.0,
             "time_non_monotonic": time_non_monotonic,
         }
 
-    def _has_pending_lock_state_cmd(self) -> bool:
-        return self._has_pending_air_cmd(int(AirCmdId.LOCK)) or self._has_pending_air_cmd(int(AirCmdId.UNLOCK))
-
-    def _pop_pending_air_cmd(self, cmd_id: int) -> PendingAirCommand | None:
-        cmd_id &= 0xFF
-        for key, pending in list(self.pending_air_cmds.items()):
-            if pending.cmd_id == cmd_id:
-                del self.pending_air_cmds[key]
-                return pending
-        return None
-
-    def _on_air_cmd_ack_result(self, msg: AirAckMessage) -> None:
-        key = (msg.ack_seq & 0xFF, msg.ack_cmd_id & 0xFF)
-        pending = self.pending_air_cmds.pop(key, None)
-        matched = pending is not None
-
-        result = ACK_RESULT_MAP.get(msg.result, f"0x{msg.result:02X}")
-        suffix = "" if matched else "，未匹配到本机待应答命令"
-        self.window.set_last_air_ack(
-            f"ack_seq={msg.ack_seq} cmd=0x{msg.ack_cmd_id:02X} result={result}{suffix}"
+    def _log_tx_command(
+        self,
+        air_frame: bytes,
+        gsp_frame: bytes,
+        seq: int,
+        cmd_id: int,
+        token: int,
+        param0: int,
+        param1: int,
+        attempt: int,
+        retry: bool,
+    ) -> None:
+        common = {
+            "dir": "TX",
+            "seq": seq,
+            "cmd_id": cmd_id,
+            "cmd_name": enum_name(AirCmdId, cmd_id),
+            "attempt": attempt,
+            "retry": bool(retry),
+        }
+        self._log(
+            {
+                **common,
+                "layer": "GSP",
+                "kind": "GSP_AIR_TX",
+                "raw_hex": gsp_frame.hex(),
+                "air_hex": air_frame.hex(),
+            }
+        )
+        self._log(
+            {
+                **common,
+                "layer": "AIR_PARSED",
+                "kind": "CMD",
+                "token": token,
+                "param0": param0,
+                "param1": param1,
+            }
         )
 
-        if not matched:
+    def _log(self, record: dict) -> None:
+        if not self.logger.session_active:
             return
-
-        # 只有在收到对应 ACK 后才改变命令按钮状态，避免“发送失败但界面已切状态”。
-        if msg.result == 0x00:
-            if msg.ack_cmd_id == int(AirCmdId.LOCK):
-                self.window.set_command_state_locked()
-                self.window.set_radio_state_hint("LOCK 已确认")
-            elif msg.ack_cmd_id == int(AirCmdId.UNLOCK):
-                self.window.set_command_state_unlocked()
-                self.window.set_radio_state_hint("UNLOCK 已确认")
-            elif msg.ack_cmd_id == int(AirCmdId.START_MISSION):
-                self._reset_mission_packet_stats("start_ack_ok")
-                self.window.set_command_state_mission()
-                self.window.set_radio_state_hint("START 已确认，任务开始")
-            else:
-                self.window.set_radio_state_hint(f"AIR_CMD ACK: {result}")
-        elif msg.result == 0x08 and msg.ack_cmd_id == int(AirCmdId.LOCK):
-            self.window.set_command_state_locked()
-            self.window.set_radio_state_hint("LOCK 已是锁定状态")
-        elif msg.result == 0x09 and msg.ack_cmd_id == int(AirCmdId.UNLOCK):
-            self.window.set_command_state_unlocked()
-            self.window.set_radio_state_hint("UNLOCK 已是开锁状态")
-        else:
-            self.window.set_radio_state_hint(f"AIR_CMD ACK: {result}，按钮状态未切换")
-
-    def send_ping(self) -> None:
-        self._send_air_cmd(int(AirCmdId.PING), token=int(time.time()) & 0xFFFFFFFF)
-
-    def send_lock(self) -> None:
-        self._send_air_cmd(int(AirCmdId.LOCK), token=0xC33CA55A)
-
-    def send_unlock(self) -> None:
-        self._send_air_cmd(int(AirCmdId.UNLOCK), token=0x55AA6996)
-
-    def send_start(self) -> None:
-        self._send_air_cmd(int(AirCmdId.START_MISSION), token=0xA55A3CC3)
+        try:
+            self.logger.write(record)
+        except Exception as exc:
+            self.state.receive_health.warning = f"日志写入异常: {exc}"
 
     def _ensure_user_dirs(self) -> None:
         Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
@@ -476,9 +1330,12 @@ class Controller(QObject):
 
     def _open_folder(self, folder: Path) -> None:
         folder.mkdir(parents=True, exist_ok=True)
-        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
-        if not ok:
-            QMessageBox.warning(self.window, APP_NAME, f"无法打开文件夹：\n{folder}")
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve()))):
+            QMessageBox.warning(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.open_folder_failed", folder=folder),
+            )
 
     def open_log_dir(self) -> None:
         self._open_folder(Path(LOG_DIR))
@@ -487,186 +1344,164 @@ class Controller(QObject):
         self._open_folder(Path(DATA_DIR))
 
     def generate_sim_validation_data(self) -> None:
+        if self.state.mission_started:
+            QMessageBox.information(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.mission_sim_disabled"),
+            )
+            return
         try:
             from processing.fake_log_generator import simulate
 
             self._ensure_user_dirs()
-            log_dir = Path(LOG_DIR)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = log_dir / f"sim_validation_{ts}.jsonl"
-
+            output_path = Path(LOG_DIR) / f"sim_validation_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
             records = simulate(seed=int(time.time()) & 0xFFFFFFFF)
-            meta = {
+            metadata = {
                 "ts": time.time(),
+                "host_monotonic_ns": time.monotonic_ns(),
                 "dir": "META",
                 "layer": "SIMULATION",
                 "kind": "SIMULATION_VALIDATION",
                 "simulated": True,
                 "simulation_label": "SIMULATION_VALIDATION",
                 "created_at": datetime.now().isoformat(timespec="seconds"),
-                "note": "This log was generated by the upper-computer simulation validation button, not real flight data.",
+                "note": "Generated by the upper-computer validation tool; not real flight data.",
             }
-
-            with out_path.open("w", encoding="utf-8") as f:
-                f.write(json.dumps(meta, ensure_ascii=False) + "\n")
-                for r in records:
-                    r = dict(r)
-                    r["simulated"] = True
-                    r["simulation_label"] = "SIMULATION_VALIDATION"
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-            QMessageBox.information(self.window, APP_NAME, f"模拟验证数据生成成功：\n{out_path}")
+            with output_path.open("w", encoding="utf-8") as file:
+                file.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+                for record in records:
+                    item = dict(record)
+                    item["simulated"] = True
+                    item["simulation_label"] = "SIMULATION_VALIDATION"
+                    file.write(json.dumps(item, ensure_ascii=False) + "\n")
+            QMessageBox.information(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.sim_success", path=output_path),
+            )
         except Exception as exc:
-            QMessageBox.critical(self.window, APP_NAME, f"模拟验证数据生成失败：\n{exc}")
+            QMessageBox.critical(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.sim_failed", error=exc),
+            )
 
     def choose_and_process_data(self) -> None:
+        if self.state.mission_started:
+            QMessageBox.information(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.mission_processing_disabled"),
+            )
+            return
         self._ensure_user_dirs()
-        log_dir = Path(LOG_DIR)
-        path_str, _ = QFileDialog.getOpenFileName(
+        log_path_text, _ = QFileDialog.getOpenFileName(
             self.window,
-            "选择要处理的数据日志",
-            str(log_dir),
-            "JSONL日志 (*.jsonl);;所有文件 (*.*)",
+            self._tr("message.choose_log"),
+            str(Path(LOG_DIR)),
+            self._tr("message.log_filter"),
         )
-        if not path_str:
+        if not log_path_text:
             return
-
-        log_path = Path(path_str)
-        if log_path.suffix.lower() != ".jsonl":
-            QMessageBox.warning(self.window, APP_NAME, "文件有问题：请选择 .jsonl 日志文件。")
+        log_path = Path(log_path_text)
+        if log_path.suffix.lower() != ".jsonl" or not log_path.is_file() or log_path.stat().st_size <= 0:
+            QMessageBox.warning(
+                self.window, self._tr("app.title"), self._tr("message.invalid_log")
+            )
             return
-        if not log_path.exists() or not log_path.is_file():
-            QMessageBox.warning(self.window, APP_NAME, "文件有问题：文件不存在或不是普通文件。")
-            return
-        if log_path.stat().st_size <= 0:
-            QMessageBox.warning(self.window, APP_NAME, "文件有问题：文件为空。")
-            return
-
         if self._is_log_already_processed(log_path):
-            QMessageBox.information(self.window, APP_NAME, "该数据已经处理过，data目录中已有对应结果。")
+            QMessageBox.information(
+                self.window, self._tr("app.title"), self._tr("message.already_processed")
+            )
             return
-
         self._start_processing(log_path)
 
     def _is_log_already_processed(self, log_path: Path) -> bool:
         data_dir = Path(DATA_DIR)
         if not data_dir.exists():
             return False
-
-        selected_name = log_path.name
         try:
-            selected_resolved = str(log_path.resolve())
+            selected = log_path.resolve()
         except OSError:
-            selected_resolved = str(log_path)
-
-        for manifest in data_dir.glob("*/manifest.json"):
+            selected = log_path
+        for manifest_path in data_dir.glob("*/manifest.json"):
             try:
-                obj = json.loads(manifest.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-
-            source = str(obj.get("source_log", ""))
-            if not source:
-                continue
-
-            if source == selected_resolved or source == str(log_path):
-                return True
-
-            try:
-                if Path(source).resolve() == log_path.resolve():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                source = Path(str(manifest.get("source_log", "")))
+                if source and (source.resolve() == selected or source.name == log_path.name):
                     return True
             except Exception:
-                pass
-
-            if Path(source).name == selected_name:
-                return True
-
+                continue
         return False
 
     def _start_processing(self, log_path: Path) -> None:
         if self.processing_thread is not None:
-            QMessageBox.information(self.window, APP_NAME, "当前已有数据处理任务在运行。")
+            QMessageBox.information(
+                self.window, self._tr("app.title"), self._tr("message.processing_running")
+            )
             return
-
         self.window.set_data_tools_busy(True)
-        self._processing_success_out_dir = None
-        self._processing_error_text = None
-
-        self.processing_dialog = QProgressDialog("正在处理数据...", "", 0, 100, self.window)
+        self.processing_dialog = QProgressDialog(
+            self._tr("message.processing"), "", 0, 100, self.window
+        )
         self.processing_dialog.setCancelButton(None)
-        self.processing_dialog.setWindowTitle("数据处理")
+        self.processing_dialog.setWindowTitle(self._tr("message.processing_title"))
         self.processing_dialog.setWindowModality(Qt.WindowModal)
         self.processing_dialog.setMinimumDuration(0)
-        self.processing_dialog.setValue(0)
         self.processing_dialog.show()
 
         self.processing_thread = QThread(self.window)
         self.processing_worker = ProcessingWorker(log_path, Path(DATA_DIR))
         self.processing_worker.moveToThread(self.processing_thread)
-
         self.processing_thread.started.connect(self.processing_worker.run)
         self.processing_worker.progress.connect(self._on_processing_progress, Qt.QueuedConnection)
         self.processing_worker.finished.connect(self._on_processing_finished, Qt.QueuedConnection)
         self.processing_worker.failed.connect(self._on_processing_failed, Qt.QueuedConnection)
         self.processing_thread.finished.connect(self._on_processing_thread_finished)
-
         self.processing_thread.start()
 
-    def _on_processing_progress(self, done: int, total: int, msg: str) -> None:
+    def _on_processing_progress(self, done: int, total: int, message: str) -> None:
         if self.processing_dialog is None:
             return
         total = max(1, int(total))
         done = max(0, min(int(done), total))
         self.processing_dialog.setMaximum(total)
         self.processing_dialog.setValue(done)
-        self.processing_dialog.setLabelText(f"正在处理数据...\n{msg}")
+        self.processing_dialog.setLabelText(
+            self._tr("message.processing_progress", detail=message)
+        )
 
     def _request_processing_thread_stop(self) -> None:
-        """
-        Stop and clean the processing QThread explicitly.
-
-        Do not connect ProcessingWorker.finished(str) directly to QThread.quit()
-        or QObject.deleteLater(). In PySide, signal-to-slot connections where
-        the signal has extra arguments and the slot has no arguments can behave
-        inconsistently for Qt C++ slots. The previous code could reach 100%
-        progress while QThread.finished was never emitted, so the success dialog
-        was never shown and the UI remained in a busy state.
-        """
         if self.processing_worker is not None:
             self.processing_worker.deleteLater()
-
         if self.processing_thread is not None and self.processing_thread.isRunning():
             self.processing_thread.quit()
 
-    def _on_processing_finished(self, out_dir: str) -> None:
-        self._processing_success_out_dir = str(out_dir)
-        self._processing_error_text = None
-
+    def _on_processing_finished(self, output_dir: str) -> None:
         if self.processing_dialog is not None:
             self.processing_dialog.setValue(self.processing_dialog.maximum())
             self.processing_dialog.close()
             self.processing_dialog = None
-
         self.window.set_data_tools_busy(False)
         self._request_processing_thread_stop()
-
-        # Controller is now a QObject living in the GUI thread, and the worker
-        # signal is connected with Qt.QueuedConnection. It is safe to show the
-        # completion popup here.
-        QMessageBox.information(self.window, APP_NAME, f"数据处理成功：\n{out_dir}")
+        QMessageBox.information(
+            self.window,
+            self._tr("app.title"),
+            self._tr("message.processing_success", path=output_dir),
+        )
 
     def _on_processing_failed(self, error: str) -> None:
-        self._processing_success_out_dir = None
-        self._processing_error_text = str(error)
-
         if self.processing_dialog is not None:
             self.processing_dialog.close()
             self.processing_dialog = None
-
         self.window.set_data_tools_busy(False)
         self._request_processing_thread_stop()
-
-        QMessageBox.warning(self.window, APP_NAME, f"文件有问题，无法处理：\n{error}")
+        QMessageBox.warning(
+            self.window,
+            self._tr("app.title"),
+            self._tr("message.processing_failed", error=error),
+        )
 
     def _on_processing_thread_finished(self) -> None:
         self.window.set_data_tools_busy(False)
@@ -674,229 +1509,27 @@ class Controller(QObject):
         if self.processing_thread is not None:
             self.processing_thread.deleteLater()
         self.processing_thread = None
-        self._processing_success_out_dir = None
-        self._processing_error_text = None
-
-    def on_bytes_received(self, data: bytes) -> None:
-        for frame in self.gsp_parser.feed(data):
-            parsed = parse_gsp_frame(frame)
-
-            self.logger.write(
-                {
-                    "ts": time.time(),
-                    "dir": "RX",
-                    "layer": "GSP",
-                    "msg_type": int(frame.msg_type),
-                    "payload_hex": frame.payload.hex(),
-                }
-            )
-
-            if frame.msg_type == GspType.GS_STATUS and parsed is not None:
-                self.window.update_gs_status(
-                    GS_STATE_MAP.get(parsed.gs_state, hex(parsed.gs_state)),
-                    RADIO_STATE_MAP.get(parsed.radio_state, hex(parsed.radio_state)),
-                    parsed.tx_cnt,
-                    parsed.rx_cnt,
-                    parsed.crc_err_cnt,
-                )
-
-            elif frame.msg_type == GspType.AIR_RX and parsed is not None:
-                self.window.update_link_quality(parsed.rssi_dbm, parsed.snr_db)
-
-                try:
-                    air_frame, msg = parse_air_frame(parsed.air_frame)
-                except Exception as exc:
-                    self.logger.write(
-                        {
-                            "ts": time.time(),
-                            "dir": "RX",
-                            "layer": "AIR",
-                            "error": str(exc),
-                            "air_hex": parsed.air_frame.hex(),
-                        }
-                    )
-                    continue
-
-                self.logger.write(
-                    {
-                        "ts": time.time(),
-                        "dir": "RX",
-                        "layer": "AIR",
-                        "air_type": int(air_frame.air_type),
-                        "seq": int(air_frame.seq),
-                        "payload_hex": air_frame.payload.hex(),
-                    }
-                )
-
-                self._handle_air_message(msg)
-
-            elif frame.msg_type == GspType.ACK and parsed is not None:
-                self.window.set_last_gs_ack(
-                    f"type=0x{parsed.ack_gsp_type:02X} result={parsed.result} detail={parsed.detail}"
-                )
-
-    def _handle_air_message(self, msg) -> None:
-        from protocol.air import AirAckMessage, AirFlightStateMessage, AirQuatStateMessage
-
-        if isinstance(msg, AirFlightStateMessage):
-            if (
-                not self.mission_packet_tracking_active
-                and self._has_pending_air_cmd(int(AirCmdId.START_MISSION))
-            ):
-                self._reset_mission_packet_stats("first_flight_state_after_start")
-
-            packet_stats = self._track_flight_packet(msg.time_ms)
-            mission_time_s = msg.time_ms / 1000.0
-            accel = self._accel_raw_to_mps2(msg.accel_raw)
-            gyro = self._gyro_raw_to_radps(msg.gyro_raw)
-
-            self.window.push_vector_sample("accel", accel, mission_time_s)
-            self.window.push_vector_sample("gyro", gyro, mission_time_s)
-            self.window.update_quat(msg.quat, raw=msg.quat_q15, valid=msg.quat_valid)
-            self.window.push_vector_sample("vel", msg.vel_mps, mission_time_s)
-            self.window.push_vector_sample("pos", msg.pos_m, mission_time_s)
-
-            if not msg.quat_valid:
-                now = time.monotonic()
-                if now - self._last_quat_invalid_hint_monotonic >= 2.0:
-                    self._last_quat_invalid_hint_monotonic = now
-                    self.window.set_radio_state_hint("FLIGHT_STATE quat raw is zero; check IMU 0x59 output")
-
-            self.logger.write(
-                {
-                    "ts": time.time(),
-                    "dir": "RX",
-                    "layer": "AIR_PARSED",
-                    "kind": "FLIGHT_STATE",
-                    "seq": msg.seq,
-                    "time_ms": msg.time_ms,
-                    "accel_raw": list(msg.accel_raw),
-                    "gyro_raw": list(msg.gyro_raw),
-                    "quat_q15": list(msg.quat_q15),
-                    "quat": list(msg.quat),
-                    "quat_raw_zero": msg.quat_raw_zero,
-                    "quat_valid": msg.quat_valid,
-                    "accel_mps2": list(accel),
-                    "gyro_radps": list(gyro),
-                    "accel_full_scale_g": self.window.current_accel_full_scale_g(),
-                    "gyro_full_scale_dps": self.window.current_gyro_full_scale_dps(),
-                    "vel_mps": list(msg.vel_mps),
-                    "pos_m": list(msg.pos_m),
-                    **packet_stats,
-                }
-            )
-
-        elif isinstance(msg, AirQuatStateMessage):
-            self.window.update_quat(
-                msg.quat,
-                raw=msg.quat_q15,
-                valid=msg.quat_valid,
-                source="short",
-            )
-
-            if not msg.quat_valid:
-                now = time.monotonic()
-                if now - self._last_quat_invalid_hint_monotonic >= 2.0:
-                    self._last_quat_invalid_hint_monotonic = now
-                    self.window.set_radio_state_hint("QUAT_STATE quat raw is zero; check IMU 0x59 output")
-
-            self.logger.write(
-                {
-                    "ts": time.time(),
-                    "dir": "RX",
-                    "layer": "AIR_PARSED",
-                    "kind": "QUAT_STATE",
-                    "seq": msg.seq,
-                    "time_ms": msg.time_ms,
-                    "quat_q15": list(msg.quat_q15),
-                    "quat": list(msg.quat),
-                    "quat_raw_zero": msg.quat_raw_zero,
-                    "quat_valid": msg.quat_valid,
-                    "message": (
-                        f"AIR_QUAT_STATE seq={msg.seq} time_ms={msg.time_ms} "
-                        f"qw={msg.quat_q15[0]} qx={msg.quat_q15[1]} "
-                        f"qy={msg.quat_q15[2]} qz={msg.quat_q15[3]} "
-                        f"quat_valid={msg.quat_valid}"
-                    ),
-                }
-            )
-
-        elif isinstance(msg, AirStatusMessage):
-            text = STATUS_MAP.get(msg.status_id, f"0x{msg.status_id:02X}")
-            self.window.set_last_status(format_air_status_message(msg))
-
-            if msg.status_id == AirStatusId.MISSION_START:
-                self._reset_mission_packet_stats("mission_start_status")
-
-            if msg.status_id == AirStatusId.LOCKED:
-                if not self._has_pending_lock_state_cmd():
-                    self.window.set_command_state_locked()
-            elif msg.status_id == AirStatusId.UNLOCKED:
-                if not self._has_pending_lock_state_cmd():
-                    self.window.set_command_state_unlocked()
-            elif msg.status_id in (
-                AirStatusId.MISSION_START,
-                AirStatusId.LAUNCH,
-                AirStatusId.PARACHUTE_DEPLOY,
-                AirStatusId.LANDING,
-            ):
-                if self._has_pending_air_cmd(int(AirCmdId.START_MISSION)):
-                    self.window.set_radio_state_hint(f"已收到 {text}，等待匹配的 START ACK")
-
-            status_record = {
-                "ts": time.time(),
-                "dir": "RX",
-                "layer": "AIR_PARSED",
-                "kind": "STATUS",
-                "seq": msg.seq,
-                "status_id": int(msg.status_id),
-                "status_name": text,
-                "time_ms": msg.time_ms,
-                "arg0": msg.arg0,
-                "arg1": msg.arg1,
-            }
-            if msg.status_id == AirStatusId.GNSS_POSITION:
-                status_record["gnss_position_usable"] = {0: False, 1: True}.get(msg.arg0)
-            self.logger.write(status_record)
-
-        elif isinstance(msg, AirAckMessage):
-            self._on_air_cmd_ack_result(msg)
-
-            self.logger.write(
-                {
-                    "ts": time.time(),
-                    "dir": "RX",
-                    "layer": "AIR_PARSED",
-                    "kind": "ACK",
-                    "seq": msg.seq,
-                    "ack_seq": msg.ack_seq,
-                    "ack_cmd_id": msg.ack_cmd_id,
-                    "result": msg.result,
-                    "time_ms": msg.time_ms,
-                }
-            )
-
-    def _accel_raw_to_mps2(self, raw: tuple[int, int, int]) -> tuple[float, float, float]:
-        full_scale_g = self.window.current_accel_full_scale_g()
-        scale = full_scale_g * STANDARD_GRAVITY_MPS2 / 32768.0
-        return raw[0] * scale, raw[1] * scale, raw[2] * scale
-
-    def _gyro_raw_to_radps(self, raw: tuple[int, int, int]) -> tuple[float, float, float]:
-        full_scale_dps = self.window.current_gyro_full_scale_dps()
-        scale = full_scale_dps * 3.141592653589793 / 180.0 / 32768.0
-        return raw[0] * scale, raw[1] * scale, raw[2] * scale
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     window = MainWindow()
     controller = Controller(window)
-
     window.show()
+    return_code = app.exec()
+    controller.shutdown()
+    return return_code
 
-    rc = app.exec()
 
-    controller.disconnect()
-    controller.logger.close()
+__all__ = [
+    "Controller",
+    "PendingAirCommand",
+    "PendingCapabilityAck",
+    "ProcessingWorker",
+    "format_air_status_message",
+    "main",
+]
 
-    return rc
+
+if __name__ == "__main__":
+    raise SystemExit(main())

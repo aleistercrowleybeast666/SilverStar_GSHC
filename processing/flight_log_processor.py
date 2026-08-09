@@ -2,36 +2,41 @@ from __future__ import annotations
 
 import json
 import math
-import struct
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from protocol.air import (
+    AIR_PROFILE_COMPACT_V0,
+    AirCapabilityMessage,
+    AirFlightStateMessage,
+    AirPreflightStateMessage,
+    AirPreflightStatusMessage,
+    AirStatusMessage,
+    accel_raw_to_mps2,
+    gyro_raw_to_radps,
+    parse_air_frame as parse_wire_air_frame,
+)
+from protocol.common import AirStatusId
+
 from .flight_plotter import FlightPlotter, PlotterConfig
 
-# Current AIR / GSP-MIN definitions only.
-AIR_TYPE_FLIGHT_STATE = 0x10
-AIR_TYPE_QUAT_STATE = 0x11
-AIR_TYPE_STATUS = 0x20
-AIR_FLIGHT_STATE_LEN = 50
-AIR_QUAT_STATE_LEN = 14
-AIR_STATUS_LEN = 9
 GSP_TYPE_AIR_RX = 0x02
 
-STATUS_BOOT = 0x01
-STATUS_SELFTEST_OK = 0x02
-STATUS_MISSION_START = 0x03
-STATUS_LAUNCH = 0x04
-STATUS_PARACHUTE_DEPLOY = 0x05
-STATUS_LANDING = 0x06
-STATUS_LOCKED = 0x07
-STATUS_UNLOCKED = 0x08
-STATUS_GNSS_POSITION = 0x09
+STATUS_BOOT = int(AirStatusId.BOOT)
+STATUS_SELFTEST_OK = int(AirStatusId.SELFTEST_COMPLETE)
+STATUS_MISSION_START = int(AirStatusId.MISSION_START)
+STATUS_LAUNCH = int(AirStatusId.LAUNCH)
+STATUS_PARACHUTE_DEPLOY = int(AirStatusId.PARACHUTE_DEPLOY)
+STATUS_LANDING = int(AirStatusId.LANDING)
+STATUS_LOCKED = int(AirStatusId.LOCKED)
+STATUS_UNLOCKED = int(AirStatusId.UNLOCKED)
+STATUS_GNSS_POSITION = int(AirStatusId.GNSS_POSITION)
+STATUS_ALIGNMENT = int(AirStatusId.ALIGNMENT)
+STATUS_CALIBRATION = int(AirStatusId.CALIBRATION)
+STATUS_CALIBRATION_FACE = int(AirStatusId.CALIBRATION_FACE)
 
-ACCEL_FULL_SCALE_G_DEFAULT = 16.0
-GYRO_FULL_SCALE_DPS_DEFAULT = 2000.0
-STANDARD_GRAVITY_MPS2 = 9.80665
 FLIGHT_TELEMETRY_PERIOD_MS = 200
 
 STATUS_NAME = {
@@ -44,6 +49,9 @@ STATUS_NAME = {
     STATUS_LOCKED: "LOCKED",
     STATUS_UNLOCKED: "UNLOCKED",
     STATUS_GNSS_POSITION: "GNSS_POSITION",
+    STATUS_ALIGNMENT: "ALIGNMENT",
+    STATUS_CALIBRATION: "CALIBRATION",
+    STATUS_CALIBRATION_FACE: "CALIBRATION_FACE",
 }
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -95,6 +103,15 @@ class FlightData:
     log_kind: str = "REAL_FLIGHT"
     simulated: bool = False
     simulation_label: str = ""
+    air_profile_id: int | None = None
+    command_policy: int | None = None
+    accel_full_scale_g: float | None = None
+    gyro_full_scale_dps: float | None = None
+    final_preflight_lifecycle: int | None = None
+    calibration_mode: int | None = None
+    calibration_final_state: int | None = None
+    alignment_final_state: int | None = None
+    gnss_position_usable_before_start: bool | None = None
     status_events: list[StatusEvent] = field(default_factory=list)
     accel: list[TimedVector] = field(default_factory=list)
     gyro: list[TimedVector] = field(default_factory=list)
@@ -123,13 +140,8 @@ def int8(value: int) -> int:
     return value - 256 if value >= 128 else value
 
 
-def int16(value: int) -> int:
-    value &= 0xFFFF
-    return value - 65536 if value >= 32768 else value
-
-
 def q15_to_float(value: int) -> float:
-    return max(-1.0, min(1.0, float(value) / 32767.0))
+    return max(-1.0, min(1.0, float(value) / 32768.0))
 
 
 def normalize_quat(quat: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -182,16 +194,20 @@ def safe_int_tuple(values: Iterable[object], expected_len: int) -> tuple[int, ..
     return out
 
 
-def raw_accel_to_mps2(raw: Iterable[object], full_scale_g: float = ACCEL_FULL_SCALE_G_DEFAULT) -> tuple[float, float, float]:
-    vals = tuple(int(v) for v in raw)
-    scale = full_scale_g * STANDARD_GRAVITY_MPS2 / 32768.0
-    return vals[0] * scale, vals[1] * scale, vals[2] * scale
+def raw_accel_to_mps2(
+    raw: Iterable[object],
+    full_scale_g: float,
+) -> tuple[float, float, float]:
+    values = tuple(int(value) for value in raw)
+    return accel_raw_to_mps2(values, full_scale_g)  # type: ignore[arg-type]
 
 
-def raw_gyro_to_radps(raw: Iterable[object], full_scale_dps: float = GYRO_FULL_SCALE_DPS_DEFAULT) -> tuple[float, float, float]:
-    vals = tuple(int(v) for v in raw)
-    scale = full_scale_dps * math.pi / 180.0 / 32768.0
-    return vals[0] * scale, vals[1] * scale, vals[2] * scale
+def raw_gyro_to_radps(
+    raw: Iterable[object],
+    full_scale_dps: float,
+) -> tuple[float, float, float]:
+    values = tuple(int(value) for value in raw)
+    return gyro_raw_to_radps(values, full_scale_dps)  # type: ignore[arg-type]
 
 
 def calculate_packet_loss_stats(
@@ -245,88 +261,77 @@ def calculate_packet_loss_stats(
     )
 
 
-def parse_air_frame(frame: bytes) -> tuple[str, dict] | None:
-    """
-    Parse current AIR payload only.
-
-    AIR_FLIGHT_STATE length = 50 bytes
-    AIR_QUAT_STATE length   = 14 bytes
-    AIR_STATUS length       = 9 bytes
-    """
-    if len(frame) < 2:
+def parse_air_frame(
+    frame: bytes,
+    capability: AirCapabilityMessage | None = None,
+) -> tuple[str, dict] | None:
+    """Raw-log fallback parser for SilverStar 0.0.8 / Profile 0 only."""
+    try:
+        _air, message = parse_wire_air_frame(frame)
+    except ValueError:
         return None
 
-    air_type = frame[0]
-    seq = frame[1]
-
-    if air_type == AIR_TYPE_FLIGHT_STATE:
-        if len(frame) != AIR_FLIGHT_STATE_LEN:
-            return None
-
-        time_ms = int.from_bytes(frame[2:6], "little")
-        accel_raw = tuple(int16(v) for v in struct.unpack("<HHH", frame[6:12]))
-        gyro_raw = tuple(int16(v) for v in struct.unpack("<HHH", frame[12:18]))
-        quat_q15 = tuple(int16(v) for v in struct.unpack("<HHHH", frame[18:26]))
-        vel = struct.unpack("<fff", frame[26:38])
-        pos = struct.unpack("<fff", frame[38:50])
-        quat_raw_zero = all(q == 0 for q in quat_q15)
-        quat_valid = not quat_raw_zero
-        quat = normalize_quat(tuple(q15_to_float(v) for v in quat_q15))  # type: ignore[arg-type]
-
-        return "FLIGHT_STATE", {
-            "seq": seq,
-            "time_ms": time_ms,
-            "accel_raw": accel_raw,
-            "gyro_raw": gyro_raw,
-            "quat_q15": quat_q15,
-            "quat": quat,
-            "quat_raw_zero": quat_raw_zero,
-            "quat_valid": quat_valid,
-            "vel_mps": tuple(float(v) for v in vel),
-            "pos_m": tuple(float(v) for v in pos),
+    if isinstance(message, AirCapabilityMessage):
+        return "CAPABILITY", {
+            "seq": message.seq,
+            "air_profile_id": message.air_profile_id,
+            "command_policy": message.command_policy,
+            "calibration_mode_mask": message.calibration_mode_mask,
+            "alignment_capability_mask": message.alignment_capability_mask,
+            "accel_full_scale_g": message.accel_full_scale_g,
+            "gyro_full_scale_dps": message.gyro_full_scale_dps,
+            "_message": message,
         }
 
-    if air_type == AIR_TYPE_QUAT_STATE:
-        if len(frame) != AIR_QUAT_STATE_LEN:
-            return None
+    if isinstance(message, AirPreflightStatusMessage):
+        return "PREFLIGHT_STATUS", dict(message.__dict__)
 
-        _type, seq, time_ms, qw, qx, qy, qz = struct.unpack_from("<BBIhhhh", frame, 0)
-        quat_q15 = (int(qw), int(qx), int(qy), int(qz))
-        quat_raw_zero = all(q == 0 for q in quat_q15)
-        quat_valid = not quat_raw_zero
-        quat = normalize_quat(tuple(q15_to_float(v) for v in quat_q15))  # type: ignore[arg-type]
+    if isinstance(message, AirStatusMessage):
+        return "STATUS", dict(message.__dict__)
 
-        return "QUAT_STATE", {
-            "seq": int(seq),
-            "time_ms": int(time_ms),
-            "quat_q15": quat_q15,
-            "quat": quat,
-            "quat_raw_zero": quat_raw_zero,
-            "quat_valid": quat_valid,
+    if isinstance(message, (AirPreflightStateMessage, AirFlightStateMessage)):
+        info = {
+            "seq": message.seq,
+            "time_ms": message.time_ms,
+            "accel_raw": message.accel_raw,
+            "gyro_raw": message.gyro_raw,
+            "quat_q15": message.quat_q15,
+            "quat": message.quat,
+            "quat_raw_zero": message.quat_raw_zero,
+            "quat_valid": message.quat_valid,
         }
-
-    if air_type == AIR_TYPE_STATUS:
-        if len(frame) != AIR_STATUS_LEN:
-            return None
-
-        return "STATUS", {
-            "seq": seq,
-            "status_id": frame[2],
-            "time_ms": int.from_bytes(frame[3:7], "little"),
-            "arg0": frame[7],
-            "arg1": frame[8],
-        }
+        if (
+            capability is not None
+            and capability.profile_supported
+            and capability.accel_full_scale_g > 0
+            and capability.gyro_full_scale_dps > 0
+        ):
+            info["accel_full_scale_g"] = capability.accel_full_scale_g
+            info["gyro_full_scale_dps"] = capability.gyro_full_scale_dps
+            info["accel_mps2"] = accel_raw_to_mps2(
+                message.accel_raw,
+                capability.accel_full_scale_g,
+            )
+            info["gyro_radps"] = gyro_raw_to_radps(
+                message.gyro_raw,
+                capability.gyro_full_scale_dps,
+            )
+        if isinstance(message, AirFlightStateMessage):
+            info["vel_mps"] = message.vel_mps
+            info["pos_m"] = message.pos_m
+            return "FLIGHT_STATE", info
+        return "PREFLIGHT_STATE", info
 
     return None
 
 
 class FlightLogProcessor:
     """
-    Offline processor for the current ground-station JSONL log.
+    Offline processor for SilverStar 0.0.8 / AIR_PROFILE_COMPACT_V0 logs.
 
     Supported records:
     1. Parsed AIR records:
-       {"dir":"RX","layer":"AIR_PARSED","kind":"FLIGHT_STATE"/"STATUS", ...}
+       CAPABILITY/PREFLIGHT_STATUS/PREFLIGHT_STATE/STATUS/FLIGHT_STATE.
 
     2. Current GSP AIR_RX records:
        {"dir":"RX","layer":"GSP","msg_type":2 or "gsp_type":2,"payload_hex":"..."}
@@ -468,7 +473,13 @@ class FlightLogProcessor:
         for r in records:
             if r.get("dir") != "RX":
                 continue
-            if r.get("layer") == "AIR_PARSED" and r.get("kind") in {"FLIGHT_STATE", "QUAT_STATE", "STATUS"}:
+            if r.get("layer") == "AIR_PARSED" and r.get("kind") in {
+                "CAPABILITY",
+                "PREFLIGHT_STATUS",
+                "PREFLIGHT_STATE",
+                "FLIGHT_STATE",
+                "STATUS",
+            }:
                 return True
             if r.get("layer") == "GSP" and self._is_gsp_air_rx(r):
                 return True
@@ -478,7 +489,26 @@ class FlightLogProcessor:
         log_kind, simulated, simulation_label = self._detect_log_kind(records)
         if not self._has_any_air_source_record(records):
             raise ValueError("没有找到有效的 AIR_PARSED 或 GSP AIR_RX 飞行数据记录。")
-        has_air_parsed = any(r.get("dir") == "RX" and r.get("layer") == "AIR_PARSED" for r in records)
+        has_parsed_flight = any(
+            r.get("dir") == "RX"
+            and r.get("layer") == "AIR_PARSED"
+            and r.get("kind") == "FLIGHT_STATE"
+            for r in records
+        )
+        has_parsed_status = any(
+            r.get("dir") == "RX"
+            and r.get("layer") == "AIR_PARSED"
+            and r.get("kind") == "STATUS"
+            for r in records
+        )
+        has_parsed_link = any(
+            r.get("dir") == "RX"
+            and r.get("layer") == "AIR_PARSED"
+            and r.get("kind") == "FLIGHT_STATE"
+            and r.get("rssi_dbm") is not None
+            and r.get("snr_db") is not None
+            for r in records
+        )
 
         all_data: dict[str, list[tuple[int, tuple[float, ...]]]] = {
             "accel": [],
@@ -491,6 +521,9 @@ class FlightLogProcessor:
         all_status: list[tuple[int, int, int, int]] = []
         all_link: list[tuple[int, float, float]] = []
         all_flight_time_ms: list[int] = []
+        capability_info: dict | None = None
+        final_preflight_status: dict | None = None
+        raw_capability: AirCapabilityMessage | None = None
 
         for r in records:
             if r.get("dir") != "RX":
@@ -500,30 +533,55 @@ class FlightLogProcessor:
 
             if layer == "AIR_PARSED":
                 self._add_air_parsed_record(r, all_data, all_status, all_flight_time_ms)
+                if r.get("kind") == "CAPABILITY" and int(r.get("air_profile_id", -1)) == AIR_PROFILE_COMPACT_V0:
+                    capability_info = r
+                elif r.get("kind") == "PREFLIGHT_STATUS":
+                    final_preflight_status = r
+                elif (
+                    r.get("kind") == "FLIGHT_STATE"
+                    and r.get("rssi_dbm") is not None
+                    and r.get("snr_db") is not None
+                ):
+                    try:
+                        all_link.append(
+                            (int(r["time_ms"]), float(r["rssi_dbm"]), float(r["snr_db"]))
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        pass
 
             elif layer == "GSP" and self._is_gsp_air_rx(r):
-                link = self._extract_link_from_gsp(r)
-                if link is not None:
+                link = self._extract_link_from_gsp(r, raw_capability)
+                if link is not None and not has_parsed_link:
                     all_link.append(link)
 
-                # Avoid double counting if app.py already logged AIR_PARSED records.
-                if not has_air_parsed:
-                    parsed = self._extract_air_from_gsp(r)
-                    if parsed is not None:
-                        kind, info = parsed
-                        if kind == "FLIGHT_STATE":
-                            self._add_flight_state(info, all_data, all_flight_time_ms)
-                        elif kind == "QUAT_STATE":
-                            self._add_quat_state(info, all_data)
-                        elif kind == "STATUS":
-                            self._add_status(info, all_status)
+                # Always inspect the raw AIR frame for session metadata.  A
+                # partially upgraded log may already contain parsed FLIGHT and
+                # STATUS records while Capability/PStatus only exist in GSP.
+                # Telemetry/status samples themselves still prefer AIR_PARSED
+                # records so the paired raw record is never counted twice.
+                parsed = self._extract_air_from_gsp(r, raw_capability)
+                if parsed is not None:
+                    kind, info = parsed
+                    if kind == "CAPABILITY":
+                        candidate = info.get("_message")
+                        if isinstance(candidate, AirCapabilityMessage) and candidate.profile_supported:
+                            raw_capability = candidate
+                            capability_info = info
+                    elif kind == "PREFLIGHT_STATUS":
+                        final_preflight_status = info
+                    elif kind == "FLIGHT_STATE" and not has_parsed_flight:
+                        self._add_flight_state(info, all_data, all_flight_time_ms)
+                    elif kind == "STATUS" and not has_parsed_status:
+                        self._add_status(info, all_status)
 
         start_ms = self._first_status_time(all_status, STATUS_MISSION_START)
         if start_ms is None:
-            raise ValueError("没有找到 MISSION_START（任务开始）事件，无法确定任务起点。")
+            start_ms = min(all_flight_time_ms) if all_flight_time_ms else None
 
         if self._max_data_time(all_data) is None:
             raise ValueError("没有找到有效的 FLIGHT_STATE 遥测数据。")
+        if start_ms is None:
+            raise ValueError("没有 MISSION_START 或 FLIGHT_STATE，无法确定任务起点。")
 
         landing_ms = self._first_status_time(all_status, STATUS_LANDING, after_ms=start_ms)
         parachute_ms = self._first_status_time(all_status, STATUS_PARACHUTE_DEPLOY, after_ms=start_ms)
@@ -542,6 +600,18 @@ class FlightLogProcessor:
             log_kind=log_kind,
             simulated=simulated,
             simulation_label=simulation_label,
+            air_profile_id=self._optional_int(capability_info, "air_profile_id"),
+            command_policy=self._optional_int(capability_info, "command_policy"),
+            accel_full_scale_g=self._optional_float(capability_info, "accel_full_scale_g"),
+            gyro_full_scale_dps=self._optional_float(capability_info, "gyro_full_scale_dps"),
+            final_preflight_lifecycle=self._optional_int(final_preflight_status, "lifecycle_state"),
+            calibration_mode=self._optional_int(final_preflight_status, "calibration_mode"),
+            calibration_final_state=self._optional_int(final_preflight_status, "calibration_state"),
+            alignment_final_state=self._optional_int(final_preflight_status, "alignment_state"),
+            gnss_position_usable_before_start=self._optional_bool(
+                final_preflight_status,
+                "gnss_position_usable",
+            ),
         )
         task_flight_time_ms = [time_ms - start_ms for time_ms in all_flight_time_ms]
         task_landing_ms = landing_ms - start_ms if landing_ms is not None else None
@@ -551,6 +621,12 @@ class FlightLogProcessor:
             data.warnings.append("LANDING not found; using last data timestamp as end.")
         if parachute_ms is None:
             data.warnings.append("PARACHUTE_DEPLOY not found; no chute marker.")
+        if self._first_status_time(all_status, STATUS_MISSION_START) is None:
+            data.warnings.append("MISSION_START not found; first FLIGHT_STATE defines mission start.")
+        if capability_info is None:
+            data.warnings.append(
+                "CAPABILITY not found; raw IMU counts are not converted by guessing a full scale."
+            )
 
         data.status_events = [
             StatusEvent((time_ms - start_ms) / 1000.0, sid, STATUS_NAME.get(sid, f"0x{sid:02X}"), time_ms, arg0, arg1)
@@ -602,8 +678,6 @@ class FlightLogProcessor:
         kind = r.get("kind")
         if kind == "FLIGHT_STATE":
             self._add_flight_state(r, all_data, all_flight_time_ms)
-        elif kind == "QUAT_STATE":
-            self._add_quat_state(r, all_data)
         elif kind == "STATUS":
             self._add_status(r, all_status)
 
@@ -622,13 +696,21 @@ class FlightLogProcessor:
 
         accel = safe_float_tuple(r.get("accel_mps2", ()), 3)
         if accel is None and "accel_raw" in r:
-            accel_fs = float(r.get("accel_full_scale_g", ACCEL_FULL_SCALE_G_DEFAULT))
-            accel = raw_accel_to_mps2(r["accel_raw"], accel_fs)
+            accel_fs_value = r.get("accel_full_scale_g")
+            if accel_fs_value is not None:
+                try:
+                    accel = raw_accel_to_mps2(r["accel_raw"], float(accel_fs_value))
+                except (TypeError, ValueError):
+                    accel = None
 
         gyro = safe_float_tuple(r.get("gyro_radps", ()), 3)
         if gyro is None and "gyro_raw" in r:
-            gyro_fs = float(r.get("gyro_full_scale_dps", GYRO_FULL_SCALE_DPS_DEFAULT))
-            gyro = raw_gyro_to_radps(r["gyro_raw"], gyro_fs)
+            gyro_fs_value = r.get("gyro_full_scale_dps")
+            if gyro_fs_value is not None:
+                try:
+                    gyro = raw_gyro_to_radps(r["gyro_raw"], float(gyro_fs_value))
+                except (TypeError, ValueError):
+                    gyro = None
 
         q_raw = safe_int_tuple(r.get("quat_q15", ()), 4) if "quat_q15" in r else None
         quat_raw_zero = False
@@ -664,30 +746,6 @@ class FlightLogProcessor:
         if pos is not None:
             all_data["pos"].append((time_ms, pos))
 
-    def _add_quat_state(
-        self,
-        r: dict,
-        all_data: dict[str, list[tuple[int, tuple[float, ...]]]],
-    ) -> None:
-        try:
-            time_ms = int(r["time_ms"])
-        except (KeyError, TypeError, ValueError):
-            return
-
-        q_raw = safe_int_tuple(r.get("quat_q15", ()), 4) if "quat_q15" in r else None
-        quat_raw_zero = bool(r.get("quat_raw_zero")) if "quat_raw_zero" in r else (
-            q_raw is not None and all(v == 0 for v in q_raw)
-        )
-        quat_valid = bool(r.get("quat_valid")) if "quat_valid" in r else not quat_raw_zero
-        quat = safe_float_tuple(r.get("quat", ()), 4)
-        if quat is None and q_raw is not None:
-            quat = normalize_quat(tuple(q15_to_float(v) for v in q_raw))  # type: ignore[arg-type]
-
-        if quat is not None:
-            all_data["quat_valid"].append((time_ms, (1.0 if quat_valid else 0.0,)))
-            if quat_valid:
-                all_data["quat"].append((time_ms, normalize_quat(quat)))  # type: ignore[arg-type]
-
     def _add_status(self, r: dict, all_status: list[tuple[int, int, int, int]]) -> None:
         try:
             sid = int(r["status_id"])
@@ -698,7 +756,11 @@ class FlightLogProcessor:
             return
         all_status.append((sid, time_ms, arg0, arg1))
 
-    def _extract_link_from_gsp(self, r: dict) -> tuple[int, float, float] | None:
+    def _extract_link_from_gsp(
+        self,
+        r: dict,
+        capability: AirCapabilityMessage | None = None,
+    ) -> tuple[int, float, float] | None:
         payload = self._gsp_payload_bytes(r)
         if payload is None or len(payload) < 3:
             return None
@@ -708,9 +770,11 @@ class FlightLogProcessor:
         air_len = payload[2]
         air_frame = payload[3:3 + air_len]
 
-        parsed = parse_air_frame(air_frame) if air_len > 0 else None
+        parsed = parse_air_frame(air_frame, capability) if air_len > 0 else None
         if parsed is not None:
             _kind, info = parsed
+            if "time_ms" not in info:
+                return None
             time_ms = int(info["time_ms"])
         elif "time_ms" in r:
             try:
@@ -722,13 +786,17 @@ class FlightLogProcessor:
 
         return time_ms, rssi, snr
 
-    def _extract_air_from_gsp(self, r: dict) -> tuple[str, dict] | None:
+    def _extract_air_from_gsp(
+        self,
+        r: dict,
+        capability: AirCapabilityMessage | None = None,
+    ) -> tuple[str, dict] | None:
         payload = self._gsp_payload_bytes(r)
         if payload is None or len(payload) < 3:
             return None
         air_len = payload[2]
         air_frame = payload[3:3 + air_len]
-        return parse_air_frame(air_frame)
+        return parse_air_frame(air_frame, capability)
 
     def _gsp_payload_bytes(self, r: dict) -> bytes | None:
         payload_hex = r.get("payload_hex")
@@ -746,6 +814,30 @@ class FlightLogProcessor:
                 return None
 
         return None
+
+    @staticmethod
+    def _optional_int(record: dict | None, key: str) -> int | None:
+        if not record or record.get(key) is None:
+            return None
+        try:
+            return int(record[key])
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_float(record: dict | None, key: str) -> float | None:
+        if not record or record.get(key) is None:
+            return None
+        try:
+            return float(record[key])
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_bool(record: dict | None, key: str) -> bool | None:
+        if not record or record.get(key) is None:
+            return None
+        return bool(record[key])
 
     def _first_status_time(self, status: list[tuple[int, int, int, int]], status_id: int, after_ms: int | None = None) -> int | None:
         times = [time_ms for (sid, time_ms, _arg0, _arg1) in status if sid == status_id and (after_ms is None or time_ms >= after_ms)]
@@ -789,6 +881,10 @@ class FlightLogProcessor:
             f.write(f"mission_start_ms: {data.mission_start_ms}\n")
             f.write(f"mission_end_ms: {data.end_ms}\n")
             f.write(f"duration_s: {data.duration_s:.3f}\n")
+            f.write(f"air_profile_id: {data.air_profile_id}\n")
+            f.write(f"command_policy: {data.command_policy}\n")
+            f.write(f"accel_full_scale_g: {data.accel_full_scale_g}\n")
+            f.write(f"gyro_full_scale_dps: {data.gyro_full_scale_dps}\n")
             f.write(f"parachute_time_s: {data.parachute_time_s if data.parachute_time_s is not None else 'not_found'}\n")
             for w in data.warnings:
                 f.write(f"warning: {w}\n")
@@ -824,6 +920,18 @@ class FlightLogProcessor:
                 f.write(f"simulation_label: {data.simulation_label}\n")
             f.write(f"source_log: {data.source_log}\n")
             f.write(f"duration_s: {data.duration_s:.3f}\n")
+            f.write(f"air_profile_id: {data.air_profile_id}\n")
+            f.write(f"command_policy: {data.command_policy}\n")
+            f.write(f"accel_full_scale_g: {data.accel_full_scale_g}\n")
+            f.write(f"gyro_full_scale_dps: {data.gyro_full_scale_dps}\n")
+            f.write(f"final_preflight_lifecycle: {data.final_preflight_lifecycle}\n")
+            f.write(f"calibration_mode: {data.calibration_mode}\n")
+            f.write(f"calibration_final_state: {data.calibration_final_state}\n")
+            f.write(f"alignment_final_state: {data.alignment_final_state}\n")
+            f.write(
+                "gnss_position_usable_before_start: "
+                f"{data.gnss_position_usable_before_start}\n"
+            )
             f.write(f"parachute_time_s: {data.parachute_time_s if data.parachute_time_s is not None else 'not_found'}\n")
             for w in data.warnings:
                 f.write(f"warning: {w}\n")
@@ -897,7 +1005,7 @@ class FlightLogProcessor:
         manifest = {
             "source_log": str(log_path),
             "created_at": datetime.now().isoformat(timespec="seconds"),
-            "protocol": "AIR_GSP_MIN_CURRENT_ONLY",
+            "protocol": "SilverStar_0.0.8_AIR_PROFILE_COMPACT_V0",
             "data_kind": data.log_kind,
             "simulated": data.simulated,
             "simulation_label": data.simulation_label,
@@ -905,6 +1013,19 @@ class FlightLogProcessor:
             "landing_ms": data.landing_ms,
             "parachute_ms": data.parachute_ms,
             "duration_s": data.duration_s,
+            "capability": {
+                "air_profile_id": data.air_profile_id,
+                "command_policy": data.command_policy,
+                "accel_full_scale_g": data.accel_full_scale_g,
+                "gyro_full_scale_dps": data.gyro_full_scale_dps,
+            },
+            "preflight": {
+                "final_lifecycle": data.final_preflight_lifecycle,
+                "calibration_mode": data.calibration_mode,
+                "calibration_final_state": data.calibration_final_state,
+                "alignment_final_state": data.alignment_final_state,
+                "gnss_position_usable_before_start": data.gnss_position_usable_before_start,
+            },
             "packet_loss": {
                 "expected_period_ms": data.packet_loss.expected_period_ms,
                 "expected_rate_hz": data.packet_loss.expected_rate_hz,

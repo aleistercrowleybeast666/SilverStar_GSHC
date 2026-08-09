@@ -17,7 +17,8 @@ class SerialConfig:
     baudrate: int = 230400
     timeout_s: float = 0.02
     write_timeout_s: float = 0.2
-    read_chunk_size: int = 512
+    read_chunk_size: int = 4096
+    tx_queue_max_frames: int = 128
 
 
 def list_serial_port_names() -> list[str]:
@@ -35,7 +36,9 @@ class SerialWorker(QThread):
         self._config = config
         self._serial: Optional[serial.Serial] = None
         self._stop_event = threading.Event()
-        self._tx_queue: "queue.Queue[bytes]" = queue.Queue()
+        self._tx_queue: "queue.Queue[bytes]" = queue.Queue(
+            maxsize=max(8, int(config.tx_queue_max_frames))
+        )
 
     def run(self) -> None:
         try:
@@ -60,11 +63,22 @@ class SerialWorker(QThread):
     @Slot(bytes)
     def send_bytes(self, payload: bytes) -> None:
         if payload:
-            self._tx_queue.put(bytes(payload))
+            try:
+                self._tx_queue.put_nowait(bytes(payload))
+            except queue.Full:
+                self.error_occurred.emit("串口发送队列已满，命令未入队")
 
     @Slot()
     def request_stop(self) -> None:
         self._stop_event.set()
+        # Abort a pending blocking read promptly when the platform/driver
+        # supports it.  The normal 20 ms timeout remains the fallback.
+        ser = self._serial
+        if ser is not None:
+            try:
+                ser.cancel_read()
+            except (AttributeError, OSError, SerialException):
+                pass
 
     def _open_serial(self) -> None:
         self._serial = serial.Serial(
@@ -110,11 +124,10 @@ class SerialWorker(QThread):
         if ser is None or not ser.is_open:
             return
         try:
-            waiting = ser.in_waiting
-            if waiting > 0:
-                chunk = ser.read(min(waiting, self._config.read_chunk_size))
-            else:
-                chunk = ser.read(1)
+            # Let the short serial timeout coalesce a burst into one chunk.
+            # Reading one byte whenever ``in_waiting`` momentarily reached zero
+            # produced thousands of cross-thread callbacks per second.
+            chunk = ser.read(self._config.read_chunk_size)
         except SerialException as exc:
             self.error_occurred.emit(f"串口接收失败: {exc}")
             self._stop_event.set()
@@ -128,17 +141,24 @@ class SerialLink:
         self.worker: Optional[SerialWorker] = None
 
     def open(self, config: SerialConfig) -> SerialWorker:
-        self.close()
+        if not self.close():
+            raise RuntimeError("previous serial thread is still stopping")
         self.worker = SerialWorker(config)
         self.worker.start()
         return self.worker
 
-    def close(self) -> None:
+    def close(self) -> bool:
         if self.worker is None:
-            return
-        self.worker.request_stop()
-        self.worker.wait(1000)
+            return True
+        worker = self.worker
+        worker.request_stop()
+        if not worker.wait(5000):
+            # Keep the strong reference: destroying a running QThread can
+            # terminate the process.  A later close() can retry safely.
+            worker.error_occurred.emit("串口线程未在 5 秒内停止")
+            return False
         self.worker = None
+        return True
 
     def is_open(self) -> bool:
         return self.worker is not None and self.worker.isRunning()

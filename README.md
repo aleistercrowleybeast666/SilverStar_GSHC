@@ -1,318 +1,186 @@
 # SS1 地面站上位机开发说明
 
-本项目是二代飞控/地面站系统的 PC 上位机程序，主要用于：
-
-- 通过串口连接地面站；
-- 接收并解析 GSP-MIN 串口协议；
-- 解析地面站透传的 AIR 无线协议；
-- 实时显示飞行状态、姿态、速度和位置曲线；
-- 下发 PING / LOCK / UNLOCK / START 命令；
-- 保存 JSONL 原始日志；
-- 对飞行日志进行离线数据处理，生成 txt、曲线图和 GIF；
-- 生成模拟验证数据，用于验证后处理流程。
-
-## 1. 推荐开发环境
-
-建议使用 Windows 10/11。
-
-推荐 Python 版本：
+本工程是二代飞控 SilverStar 的 PC 上位机。当前实现以
+[`docs/AIR_PROTOCOL.md`](docs/AIR_PROTOCOL.md) 为唯一 AIR 协议依据，适配：
 
 ```text
-Python 3.11 或 3.12
+SilverStar 0.0.8
+AIR_PROFILE_COMPACT_V0 = 0
 ```
 
-项目使用的主要依赖：
+PC 仍通过串口连接地面站，GSP-MIN 只负责透明转发 AIR 帧，wire format 未改变。飞控 Debug UART、VOFA+ 调试字段、数据库和网络服务不属于本工程。
 
-```text
-PySide6
-pyserial
-pyqtgraph
-PyOpenGL
-numpy
-matplotlib
-pillow
-```
+## 1. 主要能力
 
-安装依赖：
+- 自动接收并确认 `CAPABILITY`，不提供人工 Capability ACK 按钮；
+- 完整支持 `PREFLIGHT_STATE`、`PREFLIGHT_STATUS`、`STATUS`、`ACK` 和 `FLIGHT_STATE`；
+- 按 Capability 动态提供 NONE / ONE_FACE / SIX_FACE 校准流程；
+- 支持 Alignment START / STOP / RESET，并以飞控快照为最终判据；
+- 使用“预飞行 / 飞行 / 后期处理”三个可随时手动切换的页面；
+- START ACK、MISSION_START 或第一帧 FLIGHT_STATE 均可触发一次自动切换到飞行页；
+- 保持原有火箭模型、坐标轴、标签、颜色、默认相机、视角锁定和鼠标行为；
+- 独立串口、协议、日志和 GUI 刷新路径，避免持续接收造成 Qt 事件积压；
+- 支持简体中文 / English 运行时切换，选择由 QSettings 持久化，不需重启；
+- 实时速度/位置曲线只保留最近 10 秒，JSONL 保留整个会话；
+- 后处理生成曲线、摘要、manifest、姿态 GIF 和丢包统计；
+- 模拟日志包含完整 Capability、预飞、校准、Alignment 和飞行流程。
+
+## 2. 开发环境
+
+建议 Windows 10/11，Python 3.11 或 3.12。
 
 ```bat
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
-```
-
-启动源码版：
-
-```bat
 python main.py
 ```
 
-## 2. 目录结构
+运行测试：
 
-```text
-地面站上位机SS1/
-├─ main.py                         # 程序入口
-├─ app.py                          # 主控制逻辑：串口、协议、日志、数据处理调度
-├─ config.py                       # 全局配置与用户数据路径
-├─ requirements.txt                # Python 依赖
-├─ README.md                       # 开发说明
-├─ docs/
-│  ├─ AIR_PROTOCOL.md              # SilverStar 0.0.0 正式 AIR 协议
-│  └─ GSP_MIN_PROTOCOL.md          # PC 与地面站串口封装
-├─ config/                         # 绿色版配置目录，可放 user_paths.json
-├─ protocol/
-│  ├─ air.py                       # AIR 无线协议解析/构造
-│  ├─ gsp_min.py                   # GSP-MIN 串口协议解析/构造
-│  └─ common.py                    # 协议公共定义
-├─ services/
-│  └─ logger.py                    # JSONL 日志记录
-├─ transport/
-│  └─ serial_backend.py            # 串口收发后台线程
-├─ ui/
-│  └─ main_window.py               # PySide6 主窗口与界面控件
-├─ processing/
-│  ├─ fake_log_generator.py        # 5 Hz 模拟验证数据生成
-│  ├─ flight_log_processor.py      # 离线数据处理入口
-│  ├─ flight_plotter.py            # 曲线图/GIF 绘制
-│  └─ README.md                    # 数据处理模块说明
-└─ packaging/
-   ├─ build_pyinstaller.bat        # 生成绿色版 dist/SS1GroundStation
-   └─ README_packaging.md          # 打包说明
+```bat
+python -m pytest -q
 ```
 
-如果确定只发布绿色版，可以删除源码目录里的：
+## 3. 工程结构
 
 ```text
-installer/
-logs/
-data/
+main.py
+app.py                              Controller、命令事务、状态更新、后处理调度
+config.py                           有界队列、10 秒窗口和用户路径配置
+protocol/
+  air.py                            SilverStar 0.0.8 AIR Profile 0
+  gsp_min.py                        GSP-MIN（wire format 不变）
+  receive_pipeline.py               纯 GSP/AIR 解析核心与完整日志记录构造
+services/
+  logger.py                         有界 AsyncJsonlLogger
+  i18n.py                           集中式中英文翻译与 QSettings 语言配置
+  state_model.py                    FlightControllerState、EventHistory、实时窗口
+transport/
+  serial_backend.py                 只负责 open/read/write/close
+  protocol_worker.py                独立协议线程、有界输入队列和 UI 状态邮箱
+ui/
+  main_window.py                    三页面 GUI 与共享 3D 视图
+processing/
+  flight_log_processor.py           Profile 0 离线处理
+  flight_plotter.py                 曲线与姿态 GIF
+  fake_log_generator.py             完整 0.0.8 模拟会话
+docs/
+  AIR_PROTOCOL.md                   AIR 唯一正式协议
+  GSP_MIN_PROTOCOL.md               PC ↔ 地面站串口封装
+  UPPER_COMPUTER_ARCHITECTURE.md    接收、记录和显示架构
 ```
 
-其中 `logs/` 和 `data/` 如果里面只有 `.gitkeep`，已经没有实际运行意义。程序默认不会再把数据写到源码目录下。
+## 4. 实时数据流
 
-`config/` 建议保留，因为绿色版可通过 `config/user_paths.json` 指定日志和数据保存位置。
+```text
+SerialWorker
+  -> ProtocolWorker / ReceivePipeline
+  -> AsyncJsonlLogger（完整持久化）
+  -> 有界 UI 状态邮箱
+  -> Controller / FlightControllerState / EventHistory
+  -> 100 ms GUI render timer
+```
 
-## 3. 用户数据目录
+串口字节不再排入 GUI 线程解析。协议线程先把每个成功解析的正式 AIR 帧及 raw 信息写入异步日志队列，再交给状态邮箱。GUI 忙时，状态邮箱只会显式合并中间显示用的遥测/快照；完整数据已经进入 JSONL，不会随显示合并而丢失。详细设计见
+[`docs/UPPER_COMPUTER_ARCHITECTURE.md`](docs/UPPER_COMPUTER_ARCHITECTURE.md)。
 
-程序通过 `config.py` 决定日志和处理结果保存路径。
+## 5. AIR 0.0.8 消息
 
-默认用户数据根目录为：
+```text
+0x10 FLIGHT_STATE       50 B
+0x11 PREFLIGHT_STATE    26 B
+0x12 CAPABILITY          9 B
+0x13 PREFLIGHT_STATUS    9 B
+0x20 STATUS              9 B
+0x30 CMD                 9 B
+0x40 ACK                 9 B
+```
+
+AIR 无应用层 CRC；GSP-MIN 和 LoRa Transport 继续承担各自的完整性保护。
+
+物理量换算只能使用当前兼容 Capability 中的：
+
+```text
+accel_full_scale_g
+gyro_full_scale_dps
+```
+
+收到 Capability 前仍记录原始 `int16`，但 GUI 显示“等待 Capability”，不会猜测 16 g / 2000 dps。收到未知 profile 时显示 `AIR PROFILE UNSUPPORTED`，保留 raw 帧且不猜测解析、不自动 ACK。
+
+## 6. Capability 与命令策略
+
+连接串口后，上位机等待 Capability。收到兼容 Profile 0 后自动发送：
+
+```text
+CAPABILITY_ACK
+param0 = 最新 Capability seq
+param1 = air_profile_id
+```
+
+握手完成前 Calibration、Alignment、LOCK/UNLOCK、START 均不可用。Capability 重发带来更新的 seq 时，旧待确认事务会被最新 seq 替换。这里必须区分“Capability 帧 seq”和“PC 发出的 CAPABILITY_ACK 命令 seq”；只有 cmd id、待确认命令 seq 和 OK 结果全部匹配的 AIR ACK 才能完成握手。`PREFLIGHT_STATUS.capability_acked=1` 是 ACK 丢失时的权威恢复路径。
+
+握手状态只由 `Controller / FlightControllerState` 管理。`ReceivePipeline` 和 `ProtocolWorker` 只解析、搬运并持久化数据，不判断握手成功、飞控重启或 session reset。已握手后队列中迟到的 Capability 只增加 stale/duplicate 诊断，不会清空状态、重发 ACK 或切换日志。若实机确实重启，应在 PC 端断开并重新连接串口，明确开始新会话。
+
+当前 0.0.8 的 `command_policy=PREFLIGHT_ONLY`，任务开始后不再发送 AIR 命令。未来 `MISSION_ALLOWED` 是否允许链路发送由 Capability 决定，具体命令仍可能被飞控状态机拒绝。
+
+## 7. Calibration / Alignment / START
+
+校准模式列表来自 `calibration_mode_mask`：
+
+- NONE：发送 CAL_START 后等待 `calibration_ready`；
+- ONE_FACE：飞控自动推进，上位机不发送 CAL_FACE；
+- SIX_FACE：用户摆放对应面后发送 CAL_FACE。ACK OK 仅代表 accepted；只有 `CALIBRATION_FACE PASSED` 或快照中的 `completed_face_mask` 才显示完成。
+
+Alignment START 在 Calibration ready 后可用。ACK OK 仅代表 accepted；只有 Alignment READY 事件或 `PREFLIGHT_STATUS.alignment_ready=1` 才显示完成。Attitude ready 不能代替整个 Alignment ready。
+
+START 按钮由权威预飞快照驱动，至少要求 Capability、Calibration、Alignment、System、UNLOCK 和 `start_block_reason=OK` 均满足。若 START ACK 丢失，MISSION_START 或第一帧 FLIGHT_STATE 会清除 START 重试、标记任务开始并自动切换一次飞行页。用户随后可手动切回任意页面，后续遥测不会抢焦点。
+
+## 8. JSONL 与会话
+
+默认用户数据根目录：
 
 ```text
 C:\Users\<用户名>\Documents\SS1_host_computer_data
 ```
 
-内部结构：
+可通过环境变量 `SS1_HOST_COMPUTER_DATA_ROOT` 或 `config/user_paths.json` 的 `data_root` 修改。
+
+串口连接时创建 provisional session 日志；只有明确的 PC 串口断开/重连才建立新会话。Capability 广播本身不再被推测为“飞控重启”，也不会触发自动日志 rollover。
+
+每条记录包含 wall timestamp，并补充 `host_monotonic_ns`；RX 记录尽早保存 `host_rx_monotonic_ns`。日志包括：
 
 ```text
-SS1_host_computer_data/
-├─ logs/       # 原始 JSONL 日志、模拟验证日志
-└─ data/       # 离线处理输出结果
+GSP raw / parsed
+AIR raw
+CAPABILITY
+PREFLIGHT_STATUS
+PREFLIGHT_STATE
+STATUS
+ACK
+FLIGHT_STATE
+CAPABILITY_ACK_TX（含 Capability seq、PC cmd seq、attempt、retry）
 ```
 
-程序启动时会自动创建这些目录。
+预飞页的“飞控 AIR 链路”单独显示 WAITING / HANDSHAKING / ACKED / ERROR。其 tooltip 串起 Capability RX、PC→GS AIR_TX 请求、串口实际写入、GSP AIR_TX ACK、地面站 TX/RX/CRC、AIR ACK 和 PREFLIGHT_STATUS 恢复信息，避免把“PC 已连地面站串口”误认为“飞控已握手”。
 
-## 4. 自定义用户数据目录
+实时曲线删除 10 秒以前的数据只影响 GUI 内存，不影响 JSONL。
 
-优先级如下：
+界面语言只影响显示。内部枚举、状态值、命令名和 JSONL 字段始终使用协议定义的规范英文名称；切换语言不会重建串口/协议线程、状态模型或 3D 场景，当前事件历史也会按所选语言重新渲染。
 
-1. 环境变量 `SS1_HOST_COMPUTER_DATA_ROOT`
-2. 程序目录下的 `config/user_paths.json`
-3. 默认值 `Documents/SS1_host_computer_data`
-
-绿色版推荐使用 `config/user_paths.json`。
-
-例如想把数据保存到 `D:\SS1_host_computer_data`，则创建：
-
-```text
-config/user_paths.json
-```
-
-内容：
-
-```json
-{
-  "data_root": "D:\\SS1_host_computer_data",
-  "logs_dir": "D:\\SS1_host_computer_data\\logs",
-  "data_dir": "D:\\SS1_host_computer_data\\data"
-}
-```
-
-程序实际只依赖 `data_root`，`logs_dir` 和 `data_dir` 主要用于人工查看，建议保持一致。
-
-## 5. 协议层说明
-
-当前上位机使用两层协议：
-
-```text
-PC 上位机 <-> 地面站：GSP-MIN
-地面站 <-> 空端：AIR
-```
-
-地面站通过 `GSP_AIR_RX` 把收到的 AIR 包转发给上位机；上位机通过 `GSP_AIR_TX` 让地面站发送 AIR 命令。
-
-当前主要 AIR 包：
-
-```text
-AIR_FLIGHT_STATE = 0x10
-AIR_QUAT_STATE   = 0x11
-AIR_STATUS       = 0x20
-AIR_CMD          = 0x30
-AIR_ACK          = 0x40
-```
-
-AIR 应用层以 [docs/AIR_PROTOCOL.md](docs/AIR_PROTOCOL.md) 为唯一正式协议，PC 与地面站串口封装见
-[docs/GSP_MIN_PROTOCOL.md](docs/GSP_MIN_PROTOCOL.md)。START 前允许
-ACK、STATUS 和可选的 14B QUAT_STATE；START ACK OK 后进入 mission UI state，主要接收
-50B FLIGHT_STATE 和 STATUS。
-
-SilverStar 0.0.0 通过 AIR STATUS `0x09` 报告 GNSS 定位可用状态；该状态只用于显示和记录，不限制 START。
-
-实时主遥测 `AIR_FLIGHT_STATE` 包含：
-
-```text
-accel_raw int16 x 3
-gyro_raw  int16 x 3
-quat_q15  int16 x 4
-velocity  float32 x 3
-position  float32 x 3
-```
-
-上位机根据界面中的加速度/角速度量程选项，把 raw 数据换算成物理量。
-
-`GSP_AIR_RX` 的 AIR frame 起始偏移固定为 `payload[3]`。对 `AIR_FLIGHT_STATE`，四元数 raw 位于 AIR frame byte18/20/22/24，经 GSP 转发后对应 GSP payload byte21/23/25/27。若 `quat_q15` 四项全为 0，上位机会显示 `valid=0 INVALID/raw=0`；这通常表示飞控 IMU 没收到或没开启 JY901B `0x59` Quaternion Pack，不表示 GSP 偏移错误。
-
-## 6. 命令 ACK 后置状态机
-
-AIR_ACK 是命令按钮状态转换的依据。发送 LOCK/UNLOCK/START 后，上位机不会立刻切换按钮状态，只有收到匹配本机 pending 命令的 AIR_ACK 才切换。
-
-```text
-初始 assumed LOCKED:
-  LOCK disabled, UNLOCK enabled, START disabled
-
-LOCK ACK OK/ALREADY_LOCKED:
-  LOCK disabled, UNLOCK enabled, START disabled
-
-UNLOCK ACK OK/ALREADY_UNLOCKED:
-  LOCK enabled, UNLOCK disabled, START enabled
-
-START_MISSION ACK OK:
-  PING/LOCK/UNLOCK/START 全 disabled，数据处理工具 disabled
-
-ACK timeout/error:
-  不切状态，只更新提示；pending 清除后允许重发
-```
-
-未匹配本机 pending 的 ACK 不改变按钮状态。`STATUS LOCKED/UNLOCKED` 只在没有 LOCK/UNLOCK pending 时同步按钮，避免状态事件早于 ACK 让 UI 提前切换。`STATUS MISSION_START/LAUNCH/PARACHUTE_DEPLOY/LANDING` 不代替 START ACK，也不会提前切换 mission UI state。
-
-## 7. 日志格式
-
-原始日志为 JSONL，每行一个 JSON 对象。
-
-主要类型：
-
-```text
-GSP             # 原始 GSP 串口帧
-AIR_PARSED      # 已解析 AIR 数据
-SIMULATION      # 模拟验证数据标记
-```
-
-模拟验证数据会带：
-
-```json
-{
-  "simulated": true,
-  "simulation_label": "SIMULATION_VALIDATION"
-}
-```
-
-离线处理结果的 `summary.txt`、`processed_data.txt`、`manifest.json` 也会区分真实数据和模拟数据。
-
-AIR_PARSED 的 FLIGHT_STATE 和 QUAT_STATE 记录包含 `quat_q15`、归一化 fallback 后的 `quat`，以及 `quat_raw_zero` / `quat_valid`。QUAT_STATE 不生成 acc/gyro/vel/pos 字段；当 `quat_valid=false` 时，后处理不会把 fallback 单位四元数当作有效姿态。
-
-## 8. 数据处理模块
-
-源码运行：
+## 9. 后期处理
 
 ```bat
-python -m processing.fake_log_generator --output logs/fake_flight_log.jsonl --duration 90 --seed 42
-python -m processing.flight_log_processor logs/fake_flight_log.jsonl --output-root data
+python -m processing.fake_log_generator --output logs\fake_flight_log.jsonl --duration 90 --seed 42
+python -m processing.flight_log_processor logs\fake_flight_log.jsonl --output-root data
 ```
 
-正常程序中建议直接用界面按钮：
+后处理优先读取 `AIR_PARSED`；仅在缺失时使用 Profile 0 raw fallback。没有 Capability 时不会猜测 IMU 量程。正式飞行窗口由 MISSION_START 或第一帧 FLIGHT_STATE 开始，PREFLIGHT_STATE 不混入飞行曲线。manifest 会保存 Capability、最终预飞状态、任务时长和丢包信息。
 
-```text
-生成模拟验证数据
-处理数据
-打开 logs
-打开 data
-```
-
-处理输出目录形如：
-
-```text
-SS1_host_computer_data/data/yyyy-mm-dd-n/
-├─ processed_data.txt
-├─ summary.txt
-├─ accel.png
-├─ gyro.png
-├─ euler.png
-├─ velocity.png
-├─ position.png
-├─ link_quality.png
-├─ attitude_motion.gif
-├─ gif_frames/
-└─ manifest.json
-```
-
-没有 `PARACHUTE_DEPLOY` 或 `LANDING` 不视为错误；程序会处理到日志末尾。
-
-没有 `MISSION_START` 则无法确定任务起点，会提示文件有问题。
-
-如果日志中没有有效四元数，后处理会在 `summary.txt` / `processed_data.txt` / `manifest.json` 中记录 warning；GIF 姿态使用单位四元数 fallback。
-
-## 9. 绿色版打包
-
-推荐只做绿色版，不做安装器。
-
-打包命令：
+## 10. 绿色版打包
 
 ```bat
 packaging\build_pyinstaller.bat
 ```
 
-输出：
-
-```text
-dist/SS1GroundStation/
-├─ SS1GroundStation.exe
-├─ _internal/
-└─ config/              # 可选
-```
-
-把整个 `dist/SS1GroundStation/` 文件夹复制到目标电脑即可运行，不需要目标电脑安装 Python。
-
-注意不要只复制 exe，必须复制整个文件夹。
-
-## 10. 绿色版发布建议
-
-建议最终发布包结构：
-
-```text
-SS1GroundStation/
-├─ SS1GroundStation.exe
-├─ _internal/
-├─ config/
-│  └─ user_paths.json   # 可选，不放则默认使用 Documents/SS1_host_computer_data
-└─ README.txt
-```
-
-不要把源码目录里的 `logs/`、`data/`、`__pycache__/`、`build/`、`installer/` 混入发布包。
-
-## 11. 开发注意事项
-
-- 修改协议时，需要同步修改 `protocol/air.py`、地面站固件、空端固件和数据处理模块。
-- 修改日志字段时，需要同步检查 `processing/flight_log_processor.py`。
-- 修改 `AIR_FLIGHT_STATE` 的 IMU 量程时，要同步修改界面默认量程或飞控配置。
-- 打包前先用源码运行一遍，确认串口、3D、曲线、模拟数据生成和数据处理都正常。
-- 打包后必须在 `dist/SS1GroundStation/SS1GroundStation.exe` 中再完整测试一次。
+输出为 `dist/SS1GroundStation/`。必须复制整个目录，不能只复制 exe。发布前应在源码版和打包版各验证一次串口、Capability、预飞流程、START 恢复、3D、10 秒曲线和 JSONL 后处理。

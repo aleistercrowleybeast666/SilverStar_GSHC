@@ -7,11 +7,17 @@ import random
 from pathlib import Path
 
 AIR_TYPE_FLIGHT_STATE = 0x10
+AIR_TYPE_PREFLIGHT_STATE = 0x11
+AIR_TYPE_CAPABILITY = 0x12
+AIR_TYPE_PREFLIGHT_STATUS = 0x13
 AIR_TYPE_STATUS = 0x20
 
 STATUS_MISSION_START = 0x03
 STATUS_PARACHUTE_DEPLOY = 0x05
 STATUS_LANDING = 0x06
+STATUS_ALIGNMENT = 0x0A
+STATUS_CALIBRATION = 0x0B
+STATUS_CALIBRATION_FACE = 0x0C
 
 ACCEL_FULL_SCALE_G = 16.0
 GYRO_FULL_SCALE_DPS = 2000.0
@@ -43,7 +49,7 @@ def euler_to_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, 
 
 
 def quat_to_q15(quat: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
-    return tuple(clamp_i16(round(max(-1.0, min(1.0, q)) * 32767.0)) for q in quat)  # type: ignore[return-value]
+    return tuple(clamp_i16(round(max(-1.0, min(1.0, q)) * 32768.0)) for q in quat)  # type: ignore[return-value]
 
 
 def accel_to_raw(accel_mps2: tuple[float, float, float]) -> tuple[int, int, int]:
@@ -56,7 +62,15 @@ def gyro_to_raw(gyro_radps: tuple[float, float, float]) -> tuple[int, int, int]:
     return tuple(clamp_i16(round(v * scale)) for v in gyro_radps)  # type: ignore[return-value]
 
 
-def add_status(records: list[dict], host_ts: float, seq: int, status_id: int, time_ms: int) -> None:
+def add_status(
+    records: list[dict],
+    host_ts: float,
+    seq: int,
+    status_id: int,
+    time_ms: int,
+    arg0: int = 0,
+    arg1: int = 0,
+) -> None:
     records.append(
         {
             "ts": host_ts,
@@ -68,8 +82,109 @@ def add_status(records: list[dict], host_ts: float, seq: int, status_id: int, ti
             "seq": seq & 0xFF,
             "status_id": status_id,
             "time_ms": time_ms,
-            "arg0": 0,
-            "arg1": 0,
+            "arg0": int(arg0),
+            "arg1": int(arg1),
+        }
+    )
+
+
+def add_capability(records: list[dict], host_ts: float, seq: int) -> None:
+    records.append(
+        {
+            "ts": host_ts,
+            "dir": "RX",
+            "layer": "AIR_PARSED",
+            "kind": "CAPABILITY",
+            "simulated": True,
+            "simulation_label": SIMULATION_LABEL,
+            "seq": seq & 0xFF,
+            "air_profile_id": 0,
+            "profile_supported": True,
+            "command_policy": 1,
+            "calibration_mode_mask": 0x07,
+            "alignment_capability_mask": 0x07,
+            "accel_full_scale_g": ACCEL_FULL_SCALE_G,
+            "gyro_full_scale_dps": GYRO_FULL_SCALE_DPS,
+        }
+    )
+
+
+def add_preflight_status(
+    records: list[dict],
+    host_ts: float,
+    seq: int,
+    *,
+    lifecycle_state: int,
+    calibration_state: int,
+    calibration_mode: int,
+    completed_face_mask: int,
+    alignment_state: int,
+    alignment_ready: bool,
+) -> None:
+    records.append(
+        {
+            "ts": host_ts,
+            "dir": "RX",
+            "layer": "AIR_PARSED",
+            "kind": "PREFLIGHT_STATUS",
+            "simulated": True,
+            "simulation_label": SIMULATION_LABEL,
+            "seq": seq & 0xFF,
+            "lifecycle_state": lifecycle_state,
+            "calibration_state": calibration_state,
+            "calibration_mode": calibration_mode,
+            "completed_face_mask": completed_face_mask,
+            "current_face": 0xFF,
+            "alignment_state": alignment_state,
+            "attitude_ready": alignment_ready,
+            "gnss_origin_ready": alignment_ready,
+            "baro_origin_ready": alignment_ready,
+            "system_ready": alignment_ready,
+            "start_unlocked": alignment_ready,
+            "selftest_passed": True,
+            "gnss_position_usable": True,
+            "capability_acked": True,
+            "calibration_ready": calibration_state == 4,
+            "alignment_ready": alignment_ready,
+            "start_block_reason": 0 if alignment_ready else 0x0C,
+        }
+    )
+
+
+def add_preflight_state(
+    records: list[dict],
+    host_ts: float,
+    seq: int,
+    time_ms: int,
+    accel_mps2: tuple[float, float, float],
+    gyro_radps: tuple[float, float, float],
+    quat: tuple[float, float, float, float],
+) -> None:
+    accel_raw = accel_to_raw(accel_mps2)
+    gyro_raw = gyro_to_raw(gyro_radps)
+    quat_q15 = quat_to_q15(quat)
+    records.append(
+        {
+            "ts": host_ts,
+            "dir": "RX",
+            "layer": "AIR_PARSED",
+            "kind": "PREFLIGHT_STATE",
+            "simulated": True,
+            "simulation_label": SIMULATION_LABEL,
+            "seq": seq & 0xFF,
+            "time_ms": time_ms,
+            "accel_raw": list(accel_raw),
+            "gyro_raw": list(gyro_raw),
+            "quat_q15": list(quat_q15),
+            "quat_raw_zero": False,
+            "quat_valid": True,
+            "physical_conversion_valid": True,
+            "air_profile_id": 0,
+            "accel_full_scale_g": ACCEL_FULL_SCALE_G,
+            "gyro_full_scale_dps": GYRO_FULL_SCALE_DPS,
+            "accel_mps2": list(accel_mps2),
+            "gyro_radps": list(gyro_radps),
+            "quat": list(quat),
         }
     )
 
@@ -105,6 +220,8 @@ def add_flight_state(
             "quat_q15": list(quat_q15),
             "quat_raw_zero": quat_raw_zero,
             "quat_valid": not quat_raw_zero,
+            "physical_conversion_valid": True,
+            "air_profile_id": 0,
             "accel_full_scale_g": ACCEL_FULL_SCALE_G,
             "gyro_full_scale_dps": GYRO_FULL_SCALE_DPS,
             "accel_mps2": [float(v) for v in accel_mps2],
@@ -205,6 +322,89 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
     next_log_t = 0.0
 
     seq = 0
+    preflight_start_ms = mission_start_ms - 5000
+    add_capability(records, host_t0 - 5.0, seq)
+    seq += 1
+    add_preflight_status(
+        records,
+        host_t0 - 4.8,
+        seq,
+        lifecycle_state=2,
+        calibration_state=2,
+        calibration_mode=2,
+        completed_face_mask=0,
+        alignment_state=0,
+        alignment_ready=False,
+    )
+    seq += 1
+    for sample_index in range(5):
+        sample_time_ms = preflight_start_ms + sample_index * 200
+        add_preflight_state(
+            records,
+            host_t0 - 4.6 + sample_index * 0.2,
+            seq,
+            sample_time_ms,
+            (0.0, 0.0, STANDARD_GRAVITY_MPS2),
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0, 0.0),
+        )
+        seq += 1
+
+    for face in range(6):
+        add_status(
+            records,
+            host_t0 - 3.4 + face * 0.1,
+            seq,
+            STATUS_CALIBRATION_FACE,
+            preflight_start_ms + 1500 + face * 100,
+            face,
+            1,
+        )
+        seq += 1
+    add_status(
+        records,
+        host_t0 - 2.7,
+        seq,
+        STATUS_CALIBRATION,
+        preflight_start_ms + 2300,
+        4,
+        2,
+    )
+    seq += 1
+    add_preflight_status(
+        records,
+        host_t0 - 2.5,
+        seq,
+        lifecycle_state=2,
+        calibration_state=4,
+        calibration_mode=2,
+        completed_face_mask=0x3F,
+        alignment_state=1,
+        alignment_ready=False,
+    )
+    seq += 1
+    add_status(
+        records,
+        host_t0 - 1.2,
+        seq,
+        STATUS_ALIGNMENT,
+        mission_start_ms - 1200,
+        3,
+        0x07,
+    )
+    seq += 1
+    add_preflight_status(
+        records,
+        host_t0 - 1.0,
+        seq,
+        lifecycle_state=3,
+        calibration_state=4,
+        calibration_mode=2,
+        completed_face_mask=0x3F,
+        alignment_state=3,
+        alignment_ready=True,
+    )
+    seq += 1
     add_status(records, host_t0, seq, STATUS_MISSION_START, mission_start_ms)
     seq += 1
 

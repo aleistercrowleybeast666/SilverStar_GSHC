@@ -17,9 +17,6 @@ python -m PyInstaller ^
   --onedir ^
   --windowed ^
   --name SS1GroundStation ^
-  --collect-all PySide6 ^
-  --collect-all pyqtgraph ^
-  --collect-all matplotlib ^
   --hidden-import OpenGL.platform.win32 ^
   main.py
 

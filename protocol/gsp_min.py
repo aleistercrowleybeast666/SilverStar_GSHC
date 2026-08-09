@@ -13,6 +13,16 @@ GSP_MAX_PAYLOAD = 255
 class GspFrame:
     msg_type: int
     payload: bytes
+    raw: bytes = b""
+
+
+@dataclass(frozen=True)
+class GspParserDiagnostics:
+    frames: int
+    crc_errors: int
+    resyncs: int
+    discarded_bytes: int
+    buffer_size: int
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,10 @@ class GspAck:
 class GspParser:
     def __init__(self) -> None:
         self._buf = bytearray()
+        self.frames = 0
+        self.crc_errors = 0
+        self.resyncs = 0
+        self.discarded_bytes = 0
 
     def feed(self, data: bytes) -> list[GspFrame]:
         self._buf.extend(data)
@@ -52,9 +66,21 @@ class GspParser:
 
             sof = self._find_sof()
             if sof < 0:
-                self._buf.clear()
+                # Preserve a trailing SOF1 so a frame header fragmented exactly
+                # between A5 and 5A is not lost.
+                keep_trailing_sof = bool(self._buf and self._buf[-1] == GSP_SOF1)
+                discarded = len(self._buf) - (1 if keep_trailing_sof else 0)
+                if discarded > 0:
+                    self.discarded_bytes += discarded
+                    self.resyncs += 1
+                if keep_trailing_sof:
+                    self._buf[:] = bytes([GSP_SOF1])
+                else:
+                    self._buf.clear()
                 break
             if sof > 0:
+                self.discarded_bytes += sof
+                self.resyncs += 1
                 del self._buf[:sof]
 
             if len(self._buf) < 6:
@@ -62,6 +88,8 @@ class GspParser:
 
             payload_len = self._buf[3]
             if payload_len > GSP_MAX_PAYLOAD:
+                self.discarded_bytes += 1
+                self.resyncs += 1
                 del self._buf[0]
                 continue
 
@@ -73,6 +101,9 @@ class GspParser:
             calc = crc16_ccitt_false(raw[2:-2])
             recv = int.from_bytes(raw[-2:], "little")
             if calc != recv:
+                self.crc_errors += 1
+                self.discarded_bytes += 1
+                self.resyncs += 1
                 del self._buf[0]
                 continue
 
@@ -80,11 +111,26 @@ class GspParser:
                 GspFrame(
                     msg_type=raw[2],
                     payload=raw[4:-2],
+                    raw=raw,
                 )
             )
+            self.frames += 1
             del self._buf[:total]
 
         return frames
+
+    @property
+    def buffer_size(self) -> int:
+        return len(self._buf)
+
+    def diagnostics(self) -> GspParserDiagnostics:
+        return GspParserDiagnostics(
+            frames=self.frames,
+            crc_errors=self.crc_errors,
+            resyncs=self.resyncs,
+            discarded_bytes=self.discarded_bytes,
+            buffer_size=len(self._buf),
+        )
 
     def _find_sof(self) -> int:
         for i in range(max(0, len(self._buf) - 1)):
