@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QPushButton,
+    QPlainTextEdit,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -31,6 +32,7 @@ from protocol.common import (
     AirAckResult,
     AirAlignmentCapability,
     AirAlignmentState,
+    AirCalibrationDiagnosticReason,
     AirCalibrationMode,
     AirCalibrationModeMask,
     AirCalibrationState,
@@ -40,7 +42,31 @@ from protocol.common import (
     enum_name,
 )
 from services.i18n import I18n, Language
-from services.state_model import EventHistory, FlightControllerState, HandshakeState
+from services.state_model import (
+    EventHistory,
+    FlightControllerState,
+    HandshakeState,
+    MissionPhase,
+)
+
+
+def calibration_diagnostic_text(i18n: I18n, state: FlightControllerState) -> str:
+    reason_value = state.latest_calibration_diagnostic_reason
+    if reason_value == int(AirCalibrationDiagnosticReason.NONE):
+        return i18n.tr("common.none")
+    reason_name = enum_name(AirCalibrationDiagnosticReason, reason_value)
+    reason_text = i18n.enum("calibration_diagnostic_reason", reason_name)
+    face = state.latest_calibration_diagnostic_face
+    if (
+        state.calibration.mode == int(AirCalibrationMode.SIX_FACE)
+        and 0 <= face < len(CalibrationDialog.FACE_NAMES)
+    ):
+        return i18n.tr(
+            "diagnostic.face_issue",
+            face=CalibrationDialog.FACE_NAMES[face],
+            reason=reason_text,
+        )
+    return reason_text
 
 
 class AttitudeGLViewWidget(gl.GLViewWidget):
@@ -91,6 +117,10 @@ class CalibrationDialog(QDialog):
         self.lbl_state.setWordWrap(True)
         root.addWidget(self.lbl_state)
 
+        self.lbl_issue = QLabel()
+        self.lbl_issue.setWordWrap(True)
+        root.addWidget(self.lbl_issue)
+
         self.faces_group = QGroupBox()
         face_grid = QGridLayout(self.faces_group)
         self.face_status_labels: list[QLabel] = []
@@ -134,6 +164,9 @@ class CalibrationDialog(QDialog):
         self.btn_reset.setText(self.i18n.tr("button.reset"))
         self.btn_close.setText(self.i18n.tr("button.close"))
         self.lbl_state.setText(self.i18n.tr("cal.wait_status"))
+        self.lbl_issue.setText(
+            f"{self.i18n.tr('field.current_issue')}: {self.i18n.tr('common.none')}"
+        )
         for face, button in enumerate(self.face_buttons):
             button.setText(self.i18n.tr("button.collect_face", face=self.FACE_NAMES[face]))
         self._last_mode_mask = None
@@ -200,6 +233,13 @@ class CalibrationDialog(QDialog):
                 guidance=guidance,
             )
         )
+        issue = calibration_diagnostic_text(self.i18n, state)
+        self.lbl_issue.setText(f"{self.i18n.tr('field.current_issue')}: {issue}")
+        self.lbl_issue.setStyleSheet(
+            "color: #e04b4b; font-weight: bold;"
+            if state.latest_calibration_diagnostic_reason
+            else ""
+        )
 
         command_ready = bool(
             state.air_command_link_allowed()
@@ -217,6 +257,107 @@ class CalibrationDialog(QDialog):
             active = calibration.current_face == face
             status_label.setText("✓" if completed else ("●" if active else "○"))
             button.setEnabled(command_ready and six_face_active and not completed)
+
+
+class LinkDetailsDialog(QDialog):
+    def __init__(self, i18n: I18n, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.i18n = i18n
+        self.setMinimumSize(620, 560)
+        layout = QVBoxLayout(self)
+        self.details_text = QPlainTextEdit()
+        self.details_text.setFont(QFont("Consolas"))
+        self.details_text.setReadOnly(True)
+        layout.addWidget(self.details_text, 1)
+        self.btn_close = QPushButton()
+        self.btn_close.clicked.connect(self.close)
+        layout.addWidget(self.btn_close, 0, Qt.AlignRight)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(self.i18n.tr("dialog.link_details.title"))
+        self.btn_close.setText(self.i18n.tr("button.close"))
+
+    def render(self, state: FlightControllerState) -> None:
+        diagnostics = state.handshake
+        none = self.i18n.tr("common.none")
+
+        def optional(value: object | None) -> object:
+            return none if value is None else value
+
+        air_result = (
+            none
+            if diagnostics.air_ack_result is None
+            else self.i18n.enum(
+                "ack_result", enum_name(AirAckResult, diagnostics.air_ack_result)
+            )
+        )
+        gsp_result = (
+            none
+            if diagnostics.last_gsp_air_tx_ack_result is None
+            else self.i18n.enum(
+                "gsp_ack_result",
+                enum_name(GspAckResult, diagnostics.last_gsp_air_tx_ack_result),
+            )
+        )
+        rssi = none if state.rssi_dbm is None else f"{state.rssi_dbm} dBm"
+        snr = none if state.snr_db is None else f"{state.snr_db:.2f} dB"
+        capability = state.capability
+        self.details_text.setPlainText(
+            self.i18n.tr(
+                "link_details.body",
+                handshake_state=self.i18n.tr(
+                    f"handshake.{diagnostics.handshake_state.value}"
+                ),
+                profile=none if capability is None else capability.air_profile_id,
+                accel=none if capability is None else capability.accel_full_scale_g,
+                gyro=none if capability is None else capability.gyro_full_scale_dps,
+                calibration_mask=(
+                    none
+                    if capability is None
+                    else f"0x{capability.calibration_mode_mask:02X}"
+                ),
+                alignment_mask=(
+                    none
+                    if capability is None
+                    else f"0x{capability.alignment_capability_mask:02X}"
+                ),
+                policy=self.i18n.enum(
+                    "command_policy", state.command_policy_name()
+                ),
+                cap_seq=optional(diagnostics.last_capability_seq),
+                accepted_cap_seq=optional(diagnostics.accepted_capability_seq),
+                cmd_seq=optional(diagnostics.capability_ack_cmd_seq),
+                attempts=diagnostics.capability_ack_attempts,
+                requests=diagnostics.gsp_air_tx_requests,
+                serial_writes=diagnostics.gsp_air_tx_serial_writes,
+                serial_bytes=diagnostics.serial_tx_bytes,
+                gsp_ok=diagnostics.gsp_air_tx_ack_ok,
+                gsp_fail=diagnostics.gsp_air_tx_ack_fail,
+                gsp_result=gsp_result,
+                air_result=air_result,
+                air_ack_rx=diagnostics.air_ack_rx,
+                pstatus=yes_no_text(
+                    self.i18n, diagnostics.preflight_status_capability_acked
+                ),
+                by_air_ack=yes_no_text(
+                    self.i18n, diagnostics.capability_acked_by_air_ack
+                ),
+                by_pstatus=yes_no_text(
+                    self.i18n, diagnostics.capability_acked_by_preflight_status
+                ),
+                duplicates=diagnostics.duplicate_capability_after_ack,
+                error=diagnostics.last_handshake_error or none,
+                gs_state=self.i18n.enum("gs_state", state.gs_state),
+                radio_state=self.i18n.enum("radio_state", state.radio_state),
+                gs_tx=state.gs_tx_count,
+                gs_rx=state.gs_rx_count,
+                gs_crc=state.gs_crc_error_count,
+                rssi=rssi,
+                snr=snr,
+                receive_health=state.receive_health.tooltip(),
+            )
+        )
 
 
 class MainWindow(QMainWindow):
@@ -334,6 +475,7 @@ class MainWindow(QMainWindow):
             self.language_combo.blockSignals(blocked)
         self._set_3d_camera_unlocked(self.btn_toggle_camera_lock.isChecked())
         self.calibration_dialog.retranslate_ui()
+        self.link_details_dialog.retranslate_ui()
         self._retranslate_plots()
         self._last_sensor_revision = -1
         self._last_event_revision = -1
@@ -392,6 +534,7 @@ class MainWindow(QMainWindow):
         self.calibration_dialog.on_face = lambda face: self.on_cal_face and self.on_cal_face(face)
         self.calibration_dialog.on_stop = lambda: self.on_cal_stop and self.on_cal_stop()
         self.calibration_dialog.on_reset = lambda: self.on_cal_reset and self.on_cal_reset()
+        self.link_details_dialog = LinkDetailsDialog(self.i18n, self)
 
     def _build_top_bar(self) -> QWidget:
         box = QGroupBox()
@@ -458,7 +601,7 @@ class MainWindow(QMainWindow):
         detail_row.addWidget(self._build_preflight_gnss_panel(), 1)
         root.addLayout(detail_row)
         root.addWidget(self._build_preflight_command_panel())
-        root.addStretch(1)
+        root.addWidget(self._build_event_panel(), 1)
         return page
 
     def _build_preflight_system_panel(self) -> QWidget:
@@ -468,31 +611,24 @@ class MainWindow(QMainWindow):
         self.lbl_pf_lifecycle = QLabel("—")
         self.lbl_pf_system_ready = QLabel("—")
         self.lbl_pf_selftest = QLabel("—")
-        self.lbl_pf_capability = QLabel()
-        self._bind_text(self.lbl_pf_capability, "capability.waiting")
         self.lbl_pf_air_link = QLabel("—")
-        self.lbl_pf_policy = QLabel("—")
         self.lbl_pf_start_block = QLabel("CAPABILITY_REQUIRED")
         self.lbl_pf_lock = QLabel("—")
-        self.lbl_pf_processing = QLabel("NORMAL")
-        self.lbl_pf_ground_link = QLabel("—")
-        self.lbl_pf_air_ack = QLabel("—")
         for row, (name, label) in enumerate(
             (
                 ("field.lifecycle", self.lbl_pf_lifecycle),
                 ("field.system_ready", self.lbl_pf_system_ready),
                 ("field.selftest", self.lbl_pf_selftest),
-                ("field.capability", self.lbl_pf_capability),
                 ("field.air_link", self.lbl_pf_air_link),
-                ("field.command_policy", self.lbl_pf_policy),
-                ("field.start_block", self.lbl_pf_start_block),
                 ("field.lock_state", self.lbl_pf_lock),
-                ("field.pc_processing", self.lbl_pf_processing),
-                ("field.gs_radio", self.lbl_pf_ground_link),
-                ("field.last_air_ack", self.lbl_pf_air_ack),
+                ("field.start_block", self.lbl_pf_start_block),
             )
         ):
             self._add_value_pair(grid, row, name, label, 150, True)
+        self.btn_link_details = QPushButton()
+        self._bind_text(self.btn_link_details, "button.details")
+        self.btn_link_details.clicked.connect(self._show_link_details)
+        grid.addWidget(self.btn_link_details, 3, 2)
         return box
 
     def _build_calibration_panel(self) -> QWidget:
@@ -505,6 +641,8 @@ class MainWindow(QMainWindow):
         self.lbl_cal_ready = QLabel("NO")
         self.lbl_cal_face = QLabel("—")
         self.lbl_cal_progress = QLabel("○ ○ ○ ○ ○ ○")
+        self.lbl_cal_issue = QLabel("—")
+        self.lbl_cal_issue.setWordWrap(True)
         for row, (name, label) in enumerate(
             (
                 ("field.mode", self.lbl_cal_mode),
@@ -512,9 +650,14 @@ class MainWindow(QMainWindow):
                 ("field.ready", self.lbl_cal_ready),
                 ("field.current_face", self.lbl_cal_face),
                 ("field.six_face", self.lbl_cal_progress),
+                ("field.current_issue", self.lbl_cal_issue),
             )
         ):
             self._add_value_pair(grid, row, name, label, 130, True)
+        self.lbl_cal_issue.setWordWrap(True)
+        self.lbl_cal_issue.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         layout.addLayout(grid)
         actions = QHBoxLayout()
         self.btn_calibration = QPushButton()
@@ -536,6 +679,8 @@ class MainWindow(QMainWindow):
         self.lbl_align_attitude = QLabel("—")
         self.lbl_align_gnss = QLabel("—")
         self.lbl_align_baro = QLabel("—")
+        self.lbl_align_hint = QLabel("—")
+        self.lbl_align_hint.setWordWrap(True)
         self._add_value_pair(grid, 0, "field.state", self.lbl_align_state, 125, True)
         self._add_value_pair(grid, 1, "field.ready", self.lbl_align_ready, 125, True)
         self.lbl_align_attitude_name = self._add_value_pair(
@@ -546,6 +691,13 @@ class MainWindow(QMainWindow):
         )
         self.lbl_align_baro_name = self._add_value_pair(
             grid, 4, "field.baro_origin", self.lbl_align_baro, 125, True
+        )
+        self._add_value_pair(
+            grid, 5, "field.alignment_hint", self.lbl_align_hint, 125, True
+        )
+        self.lbl_align_hint.setWordWrap(True)
+        self.lbl_align_hint.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         layout.addLayout(grid)
         actions = QHBoxLayout()
@@ -640,7 +792,7 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(self._build_flight_status_panel(), 1)
         top.addWidget(self._build_flight_data_panel(), 2)
-        top.addWidget(self._build_event_panel(), 2)
+        top.addWidget(self._build_mission_state_panel(), 2)
         root.addLayout(top)
         root.addWidget(self._build_plot_panel(), 1)
         return page
@@ -700,6 +852,25 @@ class MainWindow(QMainWindow):
         self.event_list = QListWidget()
         self.event_list.setFont(self._compact_value_font)
         layout.addWidget(self.event_list)
+        return box
+
+    def _build_mission_state_panel(self) -> QWidget:
+        box = QGroupBox()
+        self._bind_text(box, "group.mission_state")
+        grid = QGridLayout(box)
+        self.lbl_mission_state = QLabel("—")
+        self.lbl_mission_last_event = QLabel("—")
+        self.lbl_mission_event_elapsed = QLabel("—")
+        self.lbl_mission_parachute = QLabel("—")
+        for row, (name, label) in enumerate(
+            (
+                ("field.mission_state", self.lbl_mission_state),
+                ("field.last_key_event", self.lbl_mission_last_event),
+                ("field.event_elapsed", self.lbl_mission_event_elapsed),
+                ("field.parachute_status", self.lbl_mission_parachute),
+            )
+        ):
+            self._add_value_pair(grid, row, name, label, 220, True)
         return box
 
     def _build_plot_panel(self) -> QWidget:
@@ -798,6 +969,13 @@ class MainWindow(QMainWindow):
         self.calibration_dialog.raise_()
         self.calibration_dialog.activateWindow()
 
+    def _show_link_details(self) -> None:
+        if self._state is not None:
+            self.link_details_dialog.render(self._state)
+        self.link_details_dialog.show()
+        self.link_details_dialog.raise_()
+        self.link_details_dialog.activateWindow()
+
     def set_ports(self, ports: list[str]) -> None:
         current = self.port_combo.currentText()
         self.port_combo.clear()
@@ -851,31 +1029,6 @@ class MainWindow(QMainWindow):
         self.lbl_pf_selftest.setText(
             self.i18n.tr("common.pass" if state.selftest_passed else "common.not_ready")
         )
-        if state.capability_error:
-            capability_text = self.i18n.tr(f"capability.error.{state.capability_error}")
-        elif state.profile_supported is None:
-            capability_text = self.i18n.tr("capability.waiting")
-        elif not state.profile_supported:
-            profile = state.capability.air_profile_id if state.capability else "?"
-            capability_text = self.i18n.tr("capability.unsupported", profile=profile)
-        elif state.capability is not None:
-            capability_text = self.i18n.tr(
-                "capability.profile",
-                profile=state.capability.air_profile_id,
-                accel=state.capability.accel_full_scale_g,
-                gyro=state.capability.gyro_full_scale_dps,
-            )
-        else:
-            capability_text = self.i18n.tr("capability.waiting")
-        self.lbl_pf_capability.setText(capability_text)
-        self._set_semantic_style(
-            self.lbl_pf_capability,
-            "error"
-            if state.capability_error or state.profile_supported is False
-            else "ready"
-            if state.profile_supported is True
-            else "waiting",
-        )
         self._set_semantic_style(
             self.lbl_pf_system_ready, "ready" if state.system_ready else "waiting"
         )
@@ -883,20 +1036,12 @@ class MainWindow(QMainWindow):
             self.lbl_pf_selftest, "ready" if state.selftest_passed else "waiting"
         )
         self._render_air_link(state)
-        policy_name = state.command_policy_name()
-        self.lbl_pf_policy.setText(self.i18n.enum("command_policy", policy_name))
         self.lbl_pf_start_block.setText(
             self.i18n.enum("ack_result", state.start_block_reason_name())
         )
         self.lbl_pf_lock.setText(
             self.i18n.tr("common.unlocked" if state.start_unlocked else "common.locked")
         )
-        self.lbl_pf_ground_link.setText(
-            f"{self.i18n.enum('gs_state', state.gs_state)} / "
-            f"{self.i18n.enum('radio_state', state.radio_state)}  "
-            f"TX={state.gs_tx_count} RX={state.gs_rx_count} CRC={state.gs_crc_error_count}"
-        )
-        self.lbl_pf_air_ack.setText(self.i18n.format_message(state.last_air_ack_message))
 
         calibration = state.calibration
         self.lbl_cal_mode.setText(
@@ -930,6 +1075,11 @@ class MainWindow(QMainWindow):
                 for face in range(6)
             )
         )
+        self.lbl_cal_issue.setText(calibration_diagnostic_text(self.i18n, state))
+        self._set_semantic_style(
+            self.lbl_cal_issue,
+            "error" if state.latest_calibration_diagnostic_reason else "unknown",
+        )
 
         alignment = state.alignment
         self.lbl_align_state.setText(
@@ -943,7 +1093,8 @@ class MainWindow(QMainWindow):
         self._set_semantic_style(
             self.lbl_align_ready,
             "error"
-            if alignment.state == int(AirAlignmentState.FAILED)
+            if alignment.state
+            in (int(AirAlignmentState.FAILED), int(AirAlignmentState.STALE))
             else "ready"
             if alignment.ready
             else "waiting",
@@ -970,6 +1121,19 @@ class MainWindow(QMainWindow):
             int(AirAlignmentCapability.BARO_ORIGIN),
             alignment.baro_origin_ready,
         )
+        alignment_stale = alignment.state == int(AirAlignmentState.STALE)
+        self.lbl_align_hint.setText(
+            self.i18n.tr("alignment.stale.hint")
+            if alignment_stale
+            else self.i18n.tr("common.none")
+        )
+        self._set_semantic_style(
+            self.lbl_align_state,
+            "error" if alignment_stale else "ready" if alignment.ready else "waiting",
+        )
+        self._set_semantic_style(
+            self.lbl_align_hint, "error" if alignment_stale else "unknown"
+        )
         self.lbl_pf_gnss_usable.setText(yes_no(state.gnss_position_usable))
         self.lbl_pf_gnss_origin.setText(
             self.i18n.tr("common.not_supported")
@@ -980,7 +1144,7 @@ class MainWindow(QMainWindow):
         health = state.receive_health
         health_text = self.i18n.tr("common.backlog" if health.is_backlogged() else "common.normal")
         health_style = "color: #ff5555; font-weight: bold;" if health.is_backlogged() else ""
-        for label in (self.lbl_pf_processing, self.lbl_flight_processing):
+        for label in (self.lbl_flight_processing,):
             label.setText(health_text)
             label.setStyleSheet(health_style)
             label.setToolTip(health.tooltip())
@@ -1007,12 +1171,15 @@ class MainWindow(QMainWindow):
             self.lbl_mission_time.setText(f"{mission_s:.1f} s")
 
         self._render_sensor(state)
+        self._render_mission_state(state)
         self._render_commands(state)
         self._render_events()
         self._render_plots(state)
         self._render_data_tool_buttons()
         if self.calibration_dialog.isVisible():
             self.calibration_dialog.render(state)
+        if self.link_details_dialog.isVisible():
+            self.link_details_dialog.render(state)
 
         if (
             state.mission_started
@@ -1024,74 +1191,74 @@ class MainWindow(QMainWindow):
     def _render_air_link(self, state: FlightControllerState) -> None:
         diagnostics = state.handshake
         handshake_state = diagnostics.handshake_state
-        localized_state = self.i18n.tr(f"handshake.{handshake_state.value}")
-        air_result_name = (
-            "—"
-            if diagnostics.air_ack_result is None
-            else self.i18n.enum(
-                "ack_result", enum_name(AirAckResult, diagnostics.air_ack_result)
-            )
-        )
-        if handshake_state is HandshakeState.ACKED:
-            text = localized_state
+        if state.profile_supported is False or state.capability_error == "UNSUPPORTED_PROFILE":
+            key = "air_link.unsupported"
+        elif handshake_state is HandshakeState.ERROR:
+            key = "air_link.error"
+        elif handshake_state is HandshakeState.ACKED:
+            key = "air_link.connected"
+        elif handshake_state is HandshakeState.HANDSHAKING:
+            key = "air_link.handshaking"
+        elif diagnostics.last_capability_seq is not None or state.receive_health.air_frames > 0:
+            key = "air_link.downlink_wait"
         else:
-            text = self.i18n.tr(
-                "handshake.summary",
-                cap_seq="—" if diagnostics.last_capability_seq is None else diagnostics.last_capability_seq,
-                cmd_seq="—" if diagnostics.capability_ack_cmd_seq is None else diagnostics.capability_ack_cmd_seq,
-                attempts=diagnostics.capability_ack_attempts,
-                gsp_ok=diagnostics.gsp_air_tx_ack_ok,
-                gsp_fail=diagnostics.gsp_air_tx_ack_fail,
-                air_result=air_result_name,
-            )
-        self.lbl_pf_air_link.setText(text)
-        gsp_result = (
-            "—"
-            if diagnostics.last_gsp_air_tx_ack_result is None
-            else self.i18n.enum(
-                "gsp_ack_result",
-                enum_name(GspAckResult, diagnostics.last_gsp_air_tx_ack_result),
-            )
-        )
-        self.lbl_pf_air_link.setToolTip(
-            self.i18n.tr(
-                "handshake.tooltip",
-                state=localized_state,
-                cap_seq="—" if diagnostics.last_capability_seq is None else diagnostics.last_capability_seq,
-                accepted_cap_seq=(
-                    "—"
-                    if diagnostics.accepted_capability_seq is None
-                    else diagnostics.accepted_capability_seq
-                ),
-                cmd_seq="—" if diagnostics.capability_ack_cmd_seq is None else diagnostics.capability_ack_cmd_seq,
-                attempts=diagnostics.capability_ack_attempts,
-                requests=diagnostics.gsp_air_tx_requests,
-                serial_writes=diagnostics.gsp_air_tx_serial_writes,
-                serial_bytes=diagnostics.serial_tx_bytes,
-                gsp_ok=diagnostics.gsp_air_tx_ack_ok,
-                gsp_fail=diagnostics.gsp_air_tx_ack_fail,
-                gs_tx=state.gs_tx_count,
-                gs_rx=state.gs_rx_count,
-                gs_crc=state.gs_crc_error_count,
-                air_ack_rx=diagnostics.air_ack_rx,
-                air_result=air_result_name,
-                pstatus=yes_no_text(self.i18n, diagnostics.preflight_status_capability_acked),
-                by_air_ack=yes_no_text(self.i18n, diagnostics.capability_acked_by_air_ack),
-                by_pstatus=yes_no_text(
-                    self.i18n, diagnostics.capability_acked_by_preflight_status
-                ),
-                duplicates=diagnostics.duplicate_capability_after_ack,
-                error=diagnostics.last_handshake_error or "—",
-                gsp_result=gsp_result,
-            )
-        )
+            key = "air_link.not_detected"
+        self.lbl_pf_air_link.setText(self.i18n.tr(key))
+        self.lbl_pf_air_link.setToolTip("")
         color = {
-            HandshakeState.ACKED: "#35b96f",
-            HandshakeState.HANDSHAKING: "#d7a928",
-            HandshakeState.ERROR: "#e04b4b",
-            HandshakeState.WAITING: "#888888",
-        }[handshake_state]
+            "air_link.connected": "#35b96f",
+            "air_link.handshaking": "#d7a928",
+            "air_link.downlink_wait": "#d7a928",
+            "air_link.unsupported": "#e04b4b",
+            "air_link.error": "#e04b4b",
+            "air_link.not_detected": "#888888",
+        }[key]
         self.lbl_pf_air_link.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+    def _render_mission_state(self, state: FlightControllerState) -> None:
+        presentation = state.mission_presentation
+        self.lbl_mission_state.setText(
+            self.i18n.enum("mission_phase", presentation.phase.value)
+        )
+        self._set_semantic_style(
+            self.lbl_mission_state,
+            "waiting"
+            if presentation.phase is MissionPhase.PRE_START
+            else "ready",
+        )
+        if presentation.last_critical_event_name:
+            self.lbl_mission_last_event.setText(
+                self.i18n.enum("status", presentation.last_critical_event_name)
+            )
+        else:
+            self.lbl_mission_last_event.setText(self.i18n.tr("mission.no_key_event"))
+
+        event_time = presentation.last_critical_event_time_ms
+        event_host_ns = presentation.last_critical_event_host_monotonic_ns
+        latest_times = [
+            value
+            for value in (state.latest_flight_time_ms, state.sensor.time_ms, event_time)
+            if value is not None
+        ]
+        if event_host_ns is not None:
+            elapsed_s = max(0.0, (time_monotonic_ns() - event_host_ns) / 1_000_000_000.0)
+            self.lbl_mission_event_elapsed.setText(
+                self.i18n.tr("mission.elapsed", seconds=elapsed_s)
+            )
+        elif event_time is None or not latest_times:
+            self.lbl_mission_event_elapsed.setText(self.i18n.tr("common.none"))
+        else:
+            elapsed_s = max(0.0, (max(latest_times) - event_time) / 1000.0)
+            self.lbl_mission_event_elapsed.setText(
+                self.i18n.tr("mission.elapsed", seconds=elapsed_s)
+            )
+        self.lbl_mission_parachute.setText(
+            self.i18n.tr(
+                "mission.parachute_deployed"
+                if presentation.parachute_deployed
+                else "mission.parachute_not_deployed"
+            )
+        )
 
     @staticmethod
     def _set_semantic_style(label: QLabel, state: str) -> None:
@@ -1204,8 +1371,9 @@ class MainWindow(QMainWindow):
             return
         self._last_event_revision = self._events.revision
         self.event_list.clear()
-        for event in reversed(self._events.snapshot()):
+        for event in self._events.snapshot():
             self.event_list.addItem(self._format_event(event))
+        self.event_list.scrollToBottom()
 
     def _format_event(self, event) -> str:
         name = self.i18n.enum("status", event.name)
@@ -1240,6 +1408,19 @@ class MainWindow(QMainWindow):
                     "alignment_state", enum_name(AirAlignmentState, event.arg0)
                 ),
             )
+        elif event.status_id == int(AirStatusId.CALIBRATION_DIAGNOSTIC):
+            reason = self.i18n.enum(
+                "calibration_diagnostic_reason",
+                enum_name(AirCalibrationDiagnosticReason, event.arg1),
+            )
+            if 0 <= event.arg0 < len(CalibrationDialog.FACE_NAMES):
+                detail = self.i18n.tr(
+                    "diagnostic.face_issue",
+                    face=CalibrationDialog.FACE_NAMES[event.arg0],
+                    reason=reason,
+                )
+            else:
+                detail = reason
         if detail:
             name = f"{name} {detail}"
         return self.i18n.tr(

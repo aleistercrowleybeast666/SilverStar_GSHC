@@ -32,6 +32,7 @@ from protocol.common import (
     AirAckResult,
     AirAlignmentState,
     AirCalibrationMode,
+    AirCalibrationDiagnosticReason,
     AirCalibrationState,
     AirCmdId,
     AirCommandPolicy,
@@ -50,6 +51,7 @@ from services.state_model import (
     FlightControllerState,
     FlightEvent,
     HandshakeState,
+    MissionPhase,
     SensorSnapshot,
     UiMessage,
     quat_to_euler_rpy,
@@ -96,6 +98,8 @@ def format_air_status_message(msg: AirStatusMessage, i18n: I18n | None = None) -
             status_text += f" {face} {'PASSED' if msg.arg1 == 1 else 'FAILED'}"
         elif msg.status_id == int(AirStatusId.CALIBRATION):
             status_text += f" {enum_name(AirCalibrationState, msg.arg0)}"
+        elif msg.status_id == int(AirStatusId.CALIBRATION_DIAGNOSTIC):
+            status_text += f" {enum_name(AirCalibrationDiagnosticReason, msg.arg1)} face={msg.arg0}"
         elif msg.status_id == int(AirStatusId.ALIGNMENT):
             status_text += f" {enum_name(AirAlignmentState, msg.arg0)}"
         return f"{status_text} @ {msg.time_ms} ms"
@@ -120,6 +124,11 @@ def format_air_status_message(msg: AirStatusMessage, i18n: I18n | None = None) -
     elif msg.status_id == int(AirStatusId.CALIBRATION):
         status_text += " " + translator.enum(
             "calibration_state", enum_name(AirCalibrationState, msg.arg0)
+        )
+    elif msg.status_id == int(AirStatusId.CALIBRATION_DIAGNOSTIC):
+        status_text += " " + translator.enum(
+            "calibration_diagnostic_reason",
+            enum_name(AirCalibrationDiagnosticReason, msg.arg1),
         )
     elif msg.status_id == int(AirStatusId.ALIGNMENT):
         status_text += " " + translator.enum(
@@ -830,9 +839,6 @@ class Controller(QObject):
         else:
             self.state.pending_command_name = ""
 
-    def _has_pending_air_cmd(self, cmd_id: int) -> bool:
-        return any(pending.cmd_id == (cmd_id & 0xFF) for pending in self.pending_air_cmds.values())
-
     def _pop_pending_air_cmd(self, cmd_id: int) -> PendingAirCommand | None:
         for key, pending in list(self.pending_air_cmds.items()):
             if pending.cmd_id == (cmd_id & 0xFF):
@@ -963,6 +969,19 @@ class Controller(QObject):
     def _handle_preflight_status(self, message: AirPreflightStatusMessage) -> None:
         diagnostics = self.state.handshake
         diagnostics.preflight_status_capability_acked = bool(message.capability_acked)
+        previous_face = self.state.calibration.current_face
+        previous_mode = self.state.calibration.mode
+        if previous_mode != message.calibration_mode:
+            self._clear_calibration_diagnostic()
+        elif previous_face != message.current_face:
+            diagnostic_face = self.state.latest_calibration_diagnostic_face
+            if diagnostic_face != message.current_face:
+                self._clear_calibration_diagnostic()
+        elif (
+            message.calibration_state == int(AirCalibrationState.IDLE)
+            and self.state.latest_calibration_diagnostic_reason
+        ):
+            self._clear_calibration_diagnostic()
         self.state.lifecycle_state = message.lifecycle_state
         self.state.calibration.state = message.calibration_state
         self.state.calibration.mode = message.calibration_mode
@@ -973,7 +992,13 @@ class Controller(QObject):
         self.state.alignment.attitude_ready = message.attitude_ready
         self.state.alignment.gnss_origin_ready = message.gnss_origin_ready
         self.state.alignment.baro_origin_ready = message.baro_origin_ready
-        self.state.alignment.ready = message.alignment_ready
+        self.state.alignment.ready = (
+            False
+            if message.alignment_state == int(AirAlignmentState.STALE)
+            else message.alignment_ready
+        )
+        if message.alignment_state == int(AirAlignmentState.STALE):
+            self._set_radio_message("radio.alignment_stale")
         self.state.system_ready = message.system_ready
         self.state.start_unlocked = message.start_unlocked
         self.state.selftest_passed = message.selftest_passed
@@ -1035,6 +1060,8 @@ class Controller(QObject):
         event: ProtocolEvent | None,
     ) -> None:
         self._mark_mission_started("first_flight_state", message.time_ms)
+        if self.state.mission_presentation.phase is MissionPhase.PRE_START:
+            self.state.mission_presentation.phase = MissionPhase.MISSION_ACTIVE
         self._handle_sensor_message(message, event, source="FLIGHT_STATE")
         if self.state.mission_first_time_ms is None:
             self.state.mission_first_time_ms = message.time_ms
@@ -1080,13 +1107,34 @@ class Controller(QObject):
             self.state.selftest_passed = bool(message.arg0)
         elif status_id == int(AirStatusId.MISSION_START):
             self._mark_mission_started("mission_start_status", message.time_ms)
+            self._update_mission_presentation(
+                MissionPhase.MISSION_ACTIVE,
+                "MISSION_START",
+                message.time_ms,
+                host_ns,
+            )
             self.state.lifecycle_state = int(AirLifecycleState.FLIGHT)
         elif status_id == int(AirStatusId.LAUNCH):
             self._mark_mission_started("launch_status", message.time_ms)
+            self._update_mission_presentation(
+                MissionPhase.IN_FLIGHT, "LAUNCH", message.time_ms, host_ns
+            )
             self.state.lifecycle_state = int(AirLifecycleState.FLIGHT)
         elif status_id == int(AirStatusId.PARACHUTE_DEPLOY):
+            self._mark_mission_started("parachute_deploy_status", message.time_ms)
+            self._update_mission_presentation(
+                MissionPhase.RECOVERY,
+                "PARACHUTE_DEPLOY",
+                message.time_ms,
+                host_ns,
+                parachute_deployed=True,
+            )
             self.state.lifecycle_state = int(AirLifecycleState.RECOVERY)
         elif status_id == int(AirStatusId.LANDING):
+            self._mark_mission_started("landing_status", message.time_ms)
+            self._update_mission_presentation(
+                MissionPhase.LANDED, "LANDING", message.time_ms, host_ns
+            )
             self.state.lifecycle_state = int(AirLifecycleState.LANDED)
         elif status_id == int(AirStatusId.LOCKED):
             self.state.start_unlocked = False
@@ -1097,10 +1145,15 @@ class Controller(QObject):
                 self.state.gnss_position_usable = bool(message.arg0)
         elif status_id == int(AirStatusId.ALIGNMENT):
             self.state.alignment.state = message.arg0
-            self.state.alignment.ready = message.arg0 == int(AirAlignmentState.READY)
+            # STATUS gives an immediate indication, but only PREFLIGHT_STATUS
+            # is allowed to assert alignment_ready again after STALE.
+            if message.arg0 != int(AirAlignmentState.READY):
+                self.state.alignment.ready = False
             self.state.alignment.attitude_ready = bool(message.arg1 & (1 << 0))
             self.state.alignment.gnss_origin_ready = bool(message.arg1 & (1 << 1))
             self.state.alignment.baro_origin_ready = bool(message.arg1 & (1 << 2))
+            if message.arg0 == int(AirAlignmentState.STALE):
+                self._set_radio_message("radio.alignment_stale")
         elif status_id == int(AirStatusId.CALIBRATION):
             self.state.calibration.state = message.arg0
             self.state.calibration.mode = message.arg1
@@ -1108,6 +1161,14 @@ class Controller(QObject):
         elif status_id == int(AirStatusId.CALIBRATION_FACE):
             if 0 <= message.arg0 <= 5 and message.arg1 == 1:
                 self.state.calibration.completed_face_mask |= 1 << message.arg0
+        elif status_id == int(AirStatusId.CALIBRATION_DIAGNOSTIC):
+            reason = message.arg1
+            if reason == int(AirCalibrationDiagnosticReason.NONE):
+                self._clear_calibration_diagnostic(time_ms=message.time_ms)
+            else:
+                self.state.latest_calibration_diagnostic_reason = reason
+                self.state.latest_calibration_diagnostic_face = message.arg0
+                self.state.latest_calibration_diagnostic_time = message.time_ms
 
     def _handle_ack_message(self, message: AirAckMessage) -> None:
         self.state.handshake.air_ack_rx += 1
@@ -1180,6 +1241,12 @@ class Controller(QObject):
                 int(AirCmdId.CAL_STOP),
                 int(AirCmdId.CAL_RESET),
             }:
+                if message.ack_cmd_id in {
+                    int(AirCmdId.CAL_START),
+                    int(AirCmdId.CAL_FACE),
+                    int(AirCmdId.CAL_RESET),
+                }:
+                    self._clear_calibration_diagnostic()
                 self._set_radio_message("radio.calibration_accepted", command=command_name)
             elif message.ack_cmd_id in {
                 int(AirCmdId.ALIGN_START),
@@ -1225,6 +1292,30 @@ class Controller(QObject):
         ):
             self.state.mission_first_time_ms = int(time_ms)
         self._refresh_pending_command_name()
+
+    def _update_mission_presentation(
+        self,
+        phase: MissionPhase,
+        event_name: str,
+        time_ms: int,
+        host_monotonic_ns: int,
+        *,
+        parachute_deployed: bool | None = None,
+    ) -> None:
+        presentation = self.state.mission_presentation
+        presentation.phase = phase
+        presentation.last_critical_event_name = event_name
+        presentation.last_critical_event_time_ms = int(time_ms)
+        presentation.last_critical_event_host_monotonic_ns = int(host_monotonic_ns)
+        if parachute_deployed is not None:
+            presentation.parachute_deployed = bool(parachute_deployed)
+
+    def _clear_calibration_diagnostic(self, *, time_ms: int | None = None) -> None:
+        self.state.latest_calibration_diagnostic_reason = int(
+            AirCalibrationDiagnosticReason.NONE
+        )
+        self.state.latest_calibration_diagnostic_face = 0xFF
+        self.state.latest_calibration_diagnostic_time = time_ms
 
     def _clear_mission_packet_stats(self) -> None:
         self.mission_packet_tracking_active = False

@@ -137,7 +137,11 @@ Lifecycle：
 
 Calibration state：0=`IDLE`、1=`WAIT_FACE`、2=`COLLECTING`、3=`CHECKING`、4=`READY`、5=`FAILED`。Calibration mode：0=`NONE`、1=`ONE_FACE`、2=`SIX_FACE`、`0xFF=NOT_SELECTED`。
 
-Alignment state：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAILED`。
+Alignment state：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAILED`、5=`STALE`。
+
+`STALE` 表示本次 Alignment 曾经达到 `READY`，但在 START 前检测到足以使初始状态失效的运动。`STALE` 必须使 `flags.alignment_ready=0`，并重新阻止 START；它是锁存状态，不允许自动重新对准，只能通过显式 `ALIGN_START`（或先 `ALIGN_RESET` 再 `ALIGN_START`）重新建立有效 Alignment。对准有效性监视只在 START 前启用，START 成功后停止，避免正常飞行动作触发失效。
+
+`PREFLIGHT_STATUS` byte6 的 attitude/GNSS/barometer ready 位描述各 source 当前的局部准备状态；当整体 Alignment 因运动进入 `STALE` 时，这些局部 ready 位允许继续保持，以便诊断“source 本身仍有数据，但本次 Alignment 已失效”。是否允许 START 必须以 `flags.alignment_ready` 和 `start_block_reason` 为准。
 
 ### 5.2 flags
 
@@ -253,10 +257,71 @@ START 成功后以 5 Hz 发送。START 前不发送。
 | `0x0A` | `ALIGNMENT` | Alignment state | ready mask |
 | `0x0B` | `CALIBRATION` | Calibration state | Calibration mode |
 | `0x0C` | `CALIBRATION_FACE` | face 0..5 | 0=`FAILED`、1=`PASSED` |
+| `0x0D` | `CALIBRATION_DIAGNOSTIC` | face 0..5，`0xFF`=非特定面/ONE_FACE | diagnostic reason，见 9.1 |
 
-预飞控制命令的`ACK=OK`只表示请求已被飞控接受，不表示异步Calibration/Alignment已经完成。`CALIBRATION_FACE`的`PASSED`只在该面完整采样和检查通过后产生；`CALIBRATION`和`ALIGNMENT`进入READY/FAILED时表示对应事务最终结果。`PREFLIGHT_STATUS`是当前状态的周期权威快照，用于恢复可能丢失的边沿事件。
+预飞控制命令的`ACK=OK`只表示请求已被飞控接受，不表示异步Calibration/Alignment已经完成。`CALIBRATION_FACE`的`PASSED`只在该面完整采样和检查通过后产生；`CALIBRATION`进入READY/FAILED时表示校准事务最终结果；`ALIGNMENT`进入READY/FAILED/STALE时表示对准事务或有效性发生了最终/关键状态变化。`PREFLIGHT_STATUS`是当前状态的周期权威快照，用于恢复可能丢失的边沿事件。
 
 这些是边沿事件：表示“刚才发生了什么”。`PREFLIGHT_STATUS` 是状态快照：表示“现在是什么状态”。两者必须同时保留。
+
+### 9.1 Calibration diagnostic reason
+
+`CALIBRATION_DIAGNOSTIC` 用于向 Ground Station/PC 报告校准为何正在等待、为何某次面采集被拒绝，或为何某个采样窗口被废弃。它不改变 Calibration 的最终通过/失败语义。
+
+| 值 | 名称 | 语义 |
+|---:|---|---|
+| `0x00` | `NONE` | 当前无诊断阻塞；也用于清除上一次诊断 |
+| `0x01` | `NO_STREAM` | 没有可用/新鲜的惯性数据流 |
+| `0x02` | `GYRO_MOVING` | 角速度超过静止判据 |
+| `0x03` | `ACCEL_MAGNITUDE` | 比力/加速度模长偏离静止重力允许范围 |
+| `0x04` | `GRAVITY_DIRECTION` | 当前重力方向与要求的面/方向不符 |
+| `0x05` | `VARIANCE` | 采样窗口方差超限 |
+| `0x06` | `SAMPLE_GAP` | 样本间隔/数据连续性不满足要求 |
+
+发送规则：
+
+- 只在 START 前、Calibration 事务相关阶段发送；
+- `reason` 发生变化时发送一次，不得按 IMU 采样频率重复发送同一 reason；
+- reason 从非 `NONE` 恢复为 `NONE` 时发送一次，用于 Ground Station/PC 清除旧错误提示；
+- `CAL START`、`CAL RESET` 或进入一个新的 SIX_FACE face 时应重置诊断状态；必要时可发送 `NONE`；
+- `CAL FACE` 在命令刚被接受/拒绝时若飞控已经知道明确的静止、比力或方向原因，应在安全发送机会发送对应 `CALIBRATION_DIAGNOSTIC`；
+- 采样期间因运动、比力、方差或 sample gap 导致窗口自动作废并重试时，Calibration 不必进入 `FAILED`；诊断事件只解释当前等待/重试原因；
+- `CALIBRATION_FACE` 的 `PASSED/FAILED` 和 `CALIBRATION` 的 READY/FAILED 仍然是事务结果，`CALIBRATION_DIAGNOSTIC` 只是解释性状态事件。
+
+Ground Station/PC 应将 diagnostic reason 作为可读提示显示，但仍以 `PREFLIGHT_STATUS`、`CALIBRATION_FACE` 和 `CALIBRATION` 作为当前状态/最终结果的权威来源。
+
+### 9.2 Alignment READY 后的有效性
+
+Alignment 达到 `READY` 后、START 成功前，飞控必须继续进行非阻塞的 Alignment validity guard。具体运动判据和阈值属于固件 System/User 配置，不编码进 AIR Profile；典型输入可以包括 corrected gyro、静止比力条件和当前姿态相对 Alignment reference 的变化。
+
+当 guard 判定飞控在 START 前发生了足以使初始状态失效的运动：
+
+```text
+ALIGNMENT READY
+    -> STALE
+alignment_ready = 0
+system_ready 重新计算
+START 被阻止
+```
+
+同时发送：
+
+```text
+STATUS ALIGNMENT
+arg0 = STALE
+arg1 = 当前 source ready mask
+```
+
+并在后续 `PREFLIGHT_STATUS` 中持续反映：
+
+```text
+alignment_state = STALE
+flags.alignment_ready = 0
+start_block_reason = ALIGNMENT_REQUIRED
+```
+
+除非另有更高优先级的 START block reason。
+
+`STALE` 不允许自动恢复为 `READY`；用户必须显式执行新的 `ALIGN_START`。START 成功后 validity guard 停止，本机制不得对正常飞行运动产生影响。
 
 ## 10. CMD（`0x30`，9 字节）
 
@@ -319,6 +384,8 @@ START 成功后以 5 Hz 发送。START 前不发送。
 Calibration READY -> Alignment READY -> START READY
 ```
 
+如果 Alignment 在 START 前进入 `STALE`，则 `alignment_ready=0`，必须重新执行 `ALIGN_START`，不能仅由 Ground Station/PC 忽略该状态继续 START。
+
 AIR START 额外要求 Capability ACKED 和 interlock UNLOCKED。GNSS 是 Optional：无预飞 GNSS origin 不阻止 START，但本次任务不启用 GNSS 融合。
 
 0.0.8 的 START 前发送优先级：
@@ -337,11 +404,11 @@ START 成功后：Capability、`PREFLIGHT_STATUS`、`PREFLIGHT_STATE` 永久停�
 
 ## 13. Ground Station/PC 记录建议
 
-本轮不修改 PC 工程。后续 consumer 建议分别记录：
+Ground Station/PC consumer 建议分别记录：
 
 - `SESSION/CAPABILITY`：每个会话至少保存一次，用于解释该会话全部 AIR 帧；
 - `PREFLIGHT_STATUS snapshots`：每个收到的快照均可记录；
-- `STATUS EVENT`：全部记录，不能被快照替代；
+- `STATUS EVENT`：全部记录，包括 Calibration diagnostic 和 Alignment `STALE`，不能被快照替代；
 - `PREFLIGHT_STATE` 和 `FLIGHT_STATE`：记录解析后的物理量，并同时保留 profile 与量程上下文。
 
 飞控本地 TF/LOG 不需要机械保存每个 1 Hz `PREFLIGHT_STATUS` 广播；继续记录实际 Calibration、Alignment 和 System 状态变化事件。

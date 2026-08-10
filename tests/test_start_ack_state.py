@@ -15,6 +15,7 @@ from protocol.air import (
 from protocol.common import (
     AirAckResult,
     AirAlignmentState,
+    AirCalibrationDiagnosticReason,
     AirCalibrationMode,
     AirCalibrationState,
     AirCmdId,
@@ -24,7 +25,12 @@ from protocol.common import (
     GspType,
 )
 from protocol.gsp_min import GspAck
-from services.state_model import EventHistory, FlightControllerState, HandshakeState
+from services.state_model import (
+    EventHistory,
+    FlightControllerState,
+    HandshakeState,
+    MissionPhase,
+)
 
 
 class FakeLogger:
@@ -72,6 +78,7 @@ def preflight_status(
     start_unlocked: bool = False,
     system_ready: bool = False,
     start_block_reason: int = int(AirAckResult.ALIGNMENT_REQUIRED),
+    current_face: int = 0xFF,
 ) -> AirPreflightStatusMessage:
     return AirPreflightStatusMessage(
         seq=7,
@@ -83,7 +90,7 @@ def preflight_status(
         ),
         calibration_mode=int(AirCalibrationMode.SIX_FACE),
         completed_face_mask=completed_face_mask,
-        current_face=0xFF,
+        current_face=current_face,
         alignment_state=alignment_state,
         attitude_ready=attitude_ready,
         gnss_origin_ready=False,
@@ -286,10 +293,70 @@ class CapabilityHandshakeTests(unittest.TestCase):
 
 
 class PreflightStateTests(unittest.TestCase):
+    def test_calibration_diagnostic_updates_and_none_clears_without_failing(self) -> None:
+        controller = make_controller()
+        controller.state.calibration.state = int(AirCalibrationState.COLLECTING)
+        controller.state.calibration.mode = int(AirCalibrationMode.SIX_FACE)
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=1,
+                status_id=int(AirStatusId.CALIBRATION_DIAGNOSTIC),
+                time_ms=100,
+                arg0=2,
+                arg1=int(AirCalibrationDiagnosticReason.GRAVITY_DIRECTION),
+            ),
+            None,
+        )
+
+        self.assertEqual(
+            controller.state.latest_calibration_diagnostic_reason,
+            int(AirCalibrationDiagnosticReason.GRAVITY_DIRECTION),
+        )
+        self.assertEqual(controller.state.latest_calibration_diagnostic_face, 2)
+        self.assertEqual(controller.state.calibration.state, int(AirCalibrationState.COLLECTING))
+
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=2,
+                status_id=int(AirStatusId.CALIBRATION_DIAGNOSTIC),
+                time_ms=120,
+                arg0=0xFF,
+                arg1=int(AirCalibrationDiagnosticReason.NONE),
+            ),
+            None,
+        )
+        self.assertEqual(
+            controller.state.latest_calibration_diagnostic_reason,
+            int(AirCalibrationDiagnosticReason.NONE),
+        )
+        self.assertEqual(controller.state.latest_calibration_diagnostic_face, 0xFF)
+        self.assertEqual(controller.state.calibration.state, int(AirCalibrationState.COLLECTING))
+
+    def test_new_six_face_snapshot_clears_old_diagnostic(self) -> None:
+        controller = make_controller()
+        controller.state.calibration.mode = int(AirCalibrationMode.SIX_FACE)
+        controller.state.calibration.current_face = 2
+        controller.state.latest_calibration_diagnostic_reason = int(
+            AirCalibrationDiagnosticReason.VARIANCE
+        )
+        controller.state.latest_calibration_diagnostic_face = 2
+
+        controller._handle_preflight_status(
+            preflight_status(capability_acked=True, current_face=3)
+        )
+
+        self.assertEqual(
+            controller.state.latest_calibration_diagnostic_reason,
+            int(AirCalibrationDiagnosticReason.NONE),
+        )
+
     def test_calibration_ack_ok_does_not_mark_face_passed(self) -> None:
         controller = make_controller()
         controller.state.capability = capability()
         controller.state.capability_acked = True
+        controller.state.latest_calibration_diagnostic_reason = int(
+            AirCalibrationDiagnosticReason.VARIANCE
+        )
         add_pending(controller, int(AirCmdId.CAL_FACE), seq=9)
 
         controller._handle_ack_message(
@@ -303,6 +370,10 @@ class PreflightStateTests(unittest.TestCase):
         )
 
         self.assertEqual(controller.state.calibration.completed_face_mask, 0)
+        self.assertEqual(
+            controller.state.latest_calibration_diagnostic_reason,
+            int(AirCalibrationDiagnosticReason.NONE),
+        )
         self.assertEqual(controller.state.radio_message.key, "radio.calibration_accepted")
 
     def test_face_event_and_snapshot_both_authoritatively_complete_faces(self) -> None:
@@ -364,6 +435,45 @@ class PreflightStateTests(unittest.TestCase):
         )
         self.assertTrue(controller.state.alignment.ready)
 
+    def test_alignment_stale_requires_a_later_ready_snapshot(self) -> None:
+        controller = make_controller()
+        controller.state.alignment.state = int(AirAlignmentState.READY)
+        controller.state.alignment.ready = True
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=1,
+                status_id=int(AirStatusId.ALIGNMENT),
+                time_ms=200,
+                arg0=int(AirAlignmentState.STALE),
+                arg1=0x07,
+            ),
+            None,
+        )
+        self.assertEqual(controller.state.alignment.state, int(AirAlignmentState.STALE))
+        self.assertFalse(controller.state.alignment.ready)
+
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=2,
+                status_id=int(AirStatusId.ALIGNMENT),
+                time_ms=220,
+                arg0=int(AirAlignmentState.READY),
+                arg1=0x07,
+            ),
+            None,
+        )
+        self.assertFalse(controller.state.alignment.ready)
+
+        controller._handle_preflight_status(
+            preflight_status(
+                capability_acked=True,
+                calibration_ready=True,
+                alignment_ready=True,
+                alignment_state=int(AirAlignmentState.READY),
+            )
+        )
+        self.assertTrue(controller.state.alignment.ready)
+
 
 class MissionRecoveryTests(unittest.TestCase):
     def test_first_flight_state_recovers_lost_start_ack(self) -> None:
@@ -378,6 +488,11 @@ class MissionRecoveryTests(unittest.TestCase):
         self.assertFalse(controller.pending_air_cmds)
         self.assertEqual(controller.state.mission_start_source, "first_flight_state")
         self.assertEqual(list(controller.state.live_plot.time_s), [0.0])
+        self.assertIs(
+            controller.state.mission_presentation.phase,
+            MissionPhase.MISSION_ACTIVE,
+        )
+        self.assertEqual(controller.state.mission_presentation.last_critical_event_name, "")
 
     def test_start_ack_ok_enters_mission(self) -> None:
         controller = make_controller()
@@ -397,6 +512,37 @@ class MissionRecoveryTests(unittest.TestCase):
 
         self.assertTrue(controller.state.mission_started)
         self.assertEqual(controller.state.mission_first_time_ms, 900)
+        self.assertIs(
+            controller.state.mission_presentation.phase, MissionPhase.PRE_START
+        )
+
+    def test_mission_state_follows_only_authoritative_key_events(self) -> None:
+        controller = make_controller()
+        transitions = (
+            (AirStatusId.MISSION_START, MissionPhase.MISSION_ACTIVE, False),
+            (AirStatusId.LAUNCH, MissionPhase.IN_FLIGHT, False),
+            (AirStatusId.PARACHUTE_DEPLOY, MissionPhase.RECOVERY, True),
+            (AirStatusId.LANDING, MissionPhase.LANDED, True),
+        )
+        for index, (status_id, phase, deployed) in enumerate(transitions):
+            controller._handle_status_message(
+                AirStatusMessage(
+                    seq=index,
+                    status_id=int(status_id),
+                    time_ms=1000 + index * 100,
+                    arg0=0,
+                    arg1=0,
+                ),
+                None,
+            )
+            self.assertIs(controller.state.mission_presentation.phase, phase)
+            self.assertEqual(
+                controller.state.mission_presentation.last_critical_event_name,
+                status_id.name,
+            )
+            self.assertEqual(
+                controller.state.mission_presentation.parachute_deployed, deployed
+            )
 
     def test_all_status_events_enter_bounded_history(self) -> None:
         controller = make_controller()

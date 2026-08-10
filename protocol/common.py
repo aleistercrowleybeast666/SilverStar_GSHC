@@ -64,6 +64,17 @@ class AirAlignmentState(IntEnum):
     CHECKING = 2
     READY = 3
     FAILED = 4
+    STALE = 5
+
+
+class AirCalibrationDiagnosticReason(IntEnum):
+    NONE = 0
+    NO_STREAM = 1
+    GYRO_MOVING = 2
+    ACCEL_MAGNITUDE = 3
+    GRAVITY_DIRECTION = 4
+    VARIANCE = 5
+    SAMPLE_GAP = 6
 
 
 class AirAlignmentCapability(IntFlag):
@@ -100,6 +111,7 @@ class AirStatusId(IntEnum):
     ALIGNMENT = 0x0A
     CALIBRATION = 0x0B
     CALIBRATION_FACE = 0x0C
+    CALIBRATION_DIAGNOSTIC = 0x0D
 
 
 class AirCmdId(IntEnum):

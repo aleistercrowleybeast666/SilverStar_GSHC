@@ -20,7 +20,13 @@ from protocol.air import (
     gyro_raw_to_radps,
     parse_air_frame,
 )
-from protocol.common import AirCmdId, AirStatusId, GspType
+from protocol.common import (
+    AirAlignmentState,
+    AirCalibrationDiagnosticReason,
+    AirCmdId,
+    AirStatusId,
+    GspType,
+)
 from protocol.gsp_min import GspFrame, GsToPcAirFrame, parse_gsp_frame
 
 
@@ -135,6 +141,38 @@ class AirProtocolTests(unittest.TestCase):
         command = build_air_cmd(5, int(AirCmdId.CAL_FACE), 0x43414C30, 4, 0)
         self.assertEqual(len(command), 9)
         self.assertEqual(command[2], int(AirCmdId.CAL_FACE))
+
+    def test_all_calibration_diagnostic_reasons_parse_canonically(self) -> None:
+        for reason in AirCalibrationDiagnosticReason:
+            frame = struct.pack(
+                "<BBBIBB",
+                0x20,
+                int(reason),
+                int(AirStatusId.CALIBRATION_DIAGNOSTIC),
+                1000 + int(reason),
+                0xFF if reason is AirCalibrationDiagnosticReason.NONE else int(reason) - 1,
+                int(reason),
+            )
+            _air, message = parse_air_frame(frame)
+            self.assertIsInstance(message, AirStatusMessage)
+            self.assertEqual(
+                message.status_id, int(AirStatusId.CALIBRATION_DIAGNOSTIC)
+            )
+            self.assertEqual(message.arg1, int(reason))
+
+    def test_alignment_stale_status_value_is_preserved(self) -> None:
+        frame = struct.pack(
+            "<BBBIBB",
+            0x20,
+            9,
+            int(AirStatusId.ALIGNMENT),
+            1200,
+            int(AirAlignmentState.STALE),
+            0x07,
+        )
+        _air, message = parse_air_frame(frame)
+        self.assertIsInstance(message, AirStatusMessage)
+        self.assertEqual(message.arg0, int(AirAlignmentState.STALE))
 
     def test_all_fixed_lengths_are_strict(self) -> None:
         with self.assertRaisesRegex(ValueError, "bad AIR_CAPABILITY length"):

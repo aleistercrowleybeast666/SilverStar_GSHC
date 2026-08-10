@@ -10,9 +10,21 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from protocol.air import AirCapabilityMessage
-from protocol.common import AirAlignmentState, AirCalibrationMode, AirCalibrationState
-from services.i18n import I18n
-from services.state_model import EventHistory, FlightControllerState
+from protocol.common import (
+    AirAlignmentState,
+    AirCalibrationDiagnosticReason,
+    AirCalibrationMode,
+    AirCalibrationState,
+    AirStatusId,
+)
+from services.i18n import I18n, Language
+from services.state_model import (
+    EventHistory,
+    FlightControllerState,
+    FlightEvent,
+    HandshakeState,
+    MissionPhase,
+)
 from ui.main_window import MainWindow
 
 
@@ -64,6 +76,7 @@ class UiWorkflowTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.window.calibration_dialog.close()
+        self.window.link_details_dialog.close()
         self.window.close()
         self.temporary_directory.cleanup()
 
@@ -109,6 +122,142 @@ class UiWorkflowTests(unittest.TestCase):
         self.window.render_state()
         self.assertFalse(self.window.btn_start.isEnabled())
         self.assertEqual(self.window.lbl_start_reason.text(), "需要完成初对准")
+
+    def test_alignment_stale_disables_start_and_reenables_alignment(self) -> None:
+        state = ready_state()
+        state.alignment.state = int(AirAlignmentState.STALE)
+        state.alignment.ready = False
+        self.window.bind_runtime_model(state, EventHistory(), select_preflight=True)
+
+        self.assertFalse(self.window.btn_start.isEnabled())
+        self.assertTrue(self.window.btn_align_start.isEnabled())
+        self.assertEqual(self.window.lbl_align_state.text(), "初对准已失效")
+        self.assertIn("重新执行初对准", self.window.lbl_align_hint.text())
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.assertEqual(self.window.lbl_align_state.text(), "Alignment Stale")
+        self.assertEqual(
+            self.window.lbl_align_hint.text(),
+            "Movement detected after alignment; run alignment again",
+        )
+
+    def test_six_face_diagnostic_is_visible_and_localized(self) -> None:
+        state = ready_state()
+        state.calibration.state = int(AirCalibrationState.COLLECTING)
+        state.calibration.ready = False
+        state.calibration.current_face = 0
+        state.latest_calibration_diagnostic_face = 0
+        state.latest_calibration_diagnostic_reason = int(
+            AirCalibrationDiagnosticReason.GRAVITY_DIRECTION
+        )
+        self.window.bind_runtime_model(state, EventHistory())
+        self.window.calibration_dialog.render(state)
+
+        self.assertEqual(
+            self.window.lbl_cal_issue.text(),
+            "X+：当前重力方向与所选面不符",
+        )
+        self.assertIn("X+：当前重力方向与所选面不符", self.window.calibration_dialog.lbl_issue.text())
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.assertEqual(
+            self.window.lbl_cal_issue.text(),
+            "X+: Current gravity direction does not match the selected face",
+        )
+
+    def test_event_history_is_preflight_chronological_and_scrolls_to_bottom(self) -> None:
+        state = ready_state()
+        events = EventHistory()
+        for index in range(40):
+            events.append(
+                FlightEvent(
+                    seq=index,
+                    status_id=int(AirStatusId.BOOT),
+                    name="BOOT",
+                    time_ms=index,
+                    arg0=0,
+                    arg1=0,
+                    host_rx_monotonic_ns=index,
+                )
+            )
+        self.window.show()
+        self.window.bind_runtime_model(state, events, select_preflight=True)
+        self.application.processEvents()
+
+        self.assertTrue(self.window.preflight_page.isAncestorOf(self.window.event_list))
+        self.assertFalse(self.window.flight_page.isAncestorOf(self.window.event_list))
+        self.assertIn("0 ms", self.window.event_list.item(0).text())
+        self.assertIn("39 ms", self.window.event_list.item(39).text())
+        scrollbar = self.window.event_list.verticalScrollBar()
+        scrollbar.setValue(scrollbar.minimum())
+        events.append(
+            FlightEvent(
+                seq=40,
+                status_id=int(AirStatusId.BOOT),
+                name="BOOT",
+                time_ms=40,
+                arg0=0,
+                arg1=0,
+                host_rx_monotonic_ns=40,
+            )
+        )
+        self.window.render_state()
+        self.application.processEvents()
+        self.assertEqual(scrollbar.value(), scrollbar.maximum())
+
+    def test_air_link_is_short_and_details_keep_full_diagnostics(self) -> None:
+        state = ready_state()
+        diagnostics = state.handshake
+        diagnostics.handshake_state = HandshakeState.HANDSHAKING
+        diagnostics.last_capability_seq = 17
+        diagnostics.capability_ack_cmd_seq = 29
+        diagnostics.capability_ack_attempts = 3
+        diagnostics.gsp_air_tx_requests = 4
+        diagnostics.gsp_air_tx_ack_ok = 2
+        diagnostics.gsp_air_tx_ack_fail = 1
+        self.window.bind_runtime_model(state, EventHistory())
+
+        short_text = self.window.lbl_pf_air_link.text()
+        self.assertEqual(short_text, "握手中")
+        for fragment in ("Cap#", "CMD#", "GSP", "attempt"):
+            self.assertNotIn(fragment, short_text)
+
+        self.window.link_details_dialog.render(state)
+        details = self.window.link_details_dialog.details_text.toPlainText()
+        self.assertIn("最新 Capability seq：17", details)
+        self.assertIn("ACK 尝试次数：3", details)
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.window.link_details_dialog.render(state)
+        details = self.window.link_details_dialog.details_text.toPlainText()
+        self.assertIn("Latest Capability seq: 17", details)
+        self.assertIn("Capability ACK CMD seq: 29", details)
+        self.assertIn("ACK attempts: 3", details)
+        self.assertIn("GSP ACK OK / FAIL: 2 / 1", details)
+        self.assertIn("protocol_queue=", details)
+
+    def test_flight_page_mission_state_does_not_infer_launch(self) -> None:
+        state = ready_state()
+        state.mission_started = True
+        state.mission_presentation.phase = MissionPhase.MISSION_ACTIVE
+        state.latest_flight_time_ms = 1000
+        self.window.bind_runtime_model(state, EventHistory())
+        self.assertEqual(
+            self.window.lbl_mission_state.text(), "任务已开始 / 等待发射"
+        )
+        self.assertNotIn("发射", self.window.lbl_mission_last_event.text())
+
+        state.mission_presentation.phase = MissionPhase.IN_FLIGHT
+        state.mission_presentation.last_critical_event_name = "LAUNCH"
+        state.mission_presentation.last_critical_event_time_ms = 900
+        self.window.render_state()
+        self.assertEqual(self.window.lbl_mission_state.text(), "飞行中")
+        self.assertEqual(self.window.lbl_mission_last_event.text(), "发射")
 
     def test_calibration_dialog_only_lists_capability_declared_modes(self) -> None:
         state = ready_state()

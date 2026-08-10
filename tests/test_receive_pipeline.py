@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from protocol.air import AirAckMessage, AirCapabilityMessage, AirFlightStateMessage
-from protocol.common import AirAckResult, AirCmdId, GspType
+from protocol.common import AirAckResult, AirCmdId, AirStatusId, GspType
 from protocol.gsp_min import GspParser, build_gsp_frame
 from protocol.receive_pipeline import ReceivePipeline, protocol_event_log_records
 from services.logger import AsyncJsonlLogger
@@ -68,6 +68,23 @@ def gs_status_gsp(counter: int) -> bytes:
 
 
 class ReceivePipelineStressTests(unittest.TestCase):
+    def test_calibration_diagnostic_json_uses_canonical_status_name(self) -> None:
+        diagnostic = struct.pack(
+            "<BBBIBB",
+            0x20,
+            8,
+            int(AirStatusId.CALIBRATION_DIAGNOSTIC),
+            456,
+            2,
+            4,
+        )
+        event = ReceivePipeline().feed(air_rx_gsp(diagnostic))[0]
+        records = protocol_event_log_records(event)
+        status = next(record for record in records if record.get("kind") == "STATUS")
+        self.assertEqual(status["status_name"], "CALIBRATION_DIAGNOSTIC")
+        self.assertEqual(status["arg0"], 2)
+        self.assertEqual(status["arg1"], 4)
+
     def test_late_capability_is_parsed_without_session_or_logger_side_effects(self) -> None:
         pipeline = ReceivePipeline()
         events = pipeline.feed(

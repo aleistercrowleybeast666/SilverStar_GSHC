@@ -130,8 +130,6 @@ ZH_CN: dict[str, str] = {
     "handshake.HANDSHAKING": "握手中",
     "handshake.ACKED": "已握手",
     "handshake.ERROR": "握手错误",
-    "handshake.summary": "Cap#{cap_seq} → CMD#{cmd_seq} ×{attempts}；GSP OK/FAIL={gsp_ok}/{gsp_fail}；AIR={air_result}",
-    "handshake.tooltip": "握手状态={state}\nLast Capability RX seq={cap_seq}\nAccepted Capability seq={accepted_cap_seq}\nACK CMD seq={cmd_seq}\nACK attempts={attempts}\nPC→GS AIR_TX requests={requests}\nSerial writes={serial_writes}, bytes={serial_bytes}\nGSP AIR_TX ACK OK/FAIL={gsp_ok}/{gsp_fail}\nLast GSP AIR_TX ACK={gsp_result}\nGS TX/RX/CRC={gs_tx}/{gs_rx}/{gs_crc}\nAIR ACK RX={air_ack_rx}, result={air_result}\nPREFLIGHT_STATUS capability_acked={pstatus}\nACKED by AIR ACK={by_air_ack}\nACKED by PREFLIGHT_STATUS={by_pstatus}\nLate Capability after ACK={duplicates}\nLast error={error}",
     "sensor.wait_capability_raw": "等待 Capability；raw={raw}",
     "sensor.quat_valid": "有效",
     "sensor.quat_invalid": "无效（raw=0）",
@@ -325,8 +323,6 @@ EN_US: dict[str, str] = {
     "handshake.HANDSHAKING": "Handshaking",
     "handshake.ACKED": "Acknowledged",
     "handshake.ERROR": "Handshake Error",
-    "handshake.summary": "Cap#{cap_seq} → CMD#{cmd_seq} ×{attempts}; GSP OK/FAIL={gsp_ok}/{gsp_fail}; AIR={air_result}",
-    "handshake.tooltip": "Handshake state={state}\nLast Capability RX seq={cap_seq}\nAccepted Capability seq={accepted_cap_seq}\nACK CMD seq={cmd_seq}\nACK attempts={attempts}\nPC→GS AIR_TX requests={requests}\nSerial writes={serial_writes}, bytes={serial_bytes}\nGSP AIR_TX ACK OK/FAIL={gsp_ok}/{gsp_fail}\nLast GSP AIR_TX ACK={gsp_result}\nGS TX/RX/CRC={gs_tx}/{gs_rx}/{gs_crc}\nAIR ACK RX={air_ack_rx}, result={air_result}\nPREFLIGHT_STATUS capability_acked={pstatus}\nACKED by AIR ACK={by_air_ack}\nACKED by PREFLIGHT_STATUS={by_pstatus}\nLate Capability after ACK={duplicates}\nLast error={error}",
     "sensor.wait_capability_raw": "Waiting for Capability; raw={raw}",
     "sensor.quat_valid": "valid",
     "sensor.quat_invalid": "invalid (raw=0)",
@@ -406,6 +402,107 @@ EN_US: dict[str, str] = {
     "message.processing_success": "Data processing completed:\n{path}",
     "message.processing_failed": "The file could not be processed:\n{error}",
 }
+
+
+ZH_CN.update(
+    {
+        "button.details": "详情",
+        "dialog.link_details.title": "链路详情",
+        "group.mission_state": "火箭当前状态",
+        "field.current_issue": "当前提示",
+        "field.alignment_hint": "对准提示",
+        "field.mission_state": "当前任务状态",
+        "field.last_key_event": "最近关键事件",
+        "field.event_elapsed": "距该事件",
+        "field.parachute_status": "回收 / 降落伞",
+        "alignment.stale.hint": "检测到对准后移动，请重新执行初对准",
+        "radio.alignment_stale": "检测到对准后移动，请重新执行初对准",
+        "diagnostic.face_issue": "{face}：{reason}",
+        "mission.no_key_event": "尚无关键任务事件",
+        "mission.elapsed": "{seconds:.1f} 秒",
+        "mission.parachute_deployed": "降落伞已展开",
+        "mission.parachute_not_deployed": "未收到降落伞展开事件",
+        "air_link.not_detected": "未发现飞控",
+        "air_link.downlink_wait": "AIR下行正常 · 等待握手",
+        "air_link.handshaking": "握手中",
+        "air_link.connected": "已连接",
+        "air_link.unsupported": "协议不兼容",
+        "air_link.error": "链路异常",
+        "link_details.body": "Capability / AIR 握手\n"
+        "Profile / IMU 量程：{profile} / {accel} g / {gyro} dps\n"
+        "校准模式掩码 / 对准源掩码：{calibration_mask} / {alignment_mask}\n"
+        "命令策略：{policy}\n"
+        "握手状态：{handshake_state}\n"
+        "最新 Capability seq：{cap_seq}\n"
+        "已接受 Capability seq：{accepted_cap_seq}\n"
+        "Capability ACK CMD seq：{cmd_seq}\n"
+        "ACK 尝试次数：{attempts}\n"
+        "GSP AIR_TX 请求数：{requests}\n"
+        "串口写入次数 / 字节数：{serial_writes} / {serial_bytes}\n"
+        "GSP ACK 成功 / 失败：{gsp_ok} / {gsp_fail}\n"
+        "最近 GSP ACK：{gsp_result}\n"
+        "最近 AIR ACK / 接收数：{air_result} / {air_ack_rx}\n"
+        "PREFLIGHT_STATUS capability_acked: {pstatus}\n"
+        "ACK 来源 AIR / PREFLIGHT_STATUS：{by_air_ack} / {by_pstatus}\n"
+        "重复或过期 Capability：{duplicates}\n"
+        "最近握手错误：{error}\n\n"
+        "地面站 / 无线\n"
+        "地面站状态 / 无线状态：{gs_state} / {radio_state}\n"
+        "地面站 TX / RX / CRC：{gs_tx} / {gs_rx} / {gs_crc}\n"
+        "RSSI / SNR：{rssi} / {snr}\n\n"
+        "PC 接收 / 解析 / 日志\n{receive_health}",
+    }
+)
+
+EN_US.update(
+    {
+        "button.details": "Details",
+        "dialog.link_details.title": "Link Details",
+        "group.mission_state": "Mission State",
+        "field.current_issue": "Current Issue",
+        "field.alignment_hint": "Alignment Guidance",
+        "field.mission_state": "Current Mission State",
+        "field.last_key_event": "Last Key Event",
+        "field.event_elapsed": "Time Since Event",
+        "field.parachute_status": "Recovery / Parachute",
+        "alignment.stale.hint": "Movement detected after alignment; run alignment again",
+        "radio.alignment_stale": "Movement detected after alignment; run alignment again",
+        "diagnostic.face_issue": "{face}: {reason}",
+        "mission.no_key_event": "No key mission event received",
+        "mission.elapsed": "{seconds:.1f} s",
+        "mission.parachute_deployed": "Parachute Deployed",
+        "mission.parachute_not_deployed": "No parachute deployment event received",
+        "air_link.not_detected": "Flight Controller Not Detected",
+        "air_link.downlink_wait": "AIR Downlink OK · Waiting Handshake",
+        "air_link.handshaking": "Handshaking",
+        "air_link.connected": "Connected",
+        "air_link.unsupported": "Unsupported Profile",
+        "air_link.error": "Link Error",
+        "link_details.body": "Capability / AIR Handshake\n"
+        "Profile / IMU scales: {profile} / {accel} g / {gyro} dps\n"
+        "Calibration mode mask / alignment source mask: {calibration_mask} / {alignment_mask}\n"
+        "Command policy: {policy}\n"
+        "Handshake state: {handshake_state}\n"
+        "Latest Capability seq: {cap_seq}\n"
+        "Accepted Capability seq: {accepted_cap_seq}\n"
+        "Capability ACK CMD seq: {cmd_seq}\n"
+        "ACK attempts: {attempts}\n"
+        "GSP AIR_TX requests: {requests}\n"
+        "Serial writes / bytes: {serial_writes} / {serial_bytes}\n"
+        "GSP ACK OK / FAIL: {gsp_ok} / {gsp_fail}\n"
+        "Last GSP ACK: {gsp_result}\n"
+        "Last AIR ACK / count: {air_result} / {air_ack_rx}\n"
+        "PREFLIGHT_STATUS capability_acked: {pstatus}\n"
+        "ACK source AIR / PREFLIGHT_STATUS: {by_air_ack} / {by_pstatus}\n"
+        "Duplicate or stale Capability: {duplicates}\n"
+        "Last handshake error: {error}\n\n"
+        "Ground Station / Radio\n"
+        "GS state / Radio state: {gs_state} / {radio_state}\n"
+        "GS TX / RX / CRC: {gs_tx} / {gs_rx} / {gs_crc}\n"
+        "RSSI / SNR: {rssi} / {snr}\n\n"
+        "PC Receive / Parser / Logger\n{receive_health}",
+    }
+)
 
 
 _ENUM_KEYS: dict[str, dict[str, tuple[str, str]]] = {
@@ -507,6 +604,41 @@ _ENUM_KEYS: dict[str, dict[str, tuple[str, str]]] = {
         "TX": ("发送", "Transmitting"),
         "BUSY": ("忙", "Busy"),
     },
+}
+
+_ENUM_KEYS["ack_result"]["LOCKED_REQUIRED"] = ("需要解锁", "Unlock Required")
+_ENUM_KEYS["alignment_state"]["STALE"] = ("初对准已失效", "Alignment Stale")
+_ENUM_KEYS["status"]["CALIBRATION_DIAGNOSTIC"] = (
+    "校准诊断",
+    "Calibration Diagnostic",
+)
+_ENUM_KEYS["calibration_diagnostic_reason"] = {
+    "NONE": ("无", "None"),
+    "NO_STREAM": ("等待惯性数据", "Waiting for inertial data"),
+    "GYRO_MOVING": ("请保持飞控静止", "Keep the flight controller still"),
+    "ACCEL_MAGNITUDE": (
+        "比力模长不符合静止条件",
+        "Specific-force magnitude is outside the stationary range",
+    ),
+    "GRAVITY_DIRECTION": (
+        "当前重力方向与所选面不符",
+        "Current gravity direction does not match the selected face",
+    ),
+    "VARIANCE": (
+        "采样波动过大，正在重新采集",
+        "Sample variance is too high; recollecting",
+    ),
+    "SAMPLE_GAP": (
+        "数据存在间断，正在重新采集",
+        "A data gap was detected; recollecting",
+    ),
+}
+_ENUM_KEYS["mission_phase"] = {
+    "PRE_START": ("任务前", "Pre-start"),
+    "MISSION_ACTIVE": ("任务已开始 / 等待发射", "Mission Active / Waiting Launch"),
+    "IN_FLIGHT": ("飞行中", "In Flight"),
+    "RECOVERY": ("回收中 / 降落伞已展开", "Recovery / Parachute Deployed"),
+    "LANDED": ("已着陆", "Landed"),
 }
 
 

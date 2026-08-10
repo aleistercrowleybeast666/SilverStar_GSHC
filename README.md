@@ -15,9 +15,12 @@ PC 仍通过串口连接地面站，GSP-MIN 只负责透明转发 AIR 帧，wire
 - 自动接收并确认 `CAPABILITY`，不提供人工 Capability ACK 按钮；
 - 完整支持 `PREFLIGHT_STATE`、`PREFLIGHT_STATUS`、`STATUS`、`ACK` 和 `FLIGHT_STATE`；
 - 按 Capability 动态提供 NONE / ONE_FACE / SIX_FACE 校准流程；
+- 显示 `CALIBRATION_DIAGNOSTIC` 的当前采集问题，但不把诊断提示误判为校准失败；
 - 支持 Alignment START / STOP / RESET，并以飞控快照为最终判据；
+- 支持 Alignment `STALE`，失效后要求用户显式重新执行初对准；
 - 使用“预飞行 / 飞行 / 后期处理”三个可随时手动切换的页面；
 - START ACK、MISSION_START 或第一帧 FLIGHT_STATE 均可触发一次自动切换到飞行页；
+- 预飞页保留完整事件历史，飞行页只显示事件驱动的 Mission State；
 - 保持原有火箭模型、坐标轴、标签、颜色、默认相机、视角锁定和鼠标行为；
 - 独立串口、协议、日志和 GUI 刷新路径，避免持续接收造成 Qt 事件积压；
 - 支持简体中文 / English 运行时切换，选择由 QSettings 持久化，不需重启；
@@ -132,7 +135,11 @@ param1 = air_profile_id
 - ONE_FACE：飞控自动推进，上位机不发送 CAL_FACE；
 - SIX_FACE：用户摆放对应面后发送 CAL_FACE。ACK OK 仅代表 accepted；只有 `CALIBRATION_FACE PASSED` 或快照中的 `completed_face_mask` 才显示完成。
 
-Alignment START 在 Calibration ready 后可用。ACK OK 仅代表 accepted；只有 Alignment READY 事件或 `PREFLIGHT_STATUS.alignment_ready=1` 才显示完成。Attitude ready 不能代替整个 Alignment ready。
+Alignment START 在 Calibration ready 后可用。ACK OK 仅代表 accepted；`PREFLIGHT_STATUS.alignment_ready` 是最终判据，Alignment STATUS event 只提供即时提示，不能在 STALE 后独立恢复 ready。Attitude ready 不能代替整个 Alignment ready。
+
+校准采集中的当前问题来自 `CALIBRATION_DIAGNOSTIC`。`NONE` 会清除提示；其他 reason 只用于解释为何正在等待或重新采集，不会把 Calibration 状态改成 FAILED。六面校准会同时显示对应 face。
+
+Alignment `STALE` 表示对准后检测到移动。上位机会立即撤销 ready、禁用 START 并重新启用“开始初对准”，但不会自动重启对准，也不会根据当前姿态自行恢复 READY。STALE 后只有新的 `PREFLIGHT_STATUS` 快照可以重新确认 `alignment_ready=1`。
 
 START 按钮由权威预飞快照驱动，至少要求 Capability、Calibration、Alignment、System、UNLOCK 和 `start_block_reason=OK` 均满足。若 START ACK 丢失，MISSION_START 或第一帧 FLIGHT_STATE 会清除 START 重试、标记任务开始并自动切换一次飞行页。用户随后可手动切回任意页面，后续遥测不会抢焦点。
 
@@ -162,7 +169,9 @@ FLIGHT_STATE
 CAPABILITY_ACK_TX（含 Capability seq、PC cmd seq、attempt、retry）
 ```
 
-预飞页的“飞控 AIR 链路”单独显示 WAITING / HANDSHAKING / ACKED / ERROR。其 tooltip 串起 Capability RX、PC→GS AIR_TX 请求、串口实际写入、GSP AIR_TX ACK、地面站 TX/RX/CRC、AIR ACK 和 PREFLIGHT_STATUS 恢复信息，避免把“PC 已连地面站串口”误认为“飞控已握手”。
+预飞页的“飞控 AIR 链路”只显示未发现飞控、等待握手、握手中、已连接、协议不兼容或链路异常等短状态。“详情”对话框集中显示 Capability RX、PC→GS AIR_TX 请求、串口实际写入、GSP AIR_TX ACK、地面站 TX/RX/CRC、AIR ACK、PREFLIGHT_STATUS 恢复、接收积压和 RSSI/SNR，避免把“PC 已连地面站串口”误认为“飞控已握手”。
+
+完整 Event History 位于预飞页，按时间从旧到新排列并自动滚动到底部；GUI 只保留最近 200 条。飞行页显示 Mission State，只有 MISSION_START、LAUNCH、PARACHUTE_DEPLOY、LANDING 等权威事件才推进对应阶段。首帧 FLIGHT_STATE 最多回退显示 Mission Active，不会凭高度或速度臆造发射、开伞事件。
 
 实时曲线删除 10 秒以前的数据只影响 GUI 内存，不影响 JSONL。
 

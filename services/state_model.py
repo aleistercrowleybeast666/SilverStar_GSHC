@@ -186,6 +186,25 @@ class AlignmentSnapshot:
     ready: bool = False
 
 
+class MissionPhase(str, Enum):
+    PRE_START = "PRE_START"
+    MISSION_ACTIVE = "MISSION_ACTIVE"
+    IN_FLIGHT = "IN_FLIGHT"
+    RECOVERY = "RECOVERY"
+    LANDED = "LANDED"
+
+
+@dataclass
+class MissionPresentationSnapshot:
+    """Display-only mission state driven by authoritative protocol events."""
+
+    phase: MissionPhase = MissionPhase.PRE_START
+    last_critical_event_name: str = ""
+    last_critical_event_time_ms: int | None = None
+    last_critical_event_host_monotonic_ns: int | None = None
+    parachute_deployed: bool = False
+
+
 class HandshakeState(str, Enum):
     WAITING = "WAITING"
     HANDSHAKING = "HANDSHAKING"
@@ -311,12 +330,18 @@ class FlightControllerState:
     gnss_position_usable: bool = False
     start_block_reason: int = int(AirAckResult.CAPABILITY_REQUIRED)
     calibration: CalibrationSnapshot = field(default_factory=CalibrationSnapshot)
+    latest_calibration_diagnostic_reason: int = 0
+    latest_calibration_diagnostic_face: int = 0xFF
+    latest_calibration_diagnostic_time: int | None = None
     alignment: AlignmentSnapshot = field(default_factory=AlignmentSnapshot)
     sensor: SensorSnapshot = field(default_factory=SensorSnapshot)
     live_plot: LiveFlightPlotBuffer = field(default_factory=LiveFlightPlotBuffer)
     receive_health: ReceiveHealth = field(default_factory=ReceiveHealth)
     mission_started: bool = False
     mission_start_source: str = ""
+    mission_presentation: MissionPresentationSnapshot = field(
+        default_factory=MissionPresentationSnapshot
+    )
     pending_command_name: str = ""
     last_air_ack: str = "—"
     last_air_ack_message: UiMessage = field(default_factory=UiMessage)
@@ -397,6 +422,8 @@ __all__ = [
     "HandshakeDiagnostics",
     "HandshakeState",
     "LiveFlightPlotBuffer",
+    "MissionPhase",
+    "MissionPresentationSnapshot",
     "ReceiveHealth",
     "SensorSnapshot",
     "UiMessage",
