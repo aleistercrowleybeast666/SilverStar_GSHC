@@ -79,16 +79,20 @@ def preflight_status(
     system_ready: bool = False,
     start_block_reason: int = int(AirAckResult.ALIGNMENT_REQUIRED),
     current_face: int = 0xFF,
+    calibration_state: int | None = None,
+    calibration_mode: int = int(AirCalibrationMode.SIX_FACE),
 ) -> AirPreflightStatusMessage:
     return AirPreflightStatusMessage(
         seq=7,
         lifecycle_state=int(AirLifecycleState.PREFLIGHT),
         calibration_state=(
-            int(AirCalibrationState.READY)
+            calibration_state
+            if calibration_state is not None
+            else int(AirCalibrationState.READY)
             if calibration_ready
             else int(AirCalibrationState.COLLECTING)
         ),
-        calibration_mode=int(AirCalibrationMode.SIX_FACE),
+        calibration_mode=calibration_mode,
         completed_face_mask=completed_face_mask,
         current_face=current_face,
         alignment_state=alignment_state,
@@ -127,21 +131,45 @@ def make_controller() -> Controller:
     return controller
 
 
-def add_pending(controller: Controller, cmd_id: int, seq: int = 9) -> None:
+def add_pending(
+    controller: Controller,
+    cmd_id: int,
+    seq: int = 9,
+    *,
+    param0: int = 0,
+    baseline_completed_face_mask: int = 0,
+) -> PendingAirCommand:
     pending = PendingAirCommand(
         seq=seq,
         cmd_id=cmd_id,
         token=0,
-        param0=0,
+        param0=param0,
         param1=0,
         air_frame=b"",
         gsp_frame=b"",
         sent_count=1,
         max_retries=3,
         last_send_monotonic=0.0,
+        baseline_completed_face_mask=baseline_completed_face_mask,
     )
     controller.pending_air_cmds[(seq, cmd_id)] = pending
-    controller.state.pending_command_name = cmd_id
+    controller.state.pending_command_name = AirCmdId(cmd_id).name
+    return pending
+
+
+def configure_ready(controller: Controller) -> None:
+    controller.state.capability = capability()
+    controller.state.profile_supported = True
+    controller.state.capability_acked = True
+    controller.state.calibration.mode = int(AirCalibrationMode.SIX_FACE)
+    controller.state.calibration.state = int(AirCalibrationState.READY)
+    controller.state.calibration.completed_face_mask = 0x3F
+    controller.state.calibration.ready = True
+    controller.state.alignment.state = int(AirAlignmentState.READY)
+    controller.state.alignment.ready = True
+    controller.state.system_ready = True
+    controller.state.start_unlocked = True
+    controller.state.start_block_reason = int(AirAckResult.OK)
 
 
 def flight_state(time_ms: int = 1000) -> AirFlightStateMessage:
@@ -475,7 +503,320 @@ class PreflightStateTests(unittest.TestCase):
         self.assertTrue(controller.state.alignment.ready)
 
 
+class CalibrationPendingRecoveryTests(unittest.TestCase):
+    def test_face_event_recovers_lost_ack_without_marking_failure(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        controller.state.calibration.state = int(AirCalibrationState.WAIT_FACE)
+        controller.state.calibration.ready = False
+        controller.state.calibration.completed_face_mask = 0
+        add_pending(controller, int(AirCmdId.CAL_FACE), param0=2)
+
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=1,
+                status_id=int(AirStatusId.CALIBRATION_FACE),
+                time_ms=100,
+                arg0=2,
+                arg1=1,
+            ),
+            None,
+        )
+
+        self.assertFalse(controller.pending_air_cmds)
+        self.assertEqual(controller.state.calibration.completed_face_mask, 1 << 2)
+        resolved = [
+            item
+            for item in controller.logger.records
+            if item.get("kind") == "AIR_COMMAND_TRANSACTION_RESOLVED"
+        ][-1]
+        self.assertEqual(resolved["resolved_by"], "STATUS_EVENT")
+        self.assertEqual(resolved["target_face"], 2)
+
+    def test_face_snapshot_collecting_or_mask_transition_recovers_lost_ack(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        add_pending(controller, int(AirCmdId.CAL_FACE), param0=1)
+        controller._handle_preflight_status(
+            preflight_status(
+                capability_acked=True,
+                current_face=1,
+                calibration_state=int(AirCalibrationState.COLLECTING),
+            )
+        )
+        self.assertFalse(controller.pending_air_cmds)
+
+        controller = make_controller()
+        configure_ready(controller)
+        add_pending(
+            controller,
+            int(AirCmdId.CAL_FACE),
+            param0=0,
+            baseline_completed_face_mask=1,
+        )
+        controller._handle_preflight_status(
+            preflight_status(
+                capability_acked=True,
+                completed_face_mask=0,
+                calibration_state=int(AirCalibrationState.WAIT_FACE),
+            )
+        )
+        self.assertFalse(controller.pending_air_cmds)
+        self.assertEqual(controller.state.calibration.completed_face_mask, 0)
+
+    def test_each_cal_start_mode_can_be_recovered_from_snapshot(self) -> None:
+        cases = (
+            (
+                AirCalibrationMode.SIX_FACE,
+                AirCalibrationState.WAIT_FACE,
+                False,
+            ),
+            (
+                AirCalibrationMode.ONE_FACE,
+                AirCalibrationState.COLLECTING,
+                False,
+            ),
+            (AirCalibrationMode.NONE, AirCalibrationState.READY, True),
+        )
+        for mode, state, ready in cases:
+            with self.subTest(mode=mode.name):
+                controller = make_controller()
+                configure_ready(controller)
+                add_pending(
+                    controller,
+                    int(AirCmdId.CAL_START),
+                    param0=int(mode),
+                )
+                controller._handle_preflight_status(
+                    preflight_status(
+                        capability_acked=True,
+                        calibration_mode=int(mode),
+                        calibration_state=int(state),
+                        calibration_ready=ready,
+                    )
+                )
+                self.assertFalse(controller.pending_air_cmds)
+
+    def test_cal_reset_exact_idle_snapshot_recovers_but_stop_does_not_guess(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        add_pending(controller, int(AirCmdId.CAL_RESET))
+        controller._handle_preflight_status(
+            preflight_status(
+                capability_acked=True,
+                calibration_mode=int(AirCalibrationMode.NOT_SELECTED),
+                calibration_state=int(AirCalibrationState.IDLE),
+                calibration_ready=False,
+                completed_face_mask=0,
+            )
+        )
+        self.assertFalse(controller.pending_air_cmds)
+
+        controller = make_controller()
+        configure_ready(controller)
+        pending = add_pending(controller, int(AirCmdId.CAL_STOP))
+        controller._handle_preflight_status(
+            preflight_status(
+                capability_acked=True,
+                calibration_mode=int(AirCalibrationMode.SIX_FACE),
+                calibration_state=int(AirCalibrationState.WAIT_FACE),
+            )
+        )
+        self.assertIn((pending.seq, pending.cmd_id), controller.pending_air_cmds)
+        pending.sent_count = pending.max_retries + 1
+        pending.last_send_monotonic = -100.0
+        controller._check_air_cmd_timeouts()
+        self.assertFalse(controller.pending_air_cmds)
+        self.assertEqual(controller.state.radio_message.key, "radio.calibration_timeout")
+
+    def test_restart_supersedes_only_old_calibration_and_late_ack_is_stale(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        add_pending(controller, int(AirCmdId.CAL_FACE), seq=9, param0=0)
+
+        controller.send_cal_start(int(AirCalibrationMode.ONE_FACE))
+
+        current = controller._find_pending_air_cmd(int(AirCmdId.CAL_START))
+        self.assertIsNotNone(current)
+        self.assertEqual(current.param0, int(AirCalibrationMode.ONE_FACE))
+        self.assertTrue(
+            any(
+                item.get("resolved_by") == "SUPERSEDED"
+                for item in controller.logger.records
+            )
+        )
+
+        controller._handle_ack_message(
+            AirAckMessage(
+                seq=2,
+                ack_seq=9,
+                ack_cmd_id=int(AirCmdId.CAL_FACE),
+                result=int(AirAckResult.OK),
+                time_ms=200,
+            )
+        )
+        self.assertIs(
+            controller._find_pending_air_cmd(int(AirCmdId.CAL_START)), current
+        )
+        self.assertTrue(
+            any(
+                item.get("kind") == "STALE_OR_UNMATCHED_AIR_ACK"
+                for item in controller.logger.records
+            )
+        )
+
+    def test_ready_six_face_can_restart_as_one_face(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+
+        controller.send_cal_start(int(AirCalibrationMode.ONE_FACE))
+
+        pending = controller._find_pending_air_cmd(int(AirCmdId.CAL_START))
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.param0, int(AirCalibrationMode.ONE_FACE))
+
+
+class StartTransactionTests(unittest.TestCase):
+    def test_pending_start_is_visually_retryable_but_never_sent_twice(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+
+        controller.send_start()
+        sent_count = len(controller.worker.sent)
+        self.assertTrue(controller.state.start_transaction_pending())
+        self.assertTrue(controller.state.start_button_enabled())
+
+        controller.send_start()
+        self.assertEqual(len(controller.worker.sent), sent_count)
+        self.assertEqual(controller.state.radio_message.key, "radio.start_in_progress")
+
+    def test_snapshot_busy_during_pending_start_is_progress_not_failure(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        controller.send_start()
+
+        controller._handle_preflight_status(
+            preflight_status(
+                capability_acked=True,
+                calibration_ready=True,
+                alignment_ready=True,
+                alignment_state=int(AirAlignmentState.READY),
+                system_ready=True,
+                start_unlocked=True,
+                start_block_reason=int(AirAckResult.BUSY),
+            )
+        )
+
+        self.assertTrue(controller.state.start_transaction_pending())
+        self.assertTrue(controller.state.start_snapshot_busy_seen)
+        self.assertIsNone(controller.state.last_start_failure_result)
+        self.assertTrue(
+            any(
+                item.get("kind") == "START_TRANSACTION_PROGRESS"
+                for item in controller.logger.records
+            )
+        )
+
+    def test_actual_start_ack_busy_clears_pending_and_allows_retry(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        controller.send_start()
+        pending = controller._find_pending_air_cmd(int(AirCmdId.START_MISSION))
+
+        controller._handle_ack_message(
+            AirAckMessage(
+                seq=2,
+                ack_seq=pending.seq,
+                ack_cmd_id=int(AirCmdId.START_MISSION),
+                result=int(AirAckResult.BUSY),
+                time_ms=300,
+            )
+        )
+
+        self.assertFalse(controller.pending_air_cmds)
+        self.assertFalse(controller.state.mission_started)
+        self.assertEqual(
+            controller.state.last_start_failure_result, int(AirAckResult.BUSY)
+        )
+        self.assertTrue(controller.state.start_button_enabled())
+        self.assertEqual(controller.state.radio_message.key, "radio.start_busy")
+
+    def test_start_ack_ok_disables_start_and_late_ack_cannot_reopen_mission(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        controller.send_start()
+        pending = controller._find_pending_air_cmd(int(AirCmdId.START_MISSION))
+        controller._handle_ack_message(
+            AirAckMessage(
+                seq=2,
+                ack_seq=pending.seq,
+                ack_cmd_id=int(AirCmdId.START_MISSION),
+                result=int(AirAckResult.OK),
+                time_ms=400,
+            )
+        )
+        self.assertTrue(controller.state.mission_started)
+        self.assertFalse(controller.state.start_button_enabled())
+
+        controller._handle_ack_message(
+            AirAckMessage(
+                seq=3,
+                ack_seq=pending.seq,
+                ack_cmd_id=int(AirCmdId.START_MISSION),
+                result=int(AirAckResult.BUSY),
+                time_ms=450,
+            )
+        )
+        self.assertTrue(controller.state.mission_started)
+        self.assertIsNone(controller.state.last_start_failure_result)
+
+
 class MissionRecoveryTests(unittest.TestCase):
+    def test_mission_start_event_recovers_lost_start_ack(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        add_pending(controller, int(AirCmdId.START_MISSION), seq=9)
+
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=1,
+                status_id=int(AirStatusId.MISSION_START),
+                time_ms=900,
+                arg0=0,
+                arg1=0,
+            ),
+            None,
+        )
+
+        self.assertTrue(controller.state.mission_started)
+        self.assertFalse(controller.pending_air_cmds)
+        resolved = [
+            item
+            for item in controller.logger.records
+            if item.get("kind") == "AIR_COMMAND_TRANSACTION_RESOLVED"
+        ][-1]
+        self.assertEqual(resolved["resolved_by"], "MISSION_START")
+
+    def test_launch_event_alone_does_not_confirm_start_transaction(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        pending = add_pending(controller, int(AirCmdId.START_MISSION), seq=9)
+
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=1,
+                status_id=int(AirStatusId.LAUNCH),
+                time_ms=900,
+                arg0=0,
+                arg1=0,
+            ),
+            None,
+        )
+
+        self.assertFalse(controller.state.mission_started)
+        self.assertIn((pending.seq, pending.cmd_id), controller.pending_air_cmds)
+        self.assertIs(controller.state.mission_presentation.phase, MissionPhase.IN_FLIGHT)
+
     def test_first_flight_state_recovers_lost_start_ack(self) -> None:
         controller = make_controller()
         controller.state.capability = capability()

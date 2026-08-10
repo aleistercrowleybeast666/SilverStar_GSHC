@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from protocol.air import AirCapabilityMessage
 from protocol.common import (
+    AirAckResult,
     AirAlignmentState,
     AirCalibrationDiagnosticReason,
     AirCalibrationMode,
@@ -121,7 +122,61 @@ class UiWorkflowTests(unittest.TestCase):
         state.start_block_reason = 0x0C
         self.window.render_state()
         self.assertFalse(self.window.btn_start.isEnabled())
-        self.assertEqual(self.window.lbl_start_reason.text(), "需要完成初对准")
+        self.assertEqual(self.window.lbl_start_reason.text(), "不能 START：初对准未完成")
+
+    def test_start_status_distinguishes_pending_snapshot_and_ack_busy(self) -> None:
+        state = ready_state()
+        self.window.bind_runtime_model(state, EventHistory(), select_preflight=True)
+
+        state.pending_command_name = "START_MISSION"
+        state.start_block_reason = int(AirAckResult.BUSY)
+        self.window.render_state()
+        self.assertTrue(self.window.btn_start.isEnabled())
+        self.assertEqual(self.window.btn_start.text(), "等待 START 确认…")
+        self.assertEqual(
+            self.window.lbl_start_reason.text(),
+            "START 请求已发送，等待飞控确认…",
+        )
+        self.assertEqual(self.window.lbl_pf_start_block.text(), "START 处理中")
+
+        state.pending_command_name = ""
+        state.last_start_failure_result = int(AirAckResult.BUSY)
+        self.window.render_state()
+        self.assertTrue(self.window.btn_start.isEnabled())
+        self.assertEqual(self.window.lbl_start_reason.text(), "START 暂时忙，请稍后重试")
+        self.assertEqual(self.window.lbl_pf_start_block.text(), "START ACK：飞控忙")
+
+    def test_latest_command_feedback_is_visible_for_ping_result(self) -> None:
+        state = ready_state()
+        state.radio_message.key = "radio.ack_ok"
+        state.radio_message.params = {"command": "PING"}
+        self.window.bind_runtime_model(state, EventHistory(), select_preflight=True)
+        self.assertIn("PING", self.window.lbl_command_result.text())
+        self.assertIn("成功", self.window.lbl_command_result.text())
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.assertIn("PING", self.window.lbl_command_result.text())
+        self.assertIn("OK", self.window.lbl_command_result.text())
+
+    def test_start_ready_and_locked_text_are_natural_in_both_languages(self) -> None:
+        state = ready_state()
+        self.window.bind_runtime_model(state, EventHistory(), select_preflight=True)
+        self.assertEqual(self.window.lbl_start_reason.text(), "可以 START")
+
+        state.start_unlocked = False
+        state.start_block_reason = int(AirAckResult.LOCKED_REQUIRED)
+        self.window.render_state()
+        self.assertEqual(self.window.lbl_start_reason.text(), "不能 START：需要解锁")
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.assertEqual(
+            self.window.lbl_start_reason.text(),
+            "Cannot START: Unlock required",
+        )
 
     def test_alignment_stale_disables_start_and_reenables_alignment(self) -> None:
         state = ready_state()
@@ -168,6 +223,77 @@ class UiWorkflowTests(unittest.TestCase):
             self.window.lbl_cal_issue.text(),
             "X+: Current gravity direction does not match the selected face",
         )
+
+    def test_completed_six_face_remains_recollectable_and_tracks_snapshots(self) -> None:
+        state = ready_state()
+        state.calibration.state = int(AirCalibrationState.WAIT_FACE)
+        state.calibration.ready = False
+        state.calibration.completed_face_mask = 1
+        state.calibration.current_face = 0xFF
+        selected_faces: list[int] = []
+        self.window.calibration_dialog.on_face = selected_faces.append
+        self.window.bind_runtime_model(state, EventHistory())
+        dialog = self.window.calibration_dialog
+        dialog.render(state)
+
+        self.assertTrue(all(button.isEnabled() for button in dialog.face_buttons))
+        self.assertEqual(dialog.face_status_labels[0].text(), "✓")
+        self.assertEqual(dialog.face_buttons[0].text(), "重新采集 X+")
+        self.assertIn("可重新采集", dialog.face_buttons[0].toolTip())
+
+        dialog.face_buttons[0].click()
+        self.assertEqual(selected_faces, [0])
+        self.assertEqual(state.calibration.completed_face_mask, 1)
+
+        state.calibration.state = int(AirCalibrationState.COLLECTING)
+        state.calibration.current_face = 0
+        state.calibration.completed_face_mask = 0
+        dialog.render(state)
+        self.assertFalse(any(button.isEnabled() for button in dialog.face_buttons))
+        self.assertIn("正在采集 X+，请等待完成", dialog.lbl_issue.text())
+        self.assertEqual(dialog.face_status_labels[0].text(), "●")
+
+        state.calibration.state = int(AirCalibrationState.WAIT_FACE)
+        state.calibration.current_face = 0xFF
+        state.calibration.completed_face_mask = 1
+        dialog.render(state)
+        self.assertTrue(dialog.face_buttons[0].isEnabled())
+        self.assertEqual(dialog.face_status_labels[0].text(), "✓")
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.assertEqual(dialog.face_buttons[0].text(), "Recollect X+")
+        self.assertIn("click to recollect", dialog.face_buttons[0].toolTip())
+
+    def test_ready_calibration_keeps_restart_entry_and_mode_selection(self) -> None:
+        state = ready_state()
+        selected_modes: list[int] = []
+        self.window.calibration_dialog.on_start = selected_modes.append
+        self.window.bind_runtime_model(state, EventHistory())
+        dialog = self.window.calibration_dialog
+        dialog.render(state)
+
+        self.assertTrue(self.window.btn_calibration.isEnabled())
+        self.assertEqual(self.window.btn_calibration.text(), "重新校准")
+        self.assertTrue(dialog.btn_start.isEnabled())
+        self.assertEqual(dialog.btn_start.text(), "重新开始所选校准")
+
+        index = dialog.mode_combo.findData(int(AirCalibrationMode.ONE_FACE))
+        dialog.mode_combo.setCurrentIndex(index)
+        dialog.btn_start.click()
+        self.assertEqual(selected_modes, [int(AirCalibrationMode.ONE_FACE)])
+
+        state.pending_command_name = "CAL_FACE"
+        dialog.render(state)
+        self.assertTrue(dialog.btn_start.isEnabled())
+        self.assertFalse(any(button.isEnabled() for button in dialog.face_buttons))
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        self.assertEqual(self.window.btn_calibration.text(), "Restart Calibration")
+        self.assertEqual(dialog.btn_start.text(), "Restart Selected Calibration")
 
     def test_event_history_is_preflight_chronological_and_scrolls_to_bottom(self) -> None:
         state = ready_state()

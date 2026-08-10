@@ -241,22 +241,77 @@ class CalibrationDialog(QDialog):
             else ""
         )
 
-        command_ready = bool(
-            state.air_command_link_allowed()
-            and not state.pending_command_name
+        preflight_entry_allowed = state.preflight_command_entry_allowed()
+        calibration_pending = state.calibration_transaction_pending()
+        no_command_pending = not state.pending_command_name
+        calibration_idle = bool(
+            calibration.mode == int(AirCalibrationMode.NOT_SELECTED)
+            or calibration.state in (None, int(AirCalibrationState.IDLE))
         )
-        self.btn_start.setEnabled(command_ready and self.mode_combo.count() > 0)
-        self.btn_stop.setEnabled(command_ready)
-        self.btn_reset.setEnabled(command_ready)
+        self.btn_start.setText(
+            self.i18n.tr(
+                "button.cal_start" if calibration_idle else "button.cal_restart"
+            )
+        )
+        # Starting/restarting calibration is also the escape hatch for a lost
+        # calibration ACK.  The controller supersedes only same-domain pending
+        # transactions; unrelated commands remain protected.
+        self.btn_start.setEnabled(
+            preflight_entry_allowed
+            and self.mode_combo.count() > 0
+            and (no_command_pending or calibration_pending)
+        )
+        self.btn_stop.setEnabled(preflight_entry_allowed and no_command_pending)
+        self.btn_reset.setEnabled(preflight_entry_allowed and no_command_pending)
 
         six_face_active = calibration.mode == int(AirCalibrationMode.SIX_FACE)
+        waiting_for_face = calibration.state == int(AirCalibrationState.WAIT_FACE)
+        collecting = calibration.state in (
+            int(AirCalibrationState.COLLECTING),
+            int(AirCalibrationState.CHECKING),
+        )
+        if collecting:
+            if current_face == "—":
+                collection_text = self.i18n.tr("cal.collecting_wait_unknown")
+            elif calibration.state == int(AirCalibrationState.CHECKING):
+                collection_text = self.i18n.tr(
+                    "cal.checking_wait", face=current_face
+                )
+            else:
+                collection_text = self.i18n.tr(
+                    "cal.collecting_wait", face=current_face
+                )
+            self.lbl_issue.setText(
+                f"{self.i18n.tr('field.current_issue')}: {collection_text}"
+                + (f"\n{issue}" if state.latest_calibration_diagnostic_reason else "")
+            )
         for face, (status_label, button) in enumerate(
             zip(self.face_status_labels, self.face_buttons)
         ):
             completed = bool(calibration.completed_face_mask & (1 << face))
             active = calibration.current_face == face
             status_label.setText("✓" if completed else ("●" if active else "○"))
-            button.setEnabled(command_ready and six_face_active and not completed)
+            button.setText(
+                self.i18n.tr(
+                    "button.recollect_face" if completed else "button.collect_face",
+                    face=self.FACE_NAMES[face],
+                )
+            )
+            button.setToolTip(
+                self.i18n.tr(
+                    "cal.face.completed_tooltip"
+                    if completed
+                    else "cal.face.collect_tooltip"
+                )
+            )
+            # A completed face remains selectable in WAIT_FACE.  Only the
+            # flight-controller snapshot/event may clear or restore its check.
+            button.setEnabled(
+                preflight_entry_allowed
+                and no_command_pending
+                and six_face_active
+                and waiting_for_face
+            )
 
 
 class LinkDetailsDialog(QDialog):
@@ -475,6 +530,10 @@ class MainWindow(QMainWindow):
             self.language_combo.blockSignals(blocked)
         self._set_3d_camera_unlocked(self.btn_toggle_camera_lock.isChecked())
         self.calibration_dialog.retranslate_ui()
+        if self._state is not None:
+            # Dynamic face/restart labels depend on the current canonical
+            # calibration snapshot, even while the dialog is hidden.
+            self.calibration_dialog.render(self._state)
         self.link_details_dialog.retranslate_ui()
         self._retranslate_plots()
         self._last_sensor_revision = -1
@@ -756,7 +815,8 @@ class MainWindow(QMainWindow):
     def _build_preflight_command_panel(self) -> QWidget:
         box = QGroupBox()
         self._bind_text(box, "group.preflight_commands")
-        layout = QHBoxLayout(box)
+        layout = QVBoxLayout(box)
+        command_row = QHBoxLayout()
         self.btn_ping = QPushButton()
         self.btn_lock = QPushButton()
         self.btn_unlock = QPushButton()
@@ -769,15 +829,25 @@ class MainWindow(QMainWindow):
             button.setStyleSheet(self._cmd_button_style)
             button.setMinimumWidth(100)
             button.setMinimumHeight(34)
-            layout.addWidget(button)
-        layout.addSpacing(16)
-        self.lbl_start_reason_name = QLabel()
-        self._bind_text(self.lbl_start_reason_name, "field.start_reason")
-        layout.addWidget(self.lbl_start_reason_name)
+            command_row.addWidget(button)
+        command_row.addSpacing(16)
         self.lbl_start_reason = QLabel()
         self._bind_text(self.lbl_start_reason, "start.wait_capability")
         self._configure_dynamic_label(self.lbl_start_reason, 360, show_tooltip=True)
-        layout.addWidget(self.lbl_start_reason, 1)
+        command_row.addWidget(self.lbl_start_reason, 1)
+        layout.addLayout(command_row)
+
+        feedback_row = QHBoxLayout()
+        self.lbl_command_result_name = QLabel()
+        self._bind_text(self.lbl_command_result_name, "field.last_command_result")
+        self.lbl_command_result_name.setMinimumWidth(80)
+        self.lbl_command_result = QLabel()
+        self._bind_text(self.lbl_command_result, "common.none")
+        self._configure_dynamic_label(self.lbl_command_result, 520, show_tooltip=True)
+        feedback_row.addWidget(self.lbl_command_result_name)
+        feedback_row.addWidget(self.lbl_command_result, 1)
+        layout.addLayout(feedback_row)
+
         self.btn_ping.clicked.connect(lambda: self.on_send_ping and self.on_send_ping())
         self.btn_lock.clicked.connect(lambda: self.on_send_lock and self.on_send_lock())
         self.btn_unlock.clicked.connect(lambda: self.on_send_unlock and self.on_send_unlock())
@@ -1036,9 +1106,15 @@ class MainWindow(QMainWindow):
             self.lbl_pf_selftest, "ready" if state.selftest_passed else "waiting"
         )
         self._render_air_link(state)
-        self.lbl_pf_start_block.setText(
-            self.i18n.enum("ack_result", state.start_block_reason_name())
-        )
+        if state.start_transaction_pending():
+            start_block_text = self.i18n.tr("start.in_progress_short")
+        elif state.last_start_failure_result == int(AirAckResult.BUSY):
+            start_block_text = self.i18n.tr("start.ack_busy_short")
+        else:
+            start_block_text = self.i18n.enum(
+                "ack_result", state.start_block_reason_name()
+            )
+        self.lbl_pf_start_block.setText(start_block_text)
         self.lbl_pf_lock.setText(
             self.i18n.tr("common.unlocked" if state.start_unlocked else "common.locked")
         )
@@ -1324,39 +1400,110 @@ class MainWindow(QMainWindow):
                 self._apply_quat_to_mesh(sensor.quat)
 
     def _render_commands(self, state: FlightControllerState) -> None:
+        command_feedback = self.i18n.format_message(state.radio_message)
+        self._set_dynamic_label_text(self.lbl_command_result, command_feedback)
+        self.lbl_command_result.setToolTip(command_feedback)
         link_allowed = state.air_command_link_allowed()
         preflight_allowed = link_allowed and not state.pending_command_name
         self.btn_ping.setEnabled(link_allowed and not state.pending_command_name)
         self.btn_lock.setEnabled(preflight_allowed and state.start_unlocked)
         self.btn_unlock.setEnabled(preflight_allowed and not state.start_unlocked)
-        self.btn_start.setEnabled(state.start_ready())
-        self.btn_calibration.setEnabled(preflight_allowed)
+        self.btn_start.setEnabled(state.start_button_enabled())
+        self.btn_start.setText(
+            self.i18n.tr(
+                "button.start_waiting"
+                if state.start_transaction_pending()
+                else "button.start"
+            )
+        )
+        calibration_idle = bool(
+            state.calibration.mode == int(AirCalibrationMode.NOT_SELECTED)
+            or state.calibration.state in (None, int(AirCalibrationState.IDLE))
+        )
+        self.btn_calibration.setText(
+            self.i18n.tr(
+                "button.calibration_start"
+                if calibration_idle
+                else "button.calibration_restart"
+            )
+        )
+        # Opening the dialog must remain available through READY and through a
+        # lost calibration ACK; sending still obeys domain-safe controller rules.
+        self.btn_calibration.setEnabled(state.preflight_command_entry_allowed())
         self.btn_align_start.setEnabled(preflight_allowed and state.calibration.ready)
         self.btn_align_stop.setEnabled(preflight_allowed)
         self.btn_align_reset.setEnabled(preflight_allowed)
 
-        if state.capability_error:
-            reason = self.i18n.tr(f"capability.error.{state.capability_error}")
+        semantic_state = "error"
+        if state.mission_started:
+            reason = self.i18n.tr("start.mission_started")
+            semantic_state = "ready"
+        elif state.start_transaction_pending():
+            reason = self.i18n.tr("start.pending")
+            semantic_state = "waiting"
+        elif state.capability_error:
+            blocker = self.i18n.tr(f"capability.error.{state.capability_error}")
+            reason = self.i18n.tr("start.cannot", reason=blocker)
         elif state.profile_supported is False:
-            reason = self.i18n.tr(
+            blocker = self.i18n.tr(
                 "capability.unsupported",
                 profile=state.capability.air_profile_id if state.capability else "?",
             )
+            reason = self.i18n.tr("start.cannot", reason=blocker)
         elif not state.capability_acked:
-            reason = self.i18n.tr("start.wait_capability")
+            reason = self.i18n.tr(
+                "start.cannot", reason=self.i18n.tr("start.block.capability")
+            )
         elif state.pending_command_name:
-            reason = self.i18n.tr("start.wait_pending", command=state.pending_command_name)
+            reason = self.i18n.tr(
+                "start.other_pending", command=state.pending_command_name
+            )
+            semantic_state = "waiting"
+        elif state.last_start_failure_result == int(AirAckResult.BUSY):
+            reason = self.i18n.tr("start.busy_retry")
+            semantic_state = "waiting"
+        elif state.last_start_failure_result is not None:
+            failure = self.i18n.enum(
+                "ack_result",
+                enum_name(AirAckResult, state.last_start_failure_result),
+            )
+            reason = self.i18n.tr("start.failed_retry", reason=failure)
+        elif state.start_transaction_timed_out:
+            reason = self.i18n.tr("start.timeout_retry")
+            semantic_state = "waiting"
         elif not state.calibration.ready:
-            reason = self.i18n.enum("ack_result", "CALIBRATION_REQUIRED")
+            reason = self.i18n.tr(
+                "start.cannot", reason=self.i18n.tr("start.block.calibration")
+            )
         elif not state.alignment.ready:
-            reason = self.i18n.enum("ack_result", "ALIGNMENT_REQUIRED")
+            reason = self.i18n.tr(
+                "start.cannot", reason=self.i18n.tr("start.block.alignment")
+            )
         elif not state.system_ready:
-            reason = self.i18n.enum("ack_result", "SYSTEM_NOT_READY")
+            reason = self.i18n.tr(
+                "start.cannot", reason=self.i18n.tr("start.block.system")
+            )
         elif not state.start_unlocked:
-            reason = self.i18n.enum("ack_result", "LOCKED_REQUIRED")
+            reason = self.i18n.tr(
+                "start.cannot", reason=self.i18n.tr("start.block.unlock")
+            )
+        elif state.start_ready():
+            reason = self.i18n.tr("start.ready")
+            semantic_state = "ready"
         else:
-            reason = self.i18n.enum("ack_result", state.start_block_reason_name())
+            blocker_key = (
+                "start.block.busy"
+                if state.start_block_reason == int(AirAckResult.BUSY)
+                else None
+            )
+            blocker = (
+                self.i18n.tr(blocker_key)
+                if blocker_key is not None
+                else self.i18n.enum("ack_result", state.start_block_reason_name())
+            )
+            reason = self.i18n.tr("start.cannot", reason=blocker)
         self._set_dynamic_label_text(self.lbl_start_reason, reason)
+        self._set_semantic_style(self.lbl_start_reason, semantic_state)
         self.lbl_start_reason.setToolTip(
             self.i18n.tr(
                 "start.tooltip",

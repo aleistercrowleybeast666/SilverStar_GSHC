@@ -80,6 +80,14 @@ AIR_CMD_ACK_TIMEOUT_MS = 800
 AIR_CMD_MAX_RETRIES = 3
 AIR_CMD_RETRY_CHECK_MS = 100
 FLIGHT_TELEMETRY_PERIOD_MS = 200
+CALIBRATION_COMMAND_IDS = frozenset(
+    {
+        int(AirCmdId.CAL_START),
+        int(AirCmdId.CAL_FACE),
+        int(AirCmdId.CAL_STOP),
+        int(AirCmdId.CAL_RESET),
+    }
+)
 
 
 def format_air_status_message(msg: AirStatusMessage, i18n: I18n | None = None) -> str:
@@ -149,6 +157,8 @@ class PendingAirCommand:
     sent_count: int
     max_retries: int
     last_send_monotonic: float
+    created_monotonic: float = 0.0
+    baseline_completed_face_mask: int = 0
 
 
 @dataclass
@@ -562,23 +572,23 @@ class Controller(QObject):
         token: int,
         param0: int = 0,
         param1: int = 0,
-    ) -> None:
+    ) -> bool:
         if self.worker is None or not self.state.connected:
             QMessageBox.warning(
                 self.window,
                 self._tr("app.title"),
                 self._tr("message.connect_ground_station_first"),
             )
-            return
+            return False
         if self.pending_capability_ack is not None:
             self._set_radio_message("radio.capability_priority")
-            return
+            return False
         if self.pending_air_cmds:
             self._set_radio_message("radio.command_pending")
-            return
+            return False
         if not self.state.air_command_link_allowed():
             self._set_radio_message("radio.command_not_allowed")
-            return
+            return False
 
         seq = self._next_air_seq()
         air_frame = build_air_cmd(seq, cmd_id, token, param0, param1)
@@ -594,9 +604,12 @@ class Controller(QObject):
             sent_count=0,
             max_retries=AIR_CMD_MAX_RETRIES,
             last_send_monotonic=0.0,
+            created_monotonic=time.monotonic(),
+            baseline_completed_face_mask=self.state.calibration.completed_face_mask,
         )
         self.pending_air_cmds[(pending.seq, pending.cmd_id)] = pending
         self._transmit_pending_air_cmd(pending, is_retry=False)
+        return True
 
     def _transmit_pending_air_cmd(
         self,
@@ -777,14 +790,25 @@ class Controller(QObject):
             if pending.sent_count <= pending.max_retries:
                 self._transmit_pending_air_cmd(pending, is_retry=True)
                 continue
-            del self.pending_air_cmds[key]
+            self._resolve_pending_air_cmd(pending, "TIMEOUT")
             self._set_air_ack_message(
                 "ack.timeout",
                 seq=pending.seq,
                 command=enum_name(AirCmdId, pending.cmd_id),
                 attempts=pending.sent_count,
             )
-            self._set_radio_message("radio.air_ack_timeout")
+            if pending.cmd_id == int(AirCmdId.START_MISSION):
+                self.state.last_start_failure_result = None
+                self.state.start_transaction_timed_out = True
+                self.state.start_snapshot_busy_seen = False
+                self._set_radio_message("radio.start_timeout")
+            elif pending.cmd_id in CALIBRATION_COMMAND_IDS:
+                self._set_radio_message(
+                    "radio.calibration_timeout",
+                    command=enum_name(AirCmdId, pending.cmd_id),
+                )
+            else:
+                self._set_radio_message("radio.air_ack_timeout")
             self._log(
                 {
                     "dir": "LOCAL",
@@ -839,13 +863,189 @@ class Controller(QObject):
         else:
             self.state.pending_command_name = ""
 
-    def _pop_pending_air_cmd(self, cmd_id: int) -> PendingAirCommand | None:
-        for key, pending in list(self.pending_air_cmds.items()):
-            if pending.cmd_id == (cmd_id & 0xFF):
-                del self.pending_air_cmds[key]
-                self._refresh_pending_command_name()
-                return pending
-        return None
+    def _find_pending_air_cmd(self, cmd_id: int) -> PendingAirCommand | None:
+        target = cmd_id & 0xFF
+        return next(
+            (pending for pending in self.pending_air_cmds.values() if pending.cmd_id == target),
+            None,
+        )
+
+    def _pending_calibration_command(self) -> PendingAirCommand | None:
+        return next(
+            (
+                pending
+                for pending in self.pending_air_cmds.values()
+                if pending.cmd_id in CALIBRATION_COMMAND_IDS
+            ),
+            None,
+        )
+
+    def _resolve_pending_air_cmd(
+        self,
+        pending: PendingAirCommand,
+        resolved_by: str,
+        *,
+        result: int | None = None,
+        detail: str = "",
+    ) -> bool:
+        key = (pending.seq & 0xFF, pending.cmd_id & 0xFF)
+        if self.pending_air_cmds.get(key) is not pending:
+            return False
+        del self.pending_air_cmds[key]
+        self._refresh_pending_command_name()
+        age_ms = (
+            None
+            if pending.created_monotonic <= 0.0
+            else max(0.0, (time.monotonic() - pending.created_monotonic) * 1000.0)
+        )
+        self._log(
+            {
+                "dir": "LOCAL",
+                "layer": "AIR_COMMAND_TRANSACTION",
+                "kind": "AIR_COMMAND_TRANSACTION_RESOLVED",
+                "command_seq": pending.seq,
+                "command_id": pending.cmd_id,
+                "command_name": enum_name(AirCmdId, pending.cmd_id),
+                "param0": pending.param0,
+                "param1": pending.param1,
+                "target_mode": (
+                    pending.param0 if pending.cmd_id == int(AirCmdId.CAL_START) else None
+                ),
+                "target_face": (
+                    pending.param0 if pending.cmd_id == int(AirCmdId.CAL_FACE) else None
+                ),
+                "attempts": pending.sent_count,
+                "age_ms": age_ms,
+                "resolved_by": resolved_by,
+                "result": result,
+                "result_name": (
+                    None if result is None else enum_name(AirAckResult, result)
+                ),
+                "detail": detail,
+            }
+        )
+        return True
+
+    def _supersede_calibration_pending(self) -> bool:
+        pending_values = list(self.pending_air_cmds.values())
+        if not pending_values:
+            return True
+        if any(pending.cmd_id not in CALIBRATION_COMMAND_IDS for pending in pending_values):
+            return False
+        for pending in pending_values:
+            self._resolve_pending_air_cmd(
+                pending,
+                "SUPERSEDED",
+                detail="superseded by a new CAL_START",
+            )
+        return True
+
+    @staticmethod
+    def _cal_start_observed(
+        mode: int,
+        calibration_state: int,
+        calibration_ready: bool,
+    ) -> bool:
+        if mode == int(AirCalibrationMode.SIX_FACE):
+            return calibration_state in {
+                int(AirCalibrationState.WAIT_FACE),
+                int(AirCalibrationState.COLLECTING),
+                int(AirCalibrationState.CHECKING),
+                int(AirCalibrationState.READY),
+            }
+        if mode == int(AirCalibrationMode.ONE_FACE):
+            return calibration_state in {
+                int(AirCalibrationState.COLLECTING),
+                int(AirCalibrationState.CHECKING),
+                int(AirCalibrationState.READY),
+            }
+        if mode == int(AirCalibrationMode.NONE):
+            return bool(calibration_ready)
+        return False
+
+    def _resolve_calibration_pending_from_snapshot(
+        self, message: AirPreflightStatusMessage
+    ) -> None:
+        pending = self._pending_calibration_command()
+        if pending is None:
+            return
+        observed = False
+        detail = ""
+        if pending.cmd_id == int(AirCmdId.CAL_START):
+            observed = bool(
+                message.calibration_mode == pending.param0
+                and self._cal_start_observed(
+                    message.calibration_mode,
+                    message.calibration_state,
+                    message.calibration_ready,
+                )
+            )
+            detail = "CAL_START state/mode observed"
+        elif pending.cmd_id == int(AirCmdId.CAL_FACE):
+            face_bit = 1 << pending.param0
+            baseline_bit = bool(pending.baseline_completed_face_mask & face_bit)
+            current_bit = bool(message.completed_face_mask & face_bit)
+            face_collecting = bool(
+                message.current_face == pending.param0
+                and message.calibration_state
+                in {
+                    int(AirCalibrationState.COLLECTING),
+                    int(AirCalibrationState.CHECKING),
+                }
+            )
+            observed = face_collecting or current_bit != baseline_bit
+            detail = "CAL_FACE current_face/state or mask transition observed"
+        elif pending.cmd_id == int(AirCmdId.CAL_RESET):
+            observed = bool(
+                message.calibration_mode == int(AirCalibrationMode.NOT_SELECTED)
+                and message.calibration_state == int(AirCalibrationState.IDLE)
+                and not message.calibration_ready
+                and message.completed_face_mask == 0
+            )
+            detail = "CAL_RESET idle snapshot observed"
+        # AIR_PROTOCOL does not define a unique CAL_STOP snapshot state.
+        # CAL_STOP therefore remains ACK/timeout based.
+        if observed and self._resolve_pending_air_cmd(
+            pending, "PREFLIGHT_STATUS", detail=detail
+        ):
+            self._set_radio_message(
+                "radio.calibration_recovered",
+                command=enum_name(AirCmdId, pending.cmd_id),
+                source="PREFLIGHT_STATUS",
+            )
+
+    def _resolve_calibration_pending_from_status(self, message: AirStatusMessage) -> None:
+        pending = self._pending_calibration_command()
+        if pending is None:
+            return
+        observed = False
+        if (
+            pending.cmd_id == int(AirCmdId.CAL_FACE)
+            and message.status_id == int(AirStatusId.CALIBRATION_FACE)
+        ):
+            observed = message.arg0 == pending.param0
+        elif (
+            pending.cmd_id == int(AirCmdId.CAL_START)
+            and message.status_id == int(AirStatusId.CALIBRATION)
+        ):
+            observed = bool(
+                message.arg1 == pending.param0
+                and self._cal_start_observed(
+                    message.arg1,
+                    message.arg0,
+                    message.arg0 == int(AirCalibrationState.READY),
+                )
+            )
+        if observed and self._resolve_pending_air_cmd(
+            pending,
+            "STATUS_EVENT",
+            detail=enum_name(AirStatusId, message.status_id),
+        ):
+            self._set_radio_message(
+                "radio.calibration_recovered",
+                command=enum_name(AirCmdId, pending.cmd_id),
+                source="STATUS_EVENT",
+            )
 
     def send_ping(self) -> None:
         self._send_air_cmd(int(AirCmdId.PING), token=int(time.time()) & 0xFFFFFFFF)
@@ -857,20 +1057,59 @@ class Controller(QObject):
         self._send_air_cmd(int(AirCmdId.UNLOCK), token=TOKEN_UNLOCK)
 
     def send_start(self) -> None:
-        if not self.state.start_ready():
+        if self.state.start_transaction_pending():
+            self._set_radio_message("radio.start_in_progress")
+            return
+        if not self.state.start_button_enabled():
             self._set_radio_message(
                 "radio.start_blocked",
                 reason=EnumParam("ack_result", self.state.start_block_reason_name()),
             )
             return
-        self._send_air_cmd(int(AirCmdId.START_MISSION), token=TOKEN_START_MISSION)
+        if self._send_air_cmd(
+            int(AirCmdId.START_MISSION), token=TOKEN_START_MISSION
+        ):
+            self.state.last_start_failure_result = None
+            self.state.start_transaction_timed_out = False
+            self.state.start_snapshot_busy_seen = False
+            self._set_radio_message("radio.start_pending")
+            pending_start = self._find_pending_air_cmd(int(AirCmdId.START_MISSION))
+            self._log(
+                {
+                    "dir": "LOCAL",
+                    "layer": "AIR_COMMAND_TRANSACTION",
+                    "kind": "START_TRANSACTION_SUBMITTED",
+                    "command_seq": (
+                        None if pending_start is None else pending_start.seq
+                    ),
+                }
+            )
 
     def send_cal_start(self, mode: int) -> None:
+        mode = int(mode)
         capability = self.state.capability
-        if capability is None or not (capability.calibration_mode_mask & (1 << int(mode))):
+        if (
+            mode not in {
+                int(AirCalibrationMode.NONE),
+                int(AirCalibrationMode.ONE_FACE),
+                int(AirCalibrationMode.SIX_FACE),
+            }
+            or capability is None
+            or not (capability.calibration_mode_mask & (1 << mode))
+        ):
             self._set_radio_message("radio.calibration_mode_unsupported")
             return
-        self._send_air_cmd(int(AirCmdId.CAL_START), TOKEN_CALIBRATION, int(mode), 0)
+        pending_calibration = self._pending_calibration_command()
+        if pending_calibration is not None:
+            can_supersede = bool(
+                self.worker is not None
+                and self.pending_capability_ack is None
+                and self.state.preflight_command_entry_allowed()
+            )
+            if not can_supersede or not self._supersede_calibration_pending():
+                self._set_radio_message("radio.command_pending")
+                return
+        self._send_air_cmd(int(AirCmdId.CAL_START), TOKEN_CALIBRATION, mode, 0)
 
     def send_cal_face(self, face: int) -> None:
         if not 0 <= int(face) <= 5:
@@ -969,6 +1208,32 @@ class Controller(QObject):
     def _handle_preflight_status(self, message: AirPreflightStatusMessage) -> None:
         diagnostics = self.state.handshake
         diagnostics.preflight_status_capability_acked = bool(message.capability_acked)
+        self._resolve_calibration_pending_from_snapshot(message)
+        if (
+            self.state.start_transaction_pending()
+            and message.start_block_reason == int(AirAckResult.BUSY)
+        ):
+            if not self.state.start_snapshot_busy_seen:
+                pending_start = self._find_pending_air_cmd(int(AirCmdId.START_MISSION))
+                self._log(
+                    {
+                        "dir": "LOCAL",
+                        "layer": "AIR_COMMAND_TRANSACTION",
+                        "kind": "START_TRANSACTION_PROGRESS",
+                        "command_seq": (
+                            None if pending_start is None else pending_start.seq
+                        ),
+                        "observed_by": "PREFLIGHT_STATUS",
+                        "snapshot_start_block_reason": int(AirAckResult.BUSY),
+                        "snapshot_start_block_reason_name": "BUSY",
+                    }
+                )
+            self.state.start_snapshot_busy_seen = True
+        elif self.state.start_transaction_pending():
+            self.state.start_snapshot_busy_seen = False
+        elif message.start_block_reason == int(AirAckResult.OK):
+            self.state.last_start_failure_result = None
+            self.state.start_transaction_timed_out = False
         previous_face = self.state.calibration.current_face
         previous_mode = self.state.calibration.mode
         if previous_mode != message.calibration_mode:
@@ -1099,6 +1364,7 @@ class Controller(QObject):
                 host_rx_monotonic_ns=host_ns,
             )
         )
+        self._resolve_calibration_pending_from_status(message)
 
         status_id = message.status_id
         if status_id == int(AirStatusId.BOOT):
@@ -1115,13 +1381,11 @@ class Controller(QObject):
             )
             self.state.lifecycle_state = int(AirLifecycleState.FLIGHT)
         elif status_id == int(AirStatusId.LAUNCH):
-            self._mark_mission_started("launch_status", message.time_ms)
             self._update_mission_presentation(
                 MissionPhase.IN_FLIGHT, "LAUNCH", message.time_ms, host_ns
             )
             self.state.lifecycle_state = int(AirLifecycleState.FLIGHT)
         elif status_id == int(AirStatusId.PARACHUTE_DEPLOY):
-            self._mark_mission_started("parachute_deploy_status", message.time_ms)
             self._update_mission_presentation(
                 MissionPhase.RECOVERY,
                 "PARACHUTE_DEPLOY",
@@ -1131,7 +1395,6 @@ class Controller(QObject):
             )
             self.state.lifecycle_state = int(AirLifecycleState.RECOVERY)
         elif status_id == int(AirStatusId.LANDING):
-            self._mark_mission_started("landing_status", message.time_ms)
             self._update_mission_presentation(
                 MissionPhase.LANDED, "LANDING", message.time_ms, host_ns
             )
@@ -1213,9 +1476,14 @@ class Controller(QObject):
             return
 
         key = (message.ack_seq & 0xFF, message.ack_cmd_id & 0xFF)
-        pending = self.pending_air_cmds.pop(key, None)
+        pending = self.pending_air_cmds.get(key)
         matched = pending is not None
-        self._refresh_pending_command_name()
+        if pending is not None:
+            self._resolve_pending_air_cmd(
+                pending,
+                "AIR_ACK",
+                result=message.result,
+            )
         self._set_air_ack_message(
             "ack.received" if matched else "ack.received_unmatched_command",
             seq=message.ack_seq,
@@ -1223,6 +1491,21 @@ class Controller(QObject):
             result=EnumParam("ack_result", result_name),
         )
         if not matched:
+            current = self._find_pending_air_cmd(message.ack_cmd_id)
+            self._log(
+                {
+                    "dir": "LOCAL",
+                    "layer": "AIR_COMMAND_TRANSACTION",
+                    "kind": "STALE_OR_UNMATCHED_AIR_ACK",
+                    "ack_seq": message.ack_seq,
+                    "ack_cmd_id": message.ack_cmd_id,
+                    "ack_cmd_name": command_name,
+                    "result": message.result,
+                    "result_name": result_name,
+                    "current_pending_seq": None if current is None else current.seq,
+                    "mission_started": self.state.mission_started,
+                }
+            )
             return
 
         if message.result == int(AirAckResult.OK):
@@ -1257,6 +1540,19 @@ class Controller(QObject):
             else:
                 self._set_radio_message("radio.ack_ok", command=command_name)
         elif (
+            message.ack_cmd_id == int(AirCmdId.START_MISSION)
+        ):
+            self.state.last_start_failure_result = message.result
+            self.state.start_transaction_timed_out = False
+            self.state.start_snapshot_busy_seen = False
+            if message.result == int(AirAckResult.BUSY):
+                self._set_radio_message("radio.start_busy")
+            else:
+                self._set_radio_message(
+                    "radio.start_failed",
+                    result=EnumParam("ack_result", result_name),
+                )
+        elif (
             message.result == int(AirAckResult.ALREADY_LOCKED)
             and message.ack_cmd_id == int(AirCmdId.LOCK)
         ):
@@ -1280,8 +1576,21 @@ class Controller(QObject):
         if first_transition:
             self.state.mission_started = True
             self.state.mission_start_source = source
+            self.state.last_start_failure_result = None
+            self.state.start_transaction_timed_out = False
+            self.state.start_snapshot_busy_seen = False
             self._reset_mission_packet_stats(source)
-            self._pop_pending_air_cmd(int(AirCmdId.START_MISSION))
+            pending_start = self._find_pending_air_cmd(int(AirCmdId.START_MISSION))
+            if pending_start is not None:
+                resolved_by = {
+                    "mission_start_status": "MISSION_START",
+                    "first_flight_state": "FLIGHT_STATE",
+                }.get(source, "STATUS_EVENT")
+                self._resolve_pending_air_cmd(
+                    pending_start,
+                    resolved_by,
+                    detail=source,
+                )
             if (
                 self.state.capability is not None
                 and self.state.capability.command_policy == int(AirCommandPolicy.PREFLIGHT_ONLY)

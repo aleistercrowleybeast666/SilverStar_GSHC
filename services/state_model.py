@@ -343,6 +343,9 @@ class FlightControllerState:
         default_factory=MissionPresentationSnapshot
     )
     pending_command_name: str = ""
+    last_start_failure_result: int | None = None
+    start_transaction_timed_out: bool = False
+    start_snapshot_busy_seen: bool = False
     last_air_ack: str = "—"
     last_air_ack_message: UiMessage = field(default_factory=UiMessage)
     last_gs_ack: str = "—"
@@ -399,17 +402,49 @@ class FlightControllerState:
             return True
         return self.capability.command_policy == int(AirCommandPolicy.MISSION_ALLOWED)
 
-    def start_ready(self) -> bool:
+    def preflight_command_entry_allowed(self) -> bool:
+        return bool(self.air_command_link_allowed() and not self.mission_started)
+
+    def start_transaction_pending(self) -> bool:
+        return self.pending_command_name == "START_MISSION"
+
+    def calibration_transaction_pending(self) -> bool:
+        return self.pending_command_name in {
+            "CAL_START",
+            "CAL_FACE",
+            "CAL_STOP",
+            "CAL_RESET",
+        }
+
+    def start_prerequisites_ready(self) -> bool:
         return bool(
-            self.air_command_link_allowed()
-            and not self.mission_started
-            and not self.pending_command_name
-            and self.capability_acked
+            self.preflight_command_entry_allowed()
             and self.calibration.ready
             and self.alignment.ready
             and self.system_ready
             and self.start_unlocked
+        )
+
+    def start_ready(self) -> bool:
+        return bool(
+            self.start_prerequisites_ready()
+            and not self.pending_command_name
             and self.start_block_reason == int(AirAckResult.OK)
+        )
+
+    def start_button_enabled(self) -> bool:
+        if self.mission_started or not self.preflight_command_entry_allowed():
+            return False
+        if self.start_transaction_pending():
+            return True
+        if self.pending_command_name:
+            return False
+        if not self.start_prerequisites_ready():
+            return False
+        return bool(
+            self.start_block_reason == int(AirAckResult.OK)
+            or self.last_start_failure_result is not None
+            or self.start_transaction_timed_out
         )
 
 
