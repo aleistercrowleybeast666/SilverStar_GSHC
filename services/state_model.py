@@ -8,8 +8,14 @@ from enum import Enum
 from typing import Iterable
 
 from config import MAX_LIVE_POINTS, PLOT_WINDOW_SECONDS, UI_EVENT_HISTORY_LIMIT
-from protocol.air import AirCapabilityMessage
-from protocol.common import AirAckResult, AirCommandPolicy, enum_name
+from protocol.air import AirCapabilityMessage, AirSensorStatusMessage
+from protocol.common import (
+    AirAckResult,
+    AirAlignmentState,
+    AirCommandPolicy,
+    air_sensor_sort_key,
+    enum_name,
+)
 
 
 def quat_to_euler_rpy(
@@ -180,10 +186,132 @@ class CalibrationSnapshot:
 @dataclass
 class AlignmentSnapshot:
     state: int | None = None
-    attitude_ready: bool = False
-    gnss_origin_ready: bool = False
-    baro_origin_ready: bool = False
     ready: bool = False
+
+
+@dataclass
+class AlignmentSensorSnapshot:
+    """One end-of-Alignment sensor inventory, keyed by protocol index."""
+
+    snapshot_id: int
+    expected_total: int | None = None
+    frames_by_index: dict[int, AirSensorStatusMessage] = field(default_factory=dict)
+    terminal_alignment_state: int | None = None
+    duplicate_frames: int = 0
+    total_mismatches: int = 0
+    revision: int = 0
+
+    @property
+    def terminal_received(self) -> bool:
+        return self.terminal_alignment_state in {
+            int(AirAlignmentState.READY),
+            int(AirAlignmentState.FAILED),
+        }
+
+    @property
+    def complete(self) -> bool:
+        return bool(
+            self.terminal_received
+            and self.expected_total is not None
+            and self.expected_total > 0
+            and set(self.frames_by_index) == set(range(self.expected_total))
+        )
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.terminal_received and not self.complete)
+
+    def ordered_frames(self) -> tuple[AirSensorStatusMessage, ...]:
+        return tuple(
+            sorted(
+                self.frames_by_index.values(),
+                key=lambda frame: air_sensor_sort_key(
+                    frame.sensor_id, frame.instance_id
+                ),
+            )
+        )
+
+
+@dataclass(frozen=True)
+class SensorSnapshotReceiveResult:
+    duplicate_index: bool = False
+    total_mismatch: bool = False
+
+
+@dataclass
+class AlignmentSensorSnapshotCache:
+    """Bounded accumulators plus the latest terminal Alignment snapshot."""
+
+    accumulators: dict[int, AlignmentSensorSnapshot] = field(default_factory=dict)
+    latest_terminal_snapshot: AlignmentSensorSnapshot | None = None
+    duplicate_frames: int = 0
+    total_mismatches: int = 0
+    revision: int = 0
+    max_accumulators: int = 8
+
+    def receive(
+        self, message: AirSensorStatusMessage
+    ) -> SensorSnapshotReceiveResult:
+        snapshot_id = message.snapshot_id & 0xFF
+        snapshot = self.accumulators.get(snapshot_id)
+        if snapshot is None or snapshot.terminal_received:
+            snapshot = AlignmentSensorSnapshot(
+                snapshot_id=snapshot_id,
+                expected_total=message.total,
+            )
+            self.accumulators[snapshot_id] = snapshot
+        duplicate = message.index in snapshot.frames_by_index
+        mismatch = (
+            snapshot.expected_total is not None
+            and snapshot.expected_total != message.total
+        )
+        if duplicate:
+            snapshot.duplicate_frames += 1
+            self.duplicate_frames += 1
+        if mismatch:
+            snapshot.total_mismatches += 1
+            self.total_mismatches += 1
+        else:
+            # Duplicate indices use a consistent latest-frame-wins policy.
+            snapshot.frames_by_index[message.index] = message
+        snapshot.revision += 1
+        self.revision += 1
+        self._trim()
+        return SensorSnapshotReceiveResult(duplicate, mismatch)
+
+    def terminate(
+        self, snapshot_id: int, alignment_state: int
+    ) -> AlignmentSensorSnapshot | None:
+        if alignment_state not in {
+            int(AirAlignmentState.READY),
+            int(AirAlignmentState.FAILED),
+        }:
+            return None
+        value = int(snapshot_id) & 0xFF
+        if value == 0xFF:
+            return None
+        snapshot = self.accumulators.get(value)
+        if snapshot is None:
+            snapshot = AlignmentSensorSnapshot(snapshot_id=value)
+            self.accumulators[value] = snapshot
+        snapshot.terminal_alignment_state = int(alignment_state)
+        snapshot.revision += 1
+        self.latest_terminal_snapshot = snapshot
+        self.revision += 1
+        self._trim()
+        return snapshot
+
+    def _trim(self) -> None:
+        while len(self.accumulators) > max(1, int(self.max_accumulators)):
+            oldest_id = next(iter(self.accumulators))
+            if (
+                self.latest_terminal_snapshot is not None
+                and oldest_id == self.latest_terminal_snapshot.snapshot_id
+                and len(self.accumulators) > 1
+            ):
+                self.accumulators[oldest_id] = self.accumulators.pop(oldest_id)
+                continue
+            del self.accumulators[oldest_id]
 
 
 class MissionPhase(str, Enum):
@@ -334,6 +462,9 @@ class FlightControllerState:
     latest_calibration_diagnostic_face: int = 0xFF
     latest_calibration_diagnostic_time: int | None = None
     alignment: AlignmentSnapshot = field(default_factory=AlignmentSnapshot)
+    alignment_sensor_snapshots: AlignmentSensorSnapshotCache = field(
+        default_factory=AlignmentSensorSnapshotCache
+    )
     sensor: SensorSnapshot = field(default_factory=SensorSnapshot)
     live_plot: LiveFlightPlotBuffer = field(default_factory=LiveFlightPlotBuffer)
     receive_health: ReceiveHealth = field(default_factory=ReceiveHealth)
@@ -450,6 +581,8 @@ class FlightControllerState:
 
 __all__ = [
     "AlignmentSnapshot",
+    "AlignmentSensorSnapshot",
+    "AlignmentSensorSnapshotCache",
     "CalibrationSnapshot",
     "EventHistory",
     "FlightControllerState",
@@ -461,6 +594,7 @@ __all__ = [
     "MissionPresentationSnapshot",
     "ReceiveHealth",
     "SensorSnapshot",
+    "SensorSnapshotReceiveResult",
     "UiMessage",
     "quat_to_euler_rpy",
 ]

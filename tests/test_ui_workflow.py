@@ -7,15 +7,17 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QApplication
 
-from protocol.air import AirCapabilityMessage
+from protocol.air import AirCapabilityMessage, AirSensorStatusMessage
 from protocol.common import (
     AirAckResult,
     AirAlignmentState,
     AirCalibrationDiagnosticReason,
     AirCalibrationMode,
     AirCalibrationState,
+    AirSensorId,
     AirStatusId,
 )
 from services.i18n import I18n, Language
@@ -40,7 +42,7 @@ def ready_state(generation: int = 1) -> FlightControllerState:
         air_profile_id=0,
         command_policy=1,
         calibration_mode_mask=0x07,
-        alignment_capability_mask=0x07,
+        sensor_summary_flags=0x0F,
         accel_full_scale_g=16,
         gyro_full_scale_dps=2000,
     )
@@ -51,9 +53,6 @@ def ready_state(generation: int = 1) -> FlightControllerState:
     state.calibration.completed_face_mask = 0x3F
     state.calibration.ready = True
     state.alignment.state = int(AirAlignmentState.READY)
-    state.alignment.attitude_ready = True
-    state.alignment.gnss_origin_ready = True
-    state.alignment.baro_origin_ready = True
     state.alignment.ready = True
     state.system_ready = True
     state.selftest_passed = True
@@ -78,6 +77,7 @@ class UiWorkflowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.window.calibration_dialog.close()
         self.window.link_details_dialog.close()
+        self.window.sensor_details_dialog.close()
         self.window.close()
         self.temporary_directory.cleanup()
 
@@ -367,6 +367,105 @@ class UiWorkflowTests(unittest.TestCase):
         self.assertIn("GSP ACK OK / FAIL: 2 / 1", details)
         self.assertIn("protocol_queue=", details)
 
+    def test_sensor_details_are_cached_sorted_and_send_no_air_command(self) -> None:
+        state = ready_state()
+        arrivals = (
+            (0, int(AirSensorId.MAGNETOMETER), 0),
+            (1, 0x35, 2),
+            (2, int(AirSensorId.GNSS), 0),
+            (3, int(AirSensorId.IMU), 1),
+        )
+        for index, sensor_id, instance_id in arrivals:
+            state.alignment_sensor_snapshots.receive(
+                AirSensorStatusMessage(
+                    seq=index,
+                    snapshot_id=6,
+                    sensor_id=sensor_id,
+                    instance_id=instance_id,
+                    status_flags=0xFF,
+                    detail_code=0 if sensor_id != 0x35 else 0x7E,
+                    index=index,
+                    total=len(arrivals),
+                )
+            )
+        state.alignment_sensor_snapshots.terminate(6, int(AirAlignmentState.READY))
+        callbacks: list[str] = []
+        self.window.on_align_start = lambda: callbacks.append("ALIGN_START")
+        self.window.on_align_stop = lambda: callbacks.append("ALIGN_STOP")
+        self.window.on_align_reset = lambda: callbacks.append("ALIGN_RESET")
+        self.window.on_send_ping = lambda: callbacks.append("PING")
+        self.window.bind_runtime_model(state, EventHistory())
+
+        self.window.btn_sensor_details.click()
+        self.application.processEvents()
+
+        self.assertEqual(callbacks, [])
+        self.assertTrue(self.window.sensor_details_dialog.isVisible())
+        details = self.window.sensor_details_dialog.details_text.toPlainText()
+        self.assertLess(details.index("IMU #1"), details.index("GNSS #0"))
+        self.assertLess(details.index("GNSS #0"), details.index("磁力计 #0"))
+        self.assertLess(details.index("磁力计 #0"), details.index("未知传感器 0x35 #2"))
+        self.assertIn("未知详情 0x7E", details)
+        self.assertIn("#6 · 完整 · 4 个传感器", self.window.lbl_align_snapshot.text())
+
+    def test_stale_sensor_details_identify_last_alignment_snapshot(self) -> None:
+        state = ready_state()
+        state.alignment_sensor_snapshots.receive(
+            AirSensorStatusMessage(1, 3, 1, 0, 0xFF, 0, 0, 1)
+        )
+        state.alignment_sensor_snapshots.terminate(3, int(AirAlignmentState.READY))
+        state.alignment.state = int(AirAlignmentState.STALE)
+        state.alignment.ready = False
+        self.window.bind_runtime_model(state, EventHistory())
+        self.window.sensor_details_dialog.render(state)
+
+        details = self.window.sensor_details_dialog.details_text.toPlainText()
+        self.assertIn("上一次 Alignment 终止快照", details)
+        self.assertEqual(
+            state.alignment_sensor_snapshots.latest_terminal_snapshot.snapshot_id,
+            3,
+        )
+
+    def test_link_details_preserves_scroll_selection_and_bottom_follow(self) -> None:
+        state = ready_state()
+        state.receive_health.warning = "\n".join(
+            f"diagnostic line {index}" for index in range(160)
+        )
+        dialog = self.window.link_details_dialog
+        dialog.resize(620, 300)
+        dialog.show()
+        dialog.render(state)
+        self.application.processEvents()
+        scrollbar = dialog.details_text.verticalScrollBar()
+        self.assertGreater(scrollbar.maximum(), 0)
+
+        middle = scrollbar.maximum() // 2
+        scrollbar.setValue(middle)
+        cursor = dialog.details_text.textCursor()
+        cursor.setPosition(10)
+        cursor.setPosition(25, QTextCursor.KeepAnchor)
+        dialog.details_text.setTextCursor(cursor)
+        scrollbar.setValue(middle)
+        selected = dialog.details_text.textCursor().selectedText()
+        revision = dialog.details_text.document().revision()
+
+        dialog.render(state)
+        self.assertEqual(dialog.details_text.document().revision(), revision)
+        self.assertEqual(dialog.details_text.textCursor().selectedText(), selected)
+        self.assertEqual(scrollbar.value(), middle)
+
+        state.receive_health.serial_rx_bytes += 1
+        dialog.render(state)
+        self.application.processEvents()
+        self.assertEqual(scrollbar.value(), middle)
+        self.assertEqual(dialog.details_text.textCursor().selectedText(), selected)
+
+        scrollbar.setValue(scrollbar.maximum())
+        state.receive_health.serial_rx_bytes += 1
+        dialog.render(state)
+        self.application.processEvents()
+        self.assertEqual(scrollbar.value(), scrollbar.maximum())
+
     def test_flight_page_mission_state_does_not_infer_launch(self) -> None:
         state = ready_state()
         state.mission_started = True
@@ -392,7 +491,7 @@ class UiWorkflowTests(unittest.TestCase):
             air_profile_id=0,
             command_policy=1,
             calibration_mode_mask=0x05,
-            alignment_capability_mask=0x01,
+            sensor_summary_flags=0x01,
             accel_full_scale_g=16,
             gyro_full_scale_dps=2000,
         )

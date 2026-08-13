@@ -23,6 +23,7 @@ from protocol.air import (
     AirFlightStateMessage,
     AirPreflightStateMessage,
     AirPreflightStatusMessage,
+    AirSensorStatusMessage,
     AirStatusMessage,
     accel_raw_to_mps2,
     build_air_cmd,
@@ -1140,6 +1141,8 @@ class Controller(QObject):
             self._handle_capability(message, event)
         elif isinstance(message, AirPreflightStatusMessage):
             self._handle_preflight_status(message)
+        elif isinstance(message, AirSensorStatusMessage):
+            self._handle_sensor_status(message)
         elif isinstance(message, AirPreflightStateMessage):
             self._handle_sensor_message(message, event, source="PREFLIGHT_STATE")
         elif isinstance(message, AirFlightStateMessage):
@@ -1254,9 +1257,6 @@ class Controller(QObject):
         self.state.calibration.current_face = message.current_face
         self.state.calibration.ready = message.calibration_ready
         self.state.alignment.state = message.alignment_state
-        self.state.alignment.attitude_ready = message.attitude_ready
-        self.state.alignment.gnss_origin_ready = message.gnss_origin_ready
-        self.state.alignment.baro_origin_ready = message.baro_origin_ready
         self.state.alignment.ready = (
             False
             if message.alignment_state == int(AirAlignmentState.STALE)
@@ -1271,6 +1271,23 @@ class Controller(QObject):
         self.state.start_block_reason = message.start_block_reason
         if message.capability_acked and not self.state.capability_acked:
             self._complete_capability_ack("PREFLIGHT_STATUS")
+
+    def _handle_sensor_status(self, message: AirSensorStatusMessage) -> None:
+        result = self.state.alignment_sensor_snapshots.receive(message)
+        if result.duplicate_index or result.total_mismatch:
+            self._log(
+                {
+                    "dir": "LOCAL",
+                    "layer": "SENSOR_SNAPSHOT",
+                    "kind": "SENSOR_SNAPSHOT_FRAME_DIAGNOSTIC",
+                    "snapshot_id": message.snapshot_id,
+                    "index": message.index,
+                    "total": message.total,
+                    "duplicate_index": result.duplicate_index,
+                    "total_mismatch": result.total_mismatch,
+                    "duplicate_policy": "LATEST_WINS",
+                }
+            )
 
     def _handle_sensor_message(
         self,
@@ -1412,9 +1429,26 @@ class Controller(QObject):
             # is allowed to assert alignment_ready again after STALE.
             if message.arg0 != int(AirAlignmentState.READY):
                 self.state.alignment.ready = False
-            self.state.alignment.attitude_ready = bool(message.arg1 & (1 << 0))
-            self.state.alignment.gnss_origin_ready = bool(message.arg1 & (1 << 1))
-            self.state.alignment.baro_origin_ready = bool(message.arg1 & (1 << 2))
+            terminal_snapshot = self.state.alignment_sensor_snapshots.terminate(
+                message.arg1, message.arg0
+            )
+            if terminal_snapshot is not None:
+                self._log(
+                    {
+                        "dir": "LOCAL",
+                        "layer": "SENSOR_SNAPSHOT",
+                        "kind": "SENSOR_SNAPSHOT_TERMINAL",
+                        "snapshot_id": terminal_snapshot.snapshot_id,
+                        "alignment_state": message.arg0,
+                        "alignment_state_name": enum_name(
+                            AirAlignmentState, message.arg0
+                        ),
+                        "expected_total": terminal_snapshot.expected_total,
+                        "received_unique": len(terminal_snapshot.frames_by_index),
+                        "complete": terminal_snapshot.complete,
+                        "incomplete": terminal_snapshot.incomplete,
+                    }
+                )
             if message.arg0 == int(AirAlignmentState.STALE):
                 self._set_radio_message("radio.alignment_stale")
         elif status_id == int(AirStatusId.CALIBRATION):

@@ -7,7 +7,7 @@ import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QVector3D
+from PySide6.QtGui import QFont, QTextCursor, QVector3D
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -30,15 +30,18 @@ from PySide6.QtWidgets import (
 from config import PLOT_REFRESH_INTERVAL_MS, PLOT_WINDOW_SECONDS
 from protocol.common import (
     AirAckResult,
-    AirAlignmentCapability,
     AirAlignmentState,
     AirCalibrationDiagnosticReason,
     AirCalibrationMode,
     AirCalibrationModeMask,
     AirCalibrationState,
     AirLifecycleState,
+    AirSensorDetailCode,
+    AirSensorStatusFlag,
+    AirSensorSummaryFlag,
     AirStatusId,
     GspAckResult,
+    air_sensor_descriptor,
     enum_name,
 )
 from services.i18n import I18n, Language
@@ -67,6 +70,21 @@ def calibration_diagnostic_text(i18n: I18n, state: FlightControllerState) -> str
             reason=reason_text,
         )
     return reason_text
+
+
+def sensor_display_name(i18n: I18n, sensor_id: int) -> str:
+    descriptor = air_sensor_descriptor(sensor_id)
+    if descriptor is None:
+        return i18n.tr("sensor.unknown_name", sensor_id=sensor_id & 0xFF)
+    return i18n.enum("sensor", descriptor.canonical_name)
+
+
+def sensor_detail_text(i18n: I18n, detail_code: int) -> str:
+    try:
+        name = AirSensorDetailCode(int(detail_code)).name
+    except ValueError:
+        return i18n.tr("sensor.unknown_detail", detail_code=detail_code & 0xFF)
+    return i18n.enum("sensor_detail", name)
 
 
 class AttitudeGLViewWidget(gl.GLViewWidget):
@@ -333,6 +351,33 @@ class LinkDetailsDialog(QDialog):
         self.setWindowTitle(self.i18n.tr("dialog.link_details.title"))
         self.btn_close.setText(self.i18n.tr("button.close"))
 
+    def _set_text_preserving_scroll(self, new_text: str) -> bool:
+        if new_text == self.details_text.toPlainText():
+            return False
+        scrollbar = self.details_text.verticalScrollBar()
+        old_value = scrollbar.value()
+        old_maximum = scrollbar.maximum()
+        was_at_bottom = old_value >= max(0, old_maximum - 1)
+        old_cursor = self.details_text.textCursor()
+        old_position = old_cursor.position()
+        old_anchor = old_cursor.anchor()
+
+        self.details_text.setPlainText(new_text)
+        document_length = max(0, self.details_text.document().characterCount() - 1)
+        restored_cursor = self.details_text.textCursor()
+        restored_cursor.setPosition(
+            min(old_anchor, document_length), QTextCursor.MoveAnchor
+        )
+        restored_cursor.setPosition(
+            min(old_position, document_length), QTextCursor.KeepAnchor
+        )
+        self.details_text.setTextCursor(restored_cursor)
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(min(old_value, scrollbar.maximum()))
+        return True
+
     def render(self, state: FlightControllerState) -> None:
         diagnostics = state.handshake
         none = self.i18n.tr("common.none")
@@ -358,8 +403,7 @@ class LinkDetailsDialog(QDialog):
         rssi = none if state.rssi_dbm is None else f"{state.rssi_dbm} dBm"
         snr = none if state.snr_db is None else f"{state.snr_db:.2f} dB"
         capability = state.capability
-        self.details_text.setPlainText(
-            self.i18n.tr(
+        new_text = self.i18n.tr(
                 "link_details.body",
                 handshake_state=self.i18n.tr(
                     f"handshake.{diagnostics.handshake_state.value}"
@@ -372,10 +416,10 @@ class LinkDetailsDialog(QDialog):
                     if capability is None
                     else f"0x{capability.calibration_mode_mask:02X}"
                 ),
-                alignment_mask=(
+                sensor_flags=(
                     none
                     if capability is None
-                    else f"0x{capability.alignment_capability_mask:02X}"
+                    else f"0x{capability.sensor_summary_flags:02X}"
                 ),
                 policy=self.i18n.enum(
                     "command_policy", state.command_policy_name()
@@ -412,7 +456,104 @@ class LinkDetailsDialog(QDialog):
                 snr=snr,
                 receive_health=state.receive_health.tooltip(),
             )
-        )
+        self._set_text_preserving_scroll(new_text)
+
+
+class SensorDetailsDialog(QDialog):
+    def __init__(self, i18n: I18n, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.i18n = i18n
+        self.setMinimumSize(620, 560)
+        layout = QVBoxLayout(self)
+        self.details_text = QPlainTextEdit()
+        self.details_text.setFont(QFont("Consolas"))
+        self.details_text.setReadOnly(True)
+        layout.addWidget(self.details_text, 1)
+        self.btn_close = QPushButton()
+        self.btn_close.clicked.connect(self.close)
+        layout.addWidget(self.btn_close, 0, Qt.AlignRight)
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(self.i18n.tr("dialog.sensor_details.title"))
+        self.btn_close.setText(self.i18n.tr("button.close"))
+
+    def render(self, state: FlightControllerState) -> None:
+        snapshot = state.alignment_sensor_snapshots.latest_terminal_snapshot
+        if snapshot is None:
+            text = self.i18n.tr("sensor_snapshot.none")
+        else:
+            result_name = (
+                self.i18n.tr("common.none")
+                if snapshot.terminal_alignment_state is None
+                else self.i18n.enum(
+                    "alignment_state",
+                    enum_name(
+                        AirAlignmentState, snapshot.terminal_alignment_state
+                    ),
+                )
+            )
+            source = self.i18n.tr(
+                "sensor_snapshot.source_last"
+                if state.alignment.state == int(AirAlignmentState.STALE)
+                else "sensor_snapshot.source_alignment"
+            )
+            expected = (
+                self.i18n.tr("common.unknown")
+                if snapshot.expected_total is None
+                else str(snapshot.expected_total)
+            )
+            lines = [
+                self.i18n.tr("sensor_snapshot.heading"),
+                self.i18n.tr("sensor_snapshot.source", source=source),
+                self.i18n.tr("sensor_snapshot.id", snapshot_id=snapshot.snapshot_id),
+                self.i18n.tr(
+                    "sensor_snapshot.complete",
+                    value=yes_no_text(self.i18n, snapshot.complete),
+                ),
+                self.i18n.tr("sensor_snapshot.result", result=result_name),
+                self.i18n.tr(
+                    "sensor_snapshot.count",
+                    received=len(snapshot.frames_by_index),
+                    expected=expected,
+                ),
+            ]
+            if snapshot.incomplete:
+                lines.append(self.i18n.tr("sensor_snapshot.incomplete"))
+            lines.append("")
+            for frame in snapshot.ordered_frames():
+                lines.append(
+                    self.i18n.tr(
+                        "sensor_snapshot.sensor_heading",
+                        name=sensor_display_name(self.i18n, frame.sensor_id),
+                        instance=frame.instance_id,
+                    )
+                )
+                for flag in AirSensorStatusFlag:
+                    lines.append(
+                        self.i18n.tr(
+                            "sensor_snapshot.flag_line",
+                            name=self.i18n.tr(f"sensor.flag.{flag.name}"),
+                            value=yes_no_text(
+                                self.i18n, bool(frame.status_flags & int(flag))
+                            ),
+                        )
+                    )
+                lines.append(
+                    self.i18n.tr(
+                        "sensor_snapshot.detail",
+                        detail=sensor_detail_text(self.i18n, frame.detail_code),
+                    )
+                )
+                lines.append(
+                    self.i18n.tr(
+                        "sensor_snapshot.raw_flags", flags=frame.status_flags
+                    )
+                )
+                lines.append("")
+            text = "\n".join(lines).rstrip()
+        if text != self.details_text.toPlainText():
+            self.details_text.setPlainText(text)
 
 
 class MainWindow(QMainWindow):
@@ -535,6 +676,7 @@ class MainWindow(QMainWindow):
             # calibration snapshot, even while the dialog is hidden.
             self.calibration_dialog.render(self._state)
         self.link_details_dialog.retranslate_ui()
+        self.sensor_details_dialog.retranslate_ui()
         self._retranslate_plots()
         self._last_sensor_revision = -1
         self._last_event_revision = -1
@@ -594,6 +736,7 @@ class MainWindow(QMainWindow):
         self.calibration_dialog.on_stop = lambda: self.on_cal_stop and self.on_cal_stop()
         self.calibration_dialog.on_reset = lambda: self.on_cal_reset and self.on_cal_reset()
         self.link_details_dialog = LinkDetailsDialog(self.i18n, self)
+        self.sensor_details_dialog = SensorDetailsDialog(self.i18n, self)
 
     def _build_top_bar(self) -> QWidget:
         box = QGroupBox()
@@ -735,24 +878,16 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         self.lbl_align_state = QLabel("—")
         self.lbl_align_ready = QLabel("NO")
-        self.lbl_align_attitude = QLabel("—")
-        self.lbl_align_gnss = QLabel("—")
-        self.lbl_align_baro = QLabel("—")
+        self.lbl_align_snapshot = QLabel("—")
         self.lbl_align_hint = QLabel("—")
         self.lbl_align_hint.setWordWrap(True)
         self._add_value_pair(grid, 0, "field.state", self.lbl_align_state, 125, True)
         self._add_value_pair(grid, 1, "field.ready", self.lbl_align_ready, 125, True)
-        self.lbl_align_attitude_name = self._add_value_pair(
-            grid, 2, "field.attitude", self.lbl_align_attitude, 125, True
-        )
-        self.lbl_align_gnss_name = self._add_value_pair(
-            grid, 3, "field.gnss_origin", self.lbl_align_gnss, 125, True
-        )
-        self.lbl_align_baro_name = self._add_value_pair(
-            grid, 4, "field.baro_origin", self.lbl_align_baro, 125, True
+        self._add_value_pair(
+            grid, 2, "field.sensor_snapshot", self.lbl_align_snapshot, 125, True
         )
         self._add_value_pair(
-            grid, 5, "field.alignment_hint", self.lbl_align_hint, 125, True
+            grid, 3, "field.alignment_hint", self.lbl_align_hint, 125, True
         )
         self.lbl_align_hint.setWordWrap(True)
         self.lbl_align_hint.setSizePolicy(
@@ -763,16 +898,24 @@ class MainWindow(QMainWindow):
         self.btn_align_start = QPushButton()
         self.btn_align_stop = QPushButton()
         self.btn_align_reset = QPushButton()
+        self.btn_sensor_details = QPushButton()
         self._bind_text(self.btn_align_start, "button.align_start")
         self._bind_text(self.btn_align_stop, "button.stop")
         self._bind_text(self.btn_align_reset, "button.reset")
-        for button in (self.btn_align_start, self.btn_align_stop, self.btn_align_reset):
+        self._bind_text(self.btn_sensor_details, "button.sensor_details")
+        for button in (
+            self.btn_align_start,
+            self.btn_align_stop,
+            self.btn_align_reset,
+            self.btn_sensor_details,
+        ):
             button.setStyleSheet(self._cmd_button_style)
             actions.addWidget(button)
         layout.addLayout(actions)
         self.btn_align_start.clicked.connect(lambda: self.on_align_start and self.on_align_start())
         self.btn_align_stop.clicked.connect(lambda: self.on_align_stop and self.on_align_stop())
         self.btn_align_reset.clicked.connect(lambda: self.on_align_reset and self.on_align_reset())
+        self.btn_sensor_details.clicked.connect(self._show_sensor_details)
         return box
 
     def _build_preflight_sensor_panel(self) -> QWidget:
@@ -802,10 +945,12 @@ class MainWindow(QMainWindow):
         box = QGroupBox()
         self._bind_text(box, "group.gnss")
         grid = QGridLayout(box)
+        self.lbl_pf_gnss_present = QLabel("—")
         self.lbl_pf_gnss_usable = QLabel("—")
-        self.lbl_pf_gnss_origin = QLabel("—")
-        self._add_value_pair(grid, 0, "field.position_usable", self.lbl_pf_gnss_usable, 120, True)
-        self._add_value_pair(grid, 1, "field.origin_ready", self.lbl_pf_gnss_origin, 120, True)
+        self._add_value_pair(
+            grid, 0, "field.sensor_present", self.lbl_pf_gnss_present, 120, True
+        )
+        self._add_value_pair(grid, 1, "field.position_usable", self.lbl_pf_gnss_usable, 120, True)
         self.lbl_gnss_note = QLabel()
         self._bind_text(self.lbl_gnss_note, "note.gnss_profile")
         self.lbl_gnss_note.setWordWrap(True)
@@ -1046,6 +1191,13 @@ class MainWindow(QMainWindow):
         self.link_details_dialog.raise_()
         self.link_details_dialog.activateWindow()
 
+    def _show_sensor_details(self) -> None:
+        if self._state is not None:
+            self.sensor_details_dialog.render(self._state)
+        self.sensor_details_dialog.show()
+        self.sensor_details_dialog.raise_()
+        self.sensor_details_dialog.activateWindow()
+
     def set_ports(self, ports: list[str]) -> None:
         current = self.port_combo.currentText()
         self.port_combo.clear()
@@ -1175,28 +1327,33 @@ class MainWindow(QMainWindow):
             if alignment.ready
             else "waiting",
         )
-        capability_mask = state.capability.alignment_capability_mask if state.capability else 0
-        self._render_alignment_source(
-            self.lbl_align_attitude_name,
-            self.lbl_align_attitude,
-            capability_mask,
-            int(AirAlignmentCapability.ATTITUDE),
-            alignment.attitude_ready,
+        sensor_snapshot = (
+            state.alignment_sensor_snapshots.latest_terminal_snapshot
         )
-        self._render_alignment_source(
-            self.lbl_align_gnss_name,
-            self.lbl_align_gnss,
-            capability_mask,
-            int(AirAlignmentCapability.GNSS_ORIGIN),
-            alignment.gnss_origin_ready,
-        )
-        self._render_alignment_source(
-            self.lbl_align_baro_name,
-            self.lbl_align_baro,
-            capability_mask,
-            int(AirAlignmentCapability.BARO_ORIGIN),
-            alignment.baro_origin_ready,
-        )
+        if sensor_snapshot is None:
+            sensor_snapshot_text = self.i18n.tr("sensor_snapshot.none_short")
+            sensor_snapshot_style = "unknown"
+        elif sensor_snapshot.complete:
+            sensor_snapshot_text = self.i18n.tr(
+                "sensor_snapshot.complete_short",
+                snapshot_id=sensor_snapshot.snapshot_id,
+                total=sensor_snapshot.expected_total,
+            )
+            sensor_snapshot_style = "ready"
+        else:
+            sensor_snapshot_text = self.i18n.tr(
+                "sensor_snapshot.incomplete_short",
+                snapshot_id=sensor_snapshot.snapshot_id,
+                received=len(sensor_snapshot.frames_by_index),
+                expected=(
+                    "?"
+                    if sensor_snapshot.expected_total is None
+                    else sensor_snapshot.expected_total
+                ),
+            )
+            sensor_snapshot_style = "error"
+        self.lbl_align_snapshot.setText(sensor_snapshot_text)
+        self._set_semantic_style(self.lbl_align_snapshot, sensor_snapshot_style)
         alignment_stale = alignment.state == int(AirAlignmentState.STALE)
         self.lbl_align_hint.setText(
             self.i18n.tr("alignment.stale.hint")
@@ -1210,12 +1367,15 @@ class MainWindow(QMainWindow):
         self._set_semantic_style(
             self.lbl_align_hint, "error" if alignment_stale else "unknown"
         )
-        self.lbl_pf_gnss_usable.setText(yes_no(state.gnss_position_usable))
-        self.lbl_pf_gnss_origin.setText(
-            self.i18n.tr("common.not_supported")
-            if not (capability_mask & int(AirAlignmentCapability.GNSS_ORIGIN))
-            else yes_no(alignment.gnss_origin_ready)
+        sensor_summary_flags = state.capability.sensor_summary_flags if state.capability else None
+        self.lbl_pf_gnss_present.setText(
+            self.i18n.tr("common.unknown")
+            if sensor_summary_flags is None
+            else yes_no(
+                bool(sensor_summary_flags & int(AirSensorSummaryFlag.GNSS_PRESENT))
+            )
         )
+        self.lbl_pf_gnss_usable.setText(yes_no(state.gnss_position_usable))
 
         health = state.receive_health
         health_text = self.i18n.tr("common.backlog" if health.is_backlogged() else "common.normal")
@@ -1256,6 +1416,8 @@ class MainWindow(QMainWindow):
             self.calibration_dialog.render(state)
         if self.link_details_dialog.isVisible():
             self.link_details_dialog.render(state)
+        if self.sensor_details_dialog.isVisible():
+            self.sensor_details_dialog.render(state)
 
         if (
             state.mission_started
@@ -1345,20 +1507,6 @@ class MainWindow(QMainWindow):
             "unknown": "#888888",
         }.get(state, "#888888")
         label.setStyleSheet(f"color: {color}; font-weight: bold;")
-
-    def _render_alignment_source(
-        self,
-        name_label: QLabel,
-        label: QLabel,
-        capability_mask: int,
-        source_bit: int,
-        ready: bool,
-    ) -> None:
-        supported = bool(capability_mask & source_bit)
-        name_label.setVisible(supported)
-        label.setVisible(supported)
-        if supported:
-            label.setText(self.i18n.tr("common.ready" if ready else "common.wait"))
 
     def _render_sensor(self, state: FlightControllerState) -> None:
         sensor = state.sensor

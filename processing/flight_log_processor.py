@@ -13,12 +13,19 @@ from protocol.air import (
     AirFlightStateMessage,
     AirPreflightStateMessage,
     AirPreflightStatusMessage,
+    AirSensorStatusMessage,
     AirStatusMessage,
     accel_raw_to_mps2,
     gyro_raw_to_radps,
     parse_air_frame as parse_wire_air_frame,
 )
-from protocol.common import AirStatusId
+from protocol.common import (
+    AirSensorDetailCode,
+    AirSensorStatusFlag,
+    AirStatusId,
+    air_sensor_canonical_name,
+    enum_name,
+)
 
 from .flight_plotter import FlightPlotter, PlotterConfig
 
@@ -277,7 +284,7 @@ def parse_air_frame(
             "air_profile_id": message.air_profile_id,
             "command_policy": message.command_policy,
             "calibration_mode_mask": message.calibration_mode_mask,
-            "alignment_capability_mask": message.alignment_capability_mask,
+            "sensor_summary_flags": message.sensor_summary_flags,
             "accel_full_scale_g": message.accel_full_scale_g,
             "gyro_full_scale_dps": message.gyro_full_scale_dps,
             "_message": message,
@@ -285,6 +292,23 @@ def parse_air_frame(
 
     if isinstance(message, AirPreflightStatusMessage):
         return "PREFLIGHT_STATUS", dict(message.__dict__)
+
+    if isinstance(message, AirSensorStatusMessage):
+        return "SENSOR_STATUS", {
+            **message.__dict__,
+            "sensor_name": air_sensor_canonical_name(message.sensor_id),
+            "raw_flags": message.status_flags,
+            "status_flag_names": [
+                flag.name
+                for flag in AirSensorStatusFlag
+                if message.status_flags & int(flag)
+            ],
+            "detail_name": enum_name(
+                AirSensorDetailCode,
+                message.detail_code,
+                prefix="UNKNOWN_DETAIL",
+            ),
+        }
 
     if isinstance(message, AirStatusMessage):
         return "STATUS", dict(message.__dict__)

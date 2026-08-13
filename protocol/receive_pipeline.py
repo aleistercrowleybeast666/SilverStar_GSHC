@@ -15,6 +15,7 @@ from .air import (
     AirFrame,
     AirPreflightStateMessage,
     AirPreflightStatusMessage,
+    AirSensorStatusMessage,
     AirStatusMessage,
     accel_raw_to_mps2,
     gyro_raw_to_radps,
@@ -28,9 +29,12 @@ from .common import (
     AirCmdId,
     AirCommandPolicy,
     AirLifecycleState,
+    AirSensorDetailCode,
+    AirSensorStatusFlag,
     AirStatusId,
     AirType,
     GspType,
+    air_sensor_canonical_name,
     enum_name,
 )
 from .gsp_min import GsStatus, GsToPcAirFrame, GspAck, GspFrame, GspParser, parse_gsp_frame
@@ -376,7 +380,7 @@ def protocol_event_log_records(event: ProtocolEvent) -> list[dict[str, Any]]:
                     AirCommandPolicy, message.command_policy
                 ),
                 "calibration_mode_mask": message.calibration_mode_mask,
-                "alignment_capability_mask": message.alignment_capability_mask,
+                "sensor_summary_flags": message.sensor_summary_flags,
                 "accel_full_scale_g": message.accel_full_scale_g,
                 "gyro_full_scale_dps": message.gyro_full_scale_dps,
             }
@@ -398,9 +402,6 @@ def protocol_event_log_records(event: ProtocolEvent) -> list[dict[str, Any]]:
                 "current_face": message.current_face,
                 "alignment_state": message.alignment_state,
                 "alignment_state_name": enum_name(AirAlignmentState, message.alignment_state),
-                "attitude_ready": message.attitude_ready,
-                "gnss_origin_ready": message.gnss_origin_ready,
-                "baro_origin_ready": message.baro_origin_ready,
                 "system_ready": message.system_ready,
                 "start_unlocked": message.start_unlocked,
                 "selftest_passed": message.selftest_passed,
@@ -410,6 +411,34 @@ def protocol_event_log_records(event: ProtocolEvent) -> list[dict[str, Any]]:
                 "alignment_ready": message.alignment_ready,
                 "start_block_reason": message.start_block_reason,
                 "start_block_reason_name": enum_name(AirAckResult, message.start_block_reason),
+            }
+        )
+
+    elif isinstance(message, AirSensorStatusMessage):
+        records.append(
+            {
+                **common,
+                "kind": "SENSOR_STATUS",
+                "seq": message.seq,
+                "snapshot_id": message.snapshot_id,
+                "sensor_id": message.sensor_id,
+                "sensor_name": air_sensor_canonical_name(message.sensor_id),
+                "instance_id": message.instance_id,
+                "status_flags": message.status_flags,
+                "raw_flags": message.status_flags,
+                "status_flag_names": [
+                    flag.name
+                    for flag in AirSensorStatusFlag
+                    if message.status_flags & int(flag)
+                ],
+                "detail_code": message.detail_code,
+                "detail_name": enum_name(
+                    AirSensorDetailCode,
+                    message.detail_code,
+                    prefix="UNKNOWN_DETAIL",
+                ),
+                "index": message.index,
+                "total": message.total,
             }
         )
 

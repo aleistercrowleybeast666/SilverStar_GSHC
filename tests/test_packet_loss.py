@@ -191,7 +191,7 @@ class PostProcessingTests(unittest.TestCase):
                 "air_profile_id": 0,
                 "command_policy": 1,
                 "calibration_mode_mask": 7,
-                "alignment_capability_mask": 7,
+                "sensor_summary_flags": 15,
                 "accel_full_scale_g": 16,
                 "gyro_full_scale_dps": 2000,
             },

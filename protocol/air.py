@@ -15,6 +15,7 @@ AIR_TYPE_FLIGHT_STATE = int(AirType.FLIGHT_STATE)
 AIR_TYPE_PREFLIGHT_STATE = int(AirType.PREFLIGHT_STATE)
 AIR_TYPE_CAPABILITY = int(AirType.CAPABILITY)
 AIR_TYPE_PREFLIGHT_STATUS = int(AirType.PREFLIGHT_STATUS)
+AIR_TYPE_SENSOR_STATUS = int(AirType.SENSOR_STATUS)
 AIR_TYPE_STATUS = int(AirType.STATUS)
 AIR_TYPE_CMD = int(AirType.CMD)
 AIR_TYPE_ACK = int(AirType.ACK)
@@ -23,6 +24,7 @@ AIR_FLIGHT_STATE_LEN = 50
 AIR_PREFLIGHT_STATE_LEN = 26
 AIR_CAPABILITY_LEN = 9
 AIR_PREFLIGHT_STATUS_LEN = 9
+AIR_SENSOR_STATUS_LEN = 9
 AIR_STATUS_LEN = 9
 AIR_CMD_LEN = 9
 AIR_ACK_LEN = 9
@@ -87,7 +89,7 @@ class AirCapabilityMessage:
     air_profile_id: int
     command_policy: int
     calibration_mode_mask: int
-    alignment_capability_mask: int
+    sensor_summary_flags: int
     accel_full_scale_g: int
     gyro_full_scale_dps: int
 
@@ -105,9 +107,6 @@ class AirPreflightStatusMessage:
     completed_face_mask: int
     current_face: int
     alignment_state: int
-    attitude_ready: bool
-    gnss_origin_ready: bool
-    baro_origin_ready: bool
     system_ready: bool
     start_unlocked: bool
     selftest_passed: bool
@@ -116,6 +115,18 @@ class AirPreflightStatusMessage:
     calibration_ready: bool
     alignment_ready: bool
     start_block_reason: int
+
+
+@dataclass(frozen=True)
+class AirSensorStatusMessage:
+    seq: int
+    snapshot_id: int
+    sensor_id: int
+    instance_id: int
+    status_flags: int
+    detail_code: int
+    index: int
+    total: int
 
 
 @dataclass(frozen=True)
@@ -258,7 +269,7 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
     if air_type == AirType.CAPABILITY:
         if len(frame) != AIR_CAPABILITY_LEN:
             raise ValueError(f"bad AIR_CAPABILITY length: {len(frame)}")
-        _type, seq, profile, policy, calibration_mask, alignment_mask, accel_fs, gyro_fs = struct.unpack(
+        _type, seq, profile, policy, calibration_mask, sensor_flags, accel_fs, gyro_fs = struct.unpack(
             "<BBBBBBBH", frame
         )
         return air, AirCapabilityMessage(
@@ -266,7 +277,7 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
             air_profile_id=int(profile),
             command_policy=int(policy),
             calibration_mode_mask=int(calibration_mask),
-            alignment_capability_mask=int(alignment_mask),
+            sensor_summary_flags=int(sensor_flags),
             accel_full_scale_g=int(accel_fs),
             gyro_full_scale_dps=int(gyro_fs),
         )
@@ -287,9 +298,6 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
             completed_face_mask=int(frame[4]) & 0x3F,
             current_face=int(frame[5]),
             alignment_state=alignment_byte & 0x0F,
-            attitude_ready=bool(alignment_byte & (1 << 4)),
-            gnss_origin_ready=bool(alignment_byte & (1 << 5)),
-            baro_origin_ready=bool(alignment_byte & (1 << 6)),
             system_ready=bool(flags & (1 << 0)),
             start_unlocked=bool(flags & (1 << 1)),
             selftest_passed=bool(flags & (1 << 2)),
@@ -298,6 +306,37 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
             calibration_ready=bool(flags & (1 << 5)),
             alignment_ready=bool(flags & (1 << 6)),
             start_block_reason=int(frame[8]),
+        )
+
+    if air_type == AirType.SENSOR_STATUS:
+        if len(frame) != AIR_SENSOR_STATUS_LEN:
+            raise ValueError(f"bad AIR_SENSOR_STATUS length: {len(frame)}")
+        (
+            _type,
+            seq,
+            snapshot_id,
+            sensor_id,
+            instance_id,
+            status_flags,
+            detail_code,
+            index,
+            total,
+        ) = struct.unpack("<BBBBBBBBB", frame)
+        if total == 0:
+            raise ValueError("bad AIR_SENSOR_STATUS total: 0")
+        if index >= total:
+            raise ValueError(
+                f"bad AIR_SENSOR_STATUS index/total: {index}/{total}"
+            )
+        return air, AirSensorStatusMessage(
+            seq=int(seq),
+            snapshot_id=int(snapshot_id),
+            sensor_id=int(sensor_id),
+            instance_id=int(instance_id),
+            status_flags=int(status_flags),
+            detail_code=int(detail_code),
+            index=int(index),
+            total=int(total),
         )
 
     if air_type == AirType.STATUS:
@@ -359,6 +398,7 @@ __all__ = [
     "AIR_MAX_FRAME_LEN",
     "AIR_PREFLIGHT_STATE_LEN",
     "AIR_PREFLIGHT_STATUS_LEN",
+    "AIR_SENSOR_STATUS_LEN",
     "AIR_PROFILE_COMPACT_V0",
     "AIR_STATUS_LEN",
     "AirAckMessage",
@@ -369,6 +409,7 @@ __all__ = [
     "AirFrame",
     "AirPreflightStateMessage",
     "AirPreflightStatusMessage",
+    "AirSensorStatusMessage",
     "AirStatusId",
     "AirStatusMessage",
     "TOKEN_ALIGNMENT",

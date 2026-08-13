@@ -8,9 +8,12 @@ from app import Controller, PendingAirCommand, format_air_status_message
 from protocol.air import (
     AirAckMessage,
     AirCapabilityMessage,
+    AirCmdMessage,
     AirFlightStateMessage,
     AirPreflightStatusMessage,
+    AirSensorStatusMessage,
     AirStatusMessage,
+    parse_air_frame,
 )
 from protocol.common import (
     AirAckResult,
@@ -60,7 +63,7 @@ def capability(seq: int = 1, profile: int = 0) -> AirCapabilityMessage:
         air_profile_id=profile,
         command_policy=1,
         calibration_mode_mask=0x07,
-        alignment_capability_mask=0x07,
+        sensor_summary_flags=0x0F,
         accel_full_scale_g=16,
         gyro_full_scale_dps=2000,
     )
@@ -73,8 +76,6 @@ def preflight_status(
     calibration_ready: bool = False,
     alignment_ready: bool = False,
     alignment_state: int = int(AirAlignmentState.COLLECTING),
-    attitude_ready: bool = True,
-    baro_ready: bool = False,
     start_unlocked: bool = False,
     system_ready: bool = False,
     start_block_reason: int = int(AirAckResult.ALIGNMENT_REQUIRED),
@@ -96,9 +97,6 @@ def preflight_status(
         completed_face_mask=completed_face_mask,
         current_face=current_face,
         alignment_state=alignment_state,
-        attitude_ready=attitude_ready,
-        gnss_origin_ready=False,
-        baro_origin_ready=baro_ready,
         system_ready=system_ready,
         start_unlocked=start_unlocked,
         selftest_passed=True,
@@ -206,6 +204,17 @@ class CapabilityHandshakeTests(unittest.TestCase):
         ]
         self.assertEqual(tx_records[-1]["capability_seq"], 11)
         self.assertEqual(tx_records[-1]["cmd_seq"], controller.pending_capability_ack.command_seq)
+
+    def test_profile_zero_capability_ack_uses_param1_zero(self) -> None:
+        controller = make_controller()
+        controller._handle_capability(capability(seq=22, profile=0))
+
+        _air, command = parse_air_frame(controller.pending_capability_ack.air_frame)
+
+        self.assertIsInstance(command, AirCmdMessage)
+        self.assertEqual(command.cmd_id, int(AirCmdId.CAPABILITY_ACK))
+        self.assertEqual(command.param0, 22)
+        self.assertEqual(command.param1, 0)
 
     def test_matching_ack_completes_handshake(self) -> None:
         controller = make_controller()
@@ -444,8 +453,6 @@ class PreflightStateTests(unittest.TestCase):
                 capability_acked=True,
                 calibration_ready=True,
                 alignment_ready=False,
-                attitude_ready=True,
-                baro_ready=False,
             )
         )
         self.assertFalse(controller.state.alignment.ready)
@@ -455,7 +462,6 @@ class PreflightStateTests(unittest.TestCase):
                 calibration_ready=True,
                 alignment_ready=True,
                 alignment_state=int(AirAlignmentState.READY),
-                baro_ready=True,
                 system_ready=True,
                 start_unlocked=True,
                 start_block_reason=0,
@@ -501,6 +507,53 @@ class PreflightStateTests(unittest.TestCase):
             )
         )
         self.assertTrue(controller.state.alignment.ready)
+
+    def test_alignment_status_terminates_matching_sensor_snapshot_only(self) -> None:
+        controller = make_controller()
+        for index, sensor_id in enumerate((2, 1)):
+            controller._handle_sensor_status(
+                AirSensorStatusMessage(
+                    seq=index,
+                    snapshot_id=12,
+                    sensor_id=sensor_id,
+                    instance_id=0,
+                    status_flags=0xFF,
+                    detail_code=0,
+                    index=index,
+                    total=2,
+                )
+            )
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=3,
+                status_id=int(AirStatusId.ALIGNMENT),
+                time_ms=300,
+                arg0=int(AirAlignmentState.READY),
+                arg1=12,
+            ),
+            None,
+        )
+
+        snapshot = controller.state.alignment_sensor_snapshots.latest_terminal_snapshot
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertTrue(snapshot.complete)
+        self.assertEqual([frame.sensor_id for frame in snapshot.ordered_frames()], [1, 2])
+
+        controller._handle_status_message(
+            AirStatusMessage(
+                seq=4,
+                status_id=int(AirStatusId.ALIGNMENT),
+                time_ms=400,
+                arg0=int(AirAlignmentState.STALE),
+                arg1=0xFF,
+            ),
+            None,
+        )
+        self.assertIs(
+            controller.state.alignment_sensor_snapshots.latest_terminal_snapshot,
+            snapshot,
+        )
 
 
 class CalibrationPendingRecoveryTests(unittest.TestCase):

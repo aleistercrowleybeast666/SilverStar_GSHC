@@ -1,16 +1,27 @@
 # SilverStar AIR 应用层协议
 
-> 文档版本：0.0.8
->
-> 当前 AIR Profile：`AIR_PROFILE_COMPACT_V0 = 0`
->
-> 适用范围：SilverStar 0.0.8 飞控与地面站实现
+> 协议版本：V0  
+> 当前 AIR Profile：`AIR_PROFILE_COMPACT_V0 = 0`  
+> 适用范围：SilverStar 飞控与地面站  
+> 状态：尚未正式发布；正式发布前协议版本与 `air_profile_id` 均保持 V0 / 0，可继续调整 V0 内部定义
 
-## 1. 固定约束
+## 1. 固定原则
 
-AIR 是飞控与地面站之间的定长二进制应用层协议。多字节整数和 IEEE-754 `float32` 均为 little-endian；每个 `type` 只有一个固定长度，不设置公共可变长头，不使用 TLV。
+AIR 是飞控与地面站之间的定长二进制应用层协议。
 
-AIR 应用层不附加 CRC8、CRC16 或 CRC32。当前 SX1281 Transport 使用 LoRa 硬件 CRC 提供空口完整性保护；Parser 检查帧长度、`type`、command/status ID、token、参数和字段合法性。未来 Transport 必须自行提供 CRC 或等效完整性保护，不得静默改变本文固定帧格式。
+所有多字节整数和 IEEE-754 `float32` 均为 little-endian。
+
+每个 `type` 对应唯一固定帧长度：
+
+- 不使用公共可变长头；
+- 不使用 TLV；
+- 不在已有固定帧尾部随意增加字段；
+- 不因增加普通传感器而改变既有固定帧；
+- 不因更换具体传感器型号而改变 AIR Profile。
+
+AIR 应用层不附加 CRC8/CRC16/CRC32。
+
+当前 SX1281 Transport 使用 LoRa hardware CRC 提供空口完整性保护。未来如果更换 Transport，新 Transport 必须自行提供 CRC 或等效完整性保护，不得静默改变 AIR V0 的固定帧布局。
 
 ```c
 AIR_PROFILE_COMPACT_V0 = 0U
@@ -18,108 +29,182 @@ AIR_MAX_FRAME_LEN = 50U
 AIR_PROTOCOL_APPLICATION_CRC_SIZE = 0U
 ```
 
-SilverStar `0.0.8` 只属于固件信息、构建信息和日志元数据，不编码进 AIR Capability。当前 SX1281 Transport MTU 为 64 字节，必须保持：
+当前 Transport MTU 为 64 bytes，因此必须满足：
 
 ```text
-所有 AIR 固定帧长度 <= AIR_MAX_FRAME_LEN <= Transport MTU
+all AIR frame lengths
+<= AIR_MAX_FRAME_LEN
+<= Transport MTU
 ```
 
-## 2. AIR Profile 的职责
+SilverStar firmware version 不编码进 AIR profile。
 
-`air_profile_id` 唯一确定整套 AIR 消息集合、字段布局和数值编码。Profile 0 同时定义：
+---
 
-- `CAPABILITY`、`PREFLIGHT_STATE`、`PREFLIGHT_STATUS`、`FLIGHT_STATE`；
-- `STATUS` event、`CMD` 和 `ACK`；
-- 加速度/角速度的 `int16_t` 线性编码；
-- WXYZ 四元数的 `int16_t Q15` 编码；
-- ENU 速度和位置的 little-endian `float32` 编码。
+## 2. AIR V0 设计目标
 
-以下变化不改变 `air_profile_id`：
+AIR V0 将飞行状态、传感器类别、具体传感器型号、Alignment 算法与 Transport 实现解耦。
 
-- 16 g 改为其他加速度满量程，或 2000 dps 改为其他角速度满量程，因为实际满量程由 Capability 字段声明；
-- LoRa SF、BW、CR、发射功率或设备型号变化；
-- `command_policy` 从 `PREFLIGHT_ONLY` 改为 `MISSION_ALLOWED`；
-- Provider 的可用组合变化，因为能力由 mask 声明。
+AIR 周期主链只关心长期稳定的 canonical information：
 
-以下不兼容变化必须分配新的 `air_profile_id`：
+- IMU / attitude；
+- GNSS；
+- system state；
+- calibration；
+- alignment；
+- flight state。
 
-- accel/gyro 的数据类型、位宽或线性编码规则变化；
-- 四元数从 Q15 改为其他编码；
-- 固定帧字段顺序或字段长度变化；
-- 为既有固定帧增加导致长度变化的必需字段。
+普通传感器使用通用 `SENSOR_STATUS` 描述。未来新增 barometer、magnetometer、air-data sensor、rangefinder、radar altimeter、sun sensor、star tracker、vision sensor、external attitude sensor 等，不得要求修改固定 AIR V0 frame layout。
 
-## 3. 帧类型和固定长度
+Ground Station 遇到尚未认识的 sensor ID 时应显示 `Unknown Sensor 0xNN`，而不是拒绝整个会话。
+
+由于当前协议尚未正式发布，V0 定义仍可调整；正式发布后再冻结 V0 wire layout。
+
+---
+
+## 3. 什么情况下需要新的 AIR Profile
+
+正式发布后，以下变化不改变 `air_profile_id`：
+
+- IMU / GNSS / Barometer / Magnetometer 型号变化；
+- 新增普通传感器 class 或 sensor ID；
+- Provider 组合变化；
+- Alignment / Calibration 算法变化；
+- accel / gyro 实际 full scale 变化；
+- LoRa SF / BW / CR / TxPower 变化；
+- Device Registry 变化；
+- `command_policy` 变化；
+- Ground Station 对新 sensor class 增加显示支持。
+
+以下变化才需要新的 AIR Profile：
+
+- 固定 frame 字段顺序或长度变化；
+- accel / gyro 编码规则变化；
+- quaternion 编码变化；
+- ENU velocity / position 数值编码变化；
+- command / ACK 基础布局变化；
+- application fragmentation；
+- encryption/authentication 改变应用层 framing；
+- Transport MTU 变化导致 AIR framing 必须重新设计；
+- 多机组网等需要新的应用层寻址体系。
+
+---
+
+## 4. 帧类型
 
 | type | 名称 | 长度 | 发送阶段 |
 |---:|---|---:|---|
-| `0x10` | `FLIGHT_STATE` | 50 | START 成功后，5 Hz |
+| `0x10` | `FLIGHT_STATE` | 50 | START 后，5 Hz |
 | `0x11` | `PREFLIGHT_STATE` | 26 | START 前，5 Hz |
-| `0x12` | `CAPABILITY` | 9 | START 前且未 ACK，立即一次、随后 1 Hz |
-| `0x13` | `PREFLIGHT_STATUS` | 9 | Capability ACK 后至 START 成功，立即一次、随后 1 Hz |
-| `0x20` | `STATUS` | 9 | 边沿事件发生时 |
-| `0x30` | `CMD` | 9 | 由 `command_policy` 决定入站阶段 |
-| `0x40` | `ACK` | 9 | 响应已解析的入站命令 |
+| `0x12` | `CAPABILITY` | 9 | START 前且未 ACK，立即一次 + 1 Hz |
+| `0x13` | `PREFLIGHT_STATUS` | 9 | Capability ACK 后至 START |
+| `0x14` | `SENSOR_STATUS` | 9 | Alignment 事务结束时组成一次 snapshot |
+| `0x20` | `STATUS` | 9 | 边沿事件 |
+| `0x30` | `CMD` | 9 | GS→FC |
+| `0x40` | `ACK` | 9 | FC→GS command response |
 
-## 4. CAPABILITY（`0x12`，9 字节）
+---
 
-| offset | size | 类型 | 字段 | 当前值/语义 |
-|---:|---:|---|---|---|
-| 0 | 1 | `u8` | `type` | `0x12` |
-| 1 | 1 | `u8` | `seq` | 发送序号 |
-| 2 | 1 | `u8` | `air_profile_id` | `0=AIR_PROFILE_COMPACT_V0` |
-| 3 | 1 | `u8` | `command_policy` | 当前为 `1=PREFLIGHT_ONLY` |
-| 4 | 1 | `u8` | `calibration_mode_mask` | 当前为 `0x07` |
-| 5 | 1 | `u8` | `alignment_capability_mask` | 根据当前启动会话动态生成 |
-| 6 | 1 | `u8` | `accel_full_scale_g` | 当前为 16 |
-| 7 | 2 | `u16` | `gyro_full_scale_dps` | 当前为 2000，little-endian |
+## 5. CAPABILITY（`0x12`，9 bytes）
 
-`command_policy` 与 AIR Profile 完全独立：
+| offset | size | 类型 | 字段 |
+|---:|---:|---|---|
+| 0 | 1 | `u8` | `type = 0x12` |
+| 1 | 1 | `u8` | `seq` |
+| 2 | 1 | `u8` | `air_profile_id = 0` |
+| 3 | 1 | `u8` | `command_policy` |
+| 4 | 1 | `u8` | `calibration_mode_mask` |
+| 5 | 1 | `u8` | `sensor_summary_flags` |
+| 6 | 1 | `u8` | `accel_full_scale_g` |
+| 7 | 2 | `u16` | `gyro_full_scale_dps` |
+
+### 5.1 command_policy
 
 | 值 | 名称 | 语义 |
 |---:|---|---|
-| 1 | `PREFLIGHT_ONLY` | START 前允许 GS→FC 命令；START 成功后不解析、不执行、不 ACK |
-| 2 | `MISSION_ALLOWED` | Profile 允许任务中命令；具体命令权限仍由系统策略检查 |
+| `1` | `PREFLIGHT_ONLY` | START 前允许命令；START 后不解析、不执行、不 ACK |
+| `2` | `MISSION_ALLOWED` | Profile 允许任务中命令，具体命令仍受系统策略限制 |
 
-`AIR_PROFILE_COMPACT_V0` 不隐含 `PREFLIGHT_ONLY`。0.0.8 的配置仍为 `PREFLIGHT_ONLY`，因此实际飞行行为不变。
-
-`calibration_mode_mask` 表示固件支持的模式，而非当前选中模式：bit0=`NONE`、bit1=`ONE_FACE`、bit2=`SIX_FACE`。该值由 SystemCalibration capability API 提供，当前为 `0x07`。
-
-`alignment_capability_mask` 表示当前飞控启动会话具备的来源，而非当前 ready 状态：bit0=`ATTITUDE`、bit1=`GNSS_ORIGIN`、bit2=`BARO_ORIGIN`。它来自SystemAlignment内部32-bit `capability_mask`的低三位；Provider尚无样本或GNSS尚无fix不清除此能力，Provider未注册、缺少所需capability、初始化失败或启动失败时清除对应bit。实时ready状态由`PREFLIGHT_STATUS`表示。内部未来新增MAG等source时不得改变本profile的长度或偏移；需要空口公开新bit时必须分配新profile。
-
-### 4.1 Capability 握手
-
-状态固定为：
+### 5.2 calibration_mode_mask
 
 ```text
-NOT_ACKED -> ACKED -> DISABLED_FOR_FLIGHT
+bit0 = NONE
+bit1 = ONE_FACE
+bit2 = SIX_FACE
+bit3..7 = reserved
 ```
 
-- 进入 PREFLIGHT 后立即发送 Capability；未确认时每 1 秒重发，`seq` 使用最近一次成功发送的值。
-- `CAPABILITY_ACK.param0` 必须等于最近一次成功发送的 Capability `seq`。
-- `CAPABILITY_ACK.param1` 必须等于 `air_profile_id`，当前为 0。
-- 错误 seq 或 profile 返回 `BAD_PARAM`；已经 ACK 后再次 ACK 返回 `BAD_STATE`。
-- 有效 ACK 后永久停止本次上电周期的 Capability 广播，并开始发送 `PREFLIGHT_STATUS`。
-- START 成功后进入 `DISABLED_FOR_FLIGHT`，不得恢复握手。
-- 一个飞控上电周期只对应一个 Ground Station session。地面站会话异常时应重新启动整个飞控任务。
-- 未 ACK 时只允许 `PING` 和 `CAPABILITY_ACK`；其他命令返回 `CAPABILITY_REQUIRED`。
+当前为 `0x07`。
 
-## 5. PREFLIGHT_STATUS（`0x13`，9 字节）
+### 5.3 sensor_summary_flags
+
+```text
+bit0 = IMU_PRESENT
+bit1 = GNSS_PRESENT
+bit2 = AUX_SENSOR_PRESENT
+bit3 = SENSOR_STATUS_SNAPSHOT_SUPPORTED
+bit4..7 = reserved
+```
+
+`IMU_PRESENT`：至少有一个 canonical IMU provider。  
+`GNSS_PRESENT`：至少有一个 GNSS provider。  
+`AUX_SENSOR_PRESENT`：至少存在一个不属于 IMU/GNSS 的 sensor class。  
+`SENSOR_STATUS_SNAPSHOT_SUPPORTED`：AIR V0 当前定义固定为 1。
+
+该字段不枚举具体辅助传感器；具体传感器通过 `SENSOR_STATUS.sensor_id` 表示。
+
+---
+
+## 6. Capability handshake
+
+```text
+NOT_ACKED
+    ↓
+ACKED
+    ↓
+DISABLED_FOR_FLIGHT
+```
+
+进入 PREFLIGHT 后立即发送 `CAPABILITY`；未 ACK 时 1 Hz 重发。
+
+`CAPABILITY_ACK.param0` = 最近一次成功发送的 Capability seq。  
+`CAPABILITY_ACK.param1` = `AIR_PROFILE_COMPACT_V0 = 0`。
+
+错误 seq/profile → `BAD_PARAM`。  
+已经 ACK → `BAD_STATE`。
+
+成功 ACK 后：
+
+- 停止 Capability 广播；
+- 开始 `PREFLIGHT_STATUS`；
+- 允许发送 pending Alignment sensor snapshot；
+- 继续 `PREFLIGHT_STATE`。
+
+START 后进入 `DISABLED_FOR_FLIGHT`。
+
+未 ACK 时只允许 `PING` 与 `CAPABILITY_ACK`；其他命令返回 `CAPABILITY_REQUIRED`。
+
+---
+
+## 7. PREFLIGHT_STATUS（`0x13`，9 bytes）
 
 | byte | 字段 | 编码 |
 |---:|---|---|
 | 0 | `type` | `0x13` |
-| 1 | `seq` | 发送序号 |
-| 2 | `lifecycle_state` | 见 5.1 |
-| 3 | Calibration | bit0..3=`calibration_state`；bit4..7=`calibration_mode` |
-| 4 | `completed_face_mask` | bit0..5=`X+ X- Y+ Y- Z+ Z-`；bit6..7=0 |
-| 5 | `current_face` | 0..5=`X+ X- Y+ Y- Z+ Z-`；`0xFF=none` |
-| 6 | Alignment | bit0..3=`alignment_state`；bit4=attitude ready；bit5=GNSS origin candidate ready；bit6=barometer origin candidate ready；bit7=0 |
-| 7 | flags | 见 5.2 |
-| 8 | `start_block_reason` | 见 5.3 |
+| 1 | `seq` | tx sequence |
+| 2 | `lifecycle_state` | Lifecycle |
+| 3 | Calibration | low4=`state`，high4=`mode` |
+| 4 | `completed_face_mask` | X+/X-/Y+/Y-/Z+/Z- |
+| 5 | `current_face` | 0..5，`0xFF=none` |
+| 6 | Alignment | low4=`alignment_state`，high4=reserved |
+| 7 | flags | 见 7.2 |
+| 8 | `start_block_reason` | 见 7.3 |
 
-Calibration `NOT_SELECTED=0xFF` 在 byte3 高半字节编码为 `0xF`，Parser 还原为 `0xFF`。其余 mode 直接编码为 0..2。
+AIR V0 不再把 ATTITUDE ready、GNSS origin ready、BARO origin ready 写死为固定 Alignment source bits。
 
-### 5.1 状态枚举
+具体 sensor/source detail 由 `SENSOR_STATUS` 和飞控串口详细诊断提供。
+
+### 7.1 状态枚举
 
 Lifecycle：
 
@@ -135,15 +220,11 @@ Lifecycle：
 | 7 | `POSTFLIGHT` |
 | 8 | `FAULT` |
 
-Calibration state：0=`IDLE`、1=`WAIT_FACE`、2=`COLLECTING`、3=`CHECKING`、4=`READY`、5=`FAILED`。Calibration mode：0=`NONE`、1=`ONE_FACE`、2=`SIX_FACE`、`0xFF=NOT_SELECTED`。
+Calibration：0=`IDLE`、1=`WAIT_FACE`、2=`COLLECTING`、3=`CHECKING`、4=`READY`、5=`FAILED`。  
+Calibration Mode：0=`NONE`、1=`ONE_FACE`、2=`SIX_FACE`、`0xFF=NOT_SELECTED`。  
+Alignment：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAILED`、5=`STALE`。
 
-Alignment state：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAILED`、5=`STALE`。
-
-`STALE` 表示本次 Alignment 曾经达到 `READY`，但在 START 前检测到足以使初始状态失效的运动。`STALE` 必须使 `flags.alignment_ready=0`，并重新阻止 START；它是锁存状态，不允许自动重新对准，只能通过显式 `ALIGN_START`（或先 `ALIGN_RESET` 再 `ALIGN_START`）重新建立有效 Alignment。对准有效性监视只在 START 前启用，START 成功后停止，避免正常飞行动作触发失效。
-
-`PREFLIGHT_STATUS` byte6 的 attitude/GNSS/barometer ready 位描述各 source 当前的局部准备状态；当整体 Alignment 因运动进入 `STALE` 时，这些局部 ready 位允许继续保持，以便诊断“source 本身仍有数据，但本次 Alignment 已失效”。是否允许 START 必须以 `flags.alignment_ready` 和 `start_block_reason` 为准。
-
-### 5.2 flags
+### 7.2 flags
 
 | bit | 名称 |
 |---:|---|
@@ -154,11 +235,11 @@ Alignment state：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAIL
 | 4 | `capability_acked` |
 | 5 | `calibration_ready` |
 | 6 | `alignment_ready` |
-| 7 | 保留，必须为 0 |
+| 7 | reserved |
 
-### 5.3 start_block_reason
+GNSS 保持独立 dynamic status，因为它可能动态获得/失去定位，是任务中的特殊 navigation measurement。
 
-该字段表示“此刻通过 AIR 执行 START 时，最优先的阻止原因”。它复用 START ACK result 的数值，不维护第二套枚举：
+### 7.3 start_block_reason
 
 | 值 | 原因 |
 |---:|---|
@@ -178,175 +259,390 @@ Alignment state：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAIL
 | `0x15` | `HOOKS_UNAVAILABLE` |
 | `0x16` | `PREPARE_FAILED` |
 
-预飞快照和实际 AIR START 使用同一 Lifecycle 预检查及同一 result/reason→AIR 映射。`HOOKS_UNAVAILABLE` 和 `PREPARE_FAILED` 不得降级为模糊的 `REJECTED`。执行期才可能出现的失败由实际 START ACK 返回；其后快照仍报告当前可预检查的首要原因。
+---
 
-### 5.4 发送规则
+## 8. SENSOR_STATUS（`0x14`，9 bytes）
 
-`PREFLIGHT_STATUS` 只在 Capability ACK 成功后到 START 成功前发送。ACK 后在不打断 ACK 或已排队关键事件的首个安全发送机会发送一次，之后以 1 Hz 发送。Calibration state/face、Alignment state、LOCK、System ready 或 GNSS usable 变化时可提前发送下一帧。它不替代任何 `STATUS` event。
+`SENSOR_STATUS` 是 AIR V0 的通用 sensor snapshot frame，用于描述一个逻辑 sensor class / instance 的状态，而不是具体芯片型号。
 
-## 6. Profile 0 的 IMU 与姿态编码
+例如一个 JY901B 可以在 System 层暴露 IMU、BAROMETER、MAGNETOMETER 三个逻辑 sensor class。
 
-AIR accel/gyro 必须来自校准后的机体系物理量，不能透传芯片私有原始计数：
+### 8.1 Frame layout
+
+| offset | size | 类型 | 字段 |
+|---:|---:|---|---|
+| 0 | 1 | `u8` | `type = 0x14` |
+| 1 | 1 | `u8` | frame `seq` |
+| 2 | 1 | `u8` | `snapshot_id` |
+| 3 | 1 | `u8` | `sensor_id` |
+| 4 | 1 | `u8` | `instance_id` |
+| 5 | 1 | `u8` | `status_flags` |
+| 6 | 1 | `u8` | `detail_code` |
+| 7 | 1 | `u8` | `index` |
+| 8 | 1 | `u8` | `total` |
+
+---
+
+## 9. Sensor ID Registry
+
+`0x00 = INVALID / NONE`
+
+| ID | Sensor Class |
+|---:|---|
+| `0x01` | `IMU` |
+| `0x02` | `GNSS` |
+| `0x03` | `BAROMETER` |
+| `0x04` | `MAGNETOMETER` |
+| `0x05` | `AIR_DATA` |
+| `0x06` | `RANGEFINDER` |
+| `0x07` | `RADAR_ALTIMETER` |
+| `0x08` | `SUN_SENSOR` |
+| `0x09` | `STAR_TRACKER` |
+| `0x0A` | `VISION` |
+| `0x0B` | `EXTERNAL_ATTITUDE` |
+| `0x0C` | `DUAL_GNSS_HEADING` |
+| `0x0D` | `TEMPERATURE` |
+| `0x0E` | `HUMIDITY` |
+
+增加 sensor ID 不改变 AIR V0。
+
+Ground Station 不认识 ID 时显示 `Unknown Sensor 0xNN`，同时继续解析 instance、flags 和 detail code。
+
+`instance_id` 支持同一类多个设备。
+
+---
+
+## 10. SENSOR_STATUS status_flags
+
+| bit | 名称 | 语义 |
+|---:|---|---|
+| 0 | `REGISTERED` | sensor/provider 已存在 |
+| 1 | `INITIALIZED` | 初始化完成 |
+| 2 | `ONLINE` | 当前 online |
+| 3 | `HEALTHY` | health check 正常 |
+| 4 | `DATA_VALID` | 当前存在有效数据 |
+| 5 | `CALIBRATION_OK` | 所需校准已完成，或该 sensor 不要求校准 |
+| 6 | `ALIGNMENT_USED` | 当前 Alignment transaction 使用该 sensor |
+| 7 | `REQUIRED_FOR_START` | 当前 profile 下 START 必需 |
+
+---
+
+## 11. SENSOR_STATUS detail_code
+
+| 值 | 名称 |
+|---:|---|
+| `0x00` | `NONE/OK` |
+| `0x01` | `NOT_REGISTERED` |
+| `0x02` | `INIT_FAILED` |
+| `0x03` | `OFFLINE` |
+| `0x04` | `UNHEALTHY` |
+| `0x05` | `NO_VALID_DATA` |
+| `0x06` | `CALIBRATION_REQUIRED` |
+| `0x07` | `ALIGNMENT_INPUT_INVALID` |
+| `0x08` | `IO_ERROR` |
+| `0x09` | `CONFIG_ERROR` |
+| `0x0A` | `UNSUPPORTED` |
+| `0xFF` | `OTHER` |
+
+---
+
+## 12. Sensor snapshot
+
+Sensor status 不周期广播。
+
+AIR V0 不定义 `SENSOR_STATUS_REQUEST` 或 `DEVICE_INFO_REQUEST` 命令。
+
+Sensor snapshot 只在 Alignment 事务结束时自动生成。
+
+### 12.1 snapshot_id
+
+每次新的 sensor snapshot：`snapshot_id++`，`u8` 自然回绕。
+
+### 12.2 Sensor ordering
+
+固定顺序：
+
+1. IMU
+2. GNSS
+3. remaining sensors
+
+其余 sensor 按 `sensor_id`、`instance_id` 升序发送。
+
+### 12.3 index / total
+
+`index` 为 0-based，`total` 为本 snapshot 总 SENSOR_STATUS frame 数。
+
+Ground Station 可以通过 `received unique indices != total` 判断 snapshot 不完整。
+
+---
+
+## 13. Alignment 与 Sensor snapshot 的发送事务
+
+当 Alignment 进入 `READY` 或 `FAILED` 时：
+
+1. 冻结当前 sensor status snapshot；
+2. 分配新的 `snapshot_id`；
+3. 按顺序发送所有 `SENSOR_STATUS`；
+4. 最后一帧后发送 `STATUS ALIGNMENT`；
+5. `STATUS ALIGNMENT` 是此次 snapshot 的逻辑终止标志。
+
+### 13.1 READY
 
 ```text
-SystemImuProvider raw physical sample
-    -> SystemCalibration correction
-    -> corrected accel/gyro physical values
-    -> AIR int16 quantization
+SENSOR_STATUS IMU
+SENSOR_STATUS GNSS
+SENSOR_STATUS ...
+STATUS ALIGNMENT READY
 ```
 
-INS 和 Telemetry 必须共同调用 `SystemCalibration_ImuCorrectionApply()`：
+### 13.2 FAILED
+
+同样发送 sensor snapshot，最后发送 `STATUS ALIGNMENT FAILED`。
+
+### 13.3 STALE
+
+STALE 不重新生成 snapshot：
 
 ```text
-acc_corrected = (acc_measured - accel_bias) * accel_scale
-gyro_corrected = (gyro_measured - gyro_bias) * gyro_scale
+STATUS ALIGNMENT
+arg0 = STALE
+arg1 = 0xFF
 ```
 
-Calibration 未 READY（包括六面采集中）时，Telemetry 使用 identity correction：bias=0、scale=1，保证校准前仍可观察 `PREFLIGHT_STATE`。Calibration READY 后立即使用正式 correction。Calibration 算法自身始终消费未应用本次 correction 的原始物理量。内部 bias/scale 保持 `float`；`int16_t` 只用于 AIR encoder 的最后一步。
+### 13.4 Capability ACK 前已完成 Alignment
+
+保存 pending snapshot。Capability ACK 后在第一个安全发送机会发送完整 snapshot，再发送 terminal `STATUS ALIGNMENT`。
+
+---
+
+## 14. STATUS（`0x20`，9 bytes）
+
+| offset | 字段 |
+|---:|---|
+| 0 | `type = 0x20` |
+| 1 | `seq` |
+| 2 | `status_id` |
+| 3..6 | `time_ms u32` |
+| 7 | `arg0` |
+| 8 | `arg1` |
+
+| ID | 名称 | arg0 | arg1 |
+|---:|---|---|---|
+| `0x01` | `BOOT` | reserved | reserved |
+| `0x02` | `SELFTEST_COMPLETE` | `mission_capable` | 0 |
+| `0x03` | `MISSION_START` | 0 | 0 |
+| `0x04` | `LAUNCH` | reserved | reserved |
+| `0x05` | `PARACHUTE_DEPLOY` | reserved | reserved |
+| `0x06` | `LANDING` | reserved | reserved |
+| `0x07` | `LOCKED` | 0 | 0 |
+| `0x08` | `UNLOCKED` | 0 | 0 |
+| `0x09` | `GNSS_POSITION` | 0/1 | 0 |
+| `0x0A` | `ALIGNMENT` | Alignment state | snapshot ID / `0xFF` |
+| `0x0B` | `CALIBRATION` | Calibration state | Calibration mode |
+| `0x0C` | `CALIBRATION_FACE` | face | pass/fail |
+| `0x0D` | `CALIBRATION_DIAGNOSTIC` | face | diagnostic reason |
+
+---
+
+## 15. ALIGNMENT STATUS
+
+对于 `READY/FAILED` 且此次事件前存在 sensor snapshot：
 
 ```text
-STANDARD_GRAVITY = 9.80665 m/s²
-acc_i16 = clamp(round(acc_corrected_mps2 /
-                      (accel_full_scale_g * STANDARD_GRAVITY) * 32768))
-gyro_i16 = clamp(round(gyro_corrected_radps /
-                       (gyro_full_scale_dps * pi / 180) * 32768))
+arg1 = snapshot_id
 ```
 
-超量程饱和到 `INT16_MIN..INT16_MAX`。四元数为归一化 WXYZ Q15：`clamp(round(q*32768))`，`+1` 编码为 32767，`-1` 编码为 -32768。速度/位置保持 little-endian `float32`。
+对于 `STALE` 或没有新 snapshot 的其他 Alignment event：
 
-## 7. PREFLIGHT_STATE（`0x11`，26 字节）
+```text
+arg1 = 0xFF
+```
+
+Ground Station 使用该字段关联 `SENSOR_STATUS.snapshot_id`。
+
+---
+
+## 16. Sensor snapshot packet loss
+
+Sensor snapshot 是辅助详情，不影响 Alignment READY、START permission 或 flight control。
+
+Ground Station 根据 `snapshot_id/index/total` 检测丢包。
+
+如果 terminal ALIGNMENT STATUS 已收到，但 unique indices 少于 total，则显示：
+
+```text
+Sensor snapshot incomplete
+```
+
+不定义额外重发命令。
+
+---
+
+## 17. Calibration diagnostic reason
+
+| 值 | 名称 |
+|---:|---|
+| `0x00` | `NONE` |
+| `0x01` | `NO_STREAM` |
+| `0x02` | `GYRO_MOVING` |
+| `0x03` | `ACCEL_MAGNITUDE` |
+| `0x04` | `GRAVITY_DIRECTION` |
+| `0x05` | `VARIANCE` |
+| `0x06` | `SAMPLE_GAP` |
+
+只在 reason 变化时发送。恢复到 NONE 时发送一次用于清除旧提示。
+
+---
+
+## 18. PREFLIGHT_STATE（`0x11`，26 bytes）
 
 | offset | size | 类型 | 字段 |
 |---:|---:|---|---|
 | 0 | 1 | `u8` | `type=0x11` |
 | 1 | 1 | `u8` | `seq` |
 | 2 | 4 | `u32` | `boot_time_ms` |
-| 6/8/10 | 各 2 | `i16` | `ax/ay/az`，校准后机体系加速度 |
-| 12/14/16 | 各 2 | `i16` | `gx/gy/gz`，校准后机体系角速度 |
-| 18/20/22/24 | 各 2 | `i16` | `qw/qx/qy/qz`，WXYZ Q15 |
+| 6/8/10 | each 2 | `i16` | corrected `ax/ay/az` |
+| 12/14/16 | each 2 | `i16` | corrected `gx/gy/gz` |
+| 18/20/22/24 | each 2 | `i16` | WXYZ quaternion Q15 |
 
-START 前以 5 Hz 发送，START 成功后永久停止。
+START 前 5 Hz；START 后永久停止。
 
-## 8. FLIGHT_STATE（`0x10`，50 字节）
+---
+
+## 19. PREFLIGHT quaternion authority
+
+Alignment 尚未获得有效 final attitude：使用 hardware quaternion。
+
+Alignment final attitude 有效：使用 final alignment `q_nb`。
+
+Alignment 进入 STALE 或 final attitude invalid：立即回退 hardware quaternion。
+
+重新 Alignment 成功：切换到新的 final alignment `q_nb`。
+
+Quaternion authority 在 hardware ↔ final alignment 间变化时，应立即安排一帧 PREFLIGHT_STATE。
+
+---
+
+## 20. START 后 quaternion
+
+START 后：
+
+```text
+initial alignment q_nb
++
+corrected gyro
+→ software quaternion propagation
+```
+
+`FLIGHT_STATE.quaternion` 只使用 software propagated `q_nb`。
+
+飞行过程中不得自动切回 hardware quaternion。
+
+---
+
+## 21. IMU 与姿态编码
+
+AIR accel/gyro 来自：
+
+```text
+SystemImuProvider physical sample
+↓
+SystemCalibration correction
+↓
+AIR quantization
+```
+
+Calibration 未 READY 时使用 identity correction。
+
+Acceleration：
+
+```text
+STANDARD_GRAVITY = 9.80665 m/s²
+
+acc_i16 =
+clamp(round(
+    acc_corrected_mps2 /
+    (accel_full_scale_g * STANDARD_GRAVITY)
+    * 32768
+))
+```
+
+Angular rate：
+
+```text
+gyro_i16 =
+clamp(round(
+    gyro_corrected_radps /
+    (gyro_full_scale_dps * pi / 180)
+    * 32768
+))
+```
+
+Quaternion：
+
+```text
+q_nb
+body -> ENU
+WXYZ
+normalized
+Q15
+```
+
+---
+
+## 22. FLIGHT_STATE（`0x10`，50 bytes）
 
 | offset | size | 类型 | 字段 |
 |---:|---:|---|---|
 | 0 | 1 | `u8` | `type=0x10` |
 | 1 | 1 | `u8` | `seq` |
-| 2..25 | 24 | 同第 7 节 | 时间、校准后 IMU、Q15 四元数 |
-| 26/30/34 | 各 4 | `f32` | `velocity_e/n/u_mps` |
-| 38/42/46 | 各 4 | `f32` | `position_e/n/u_m` |
+| 2..25 | 24 | same as PREFLIGHT | time + IMU + quaternion |
+| 26 | 4 | `f32` | `velocity_e_mps` |
+| 30 | 4 | `f32` | `velocity_n_mps` |
+| 34 | 4 | `f32` | `velocity_u_mps` |
+| 38 | 4 | `f32` | `position_e_m` |
+| 42 | 4 | `f32` | `position_n_m` |
+| 46 | 4 | `f32` | `position_u_m` |
 
-START 成功后以 5 Hz 发送。START 前不发送。
+START 后 5 Hz。
 
-## 9. STATUS（`0x20`，9 字节）
+---
 
-布局：byte0=`type`、byte1=`seq`、byte2=`status_id`、byte3..6=`time_ms u32`、byte7=`arg0`、byte8=`arg1`。
+## 23. GNSS 独立动态状态
 
-| ID | 名称 | `arg0` | `arg1` |
-|---:|---|---|---|
-| `0x01` | `BOOT` | 保留 | 保留 |
-| `0x02` | `SELFTEST_COMPLETE` | `mission_capable` | 0 |
-| `0x03` | `MISSION_START` | 0 | 0 |
-| `0x04` | `LAUNCH` | 保留 | 保留 |
-| `0x05` | `PARACHUTE_DEPLOY` | 保留 | 保留 |
-| `0x06` | `LANDING` | 保留 | 保留 |
-| `0x07` | `LOCKED` | 0 | 0 |
-| `0x08` | `UNLOCKED` | 0 | 0 |
-| `0x09` | `GNSS_POSITION` | 0/1 | 0 |
-| `0x0A` | `ALIGNMENT` | Alignment state | ready mask |
-| `0x0B` | `CALIBRATION` | Calibration state | Calibration mode |
-| `0x0C` | `CALIBRATION_FACE` | face 0..5 | 0=`FAILED`、1=`PASSED` |
-| `0x0D` | `CALIBRATION_DIAGNOSTIC` | face 0..5，`0xFF`=非特定面/ONE_FACE | diagnostic reason，见 9.1 |
+GNSS 保持主界面独立动态可用性显示。
 
-预飞控制命令的`ACK=OK`只表示请求已被飞控接受，不表示异步Calibration/Alignment已经完成。`CALIBRATION_FACE`的`PASSED`只在该面完整采样和检查通过后产生；`CALIBRATION`进入READY/FAILED时表示校准事务最终结果；`ALIGNMENT`进入READY/FAILED/STALE时表示对准事务或有效性发生了最终/关键状态变化。`PREFLIGHT_STATUS`是当前状态的周期权威快照，用于恢复可能丢失的边沿事件。
+`PREFLIGHT_STATUS.flags.gnss_position_usable` 是周期权威状态。  
+`STATUS GNSS_POSITION` 是边沿事件。
 
-这些是边沿事件：表示“刚才发生了什么”。`PREFLIGHT_STATUS` 是状态快照：表示“现在是什么状态”。两者必须同时保留。
+Alignment sensor snapshot 中的 GNSS 状态只表示 Alignment 完成时的设备快照，不能替代运行期 GNSS dynamic status。
 
-### 9.1 Calibration diagnostic reason
+---
 
-`CALIBRATION_DIAGNOSTIC` 用于向 Ground Station/PC 报告校准为何正在等待、为何某次面采集被拒绝，或为何某个采样窗口被废弃。它不改变 Calibration 的最终通过/失败语义。
+## 24. CMD（`0x30`，9 bytes）
 
-| 值 | 名称 | 语义 |
-|---:|---|---|
-| `0x00` | `NONE` | 当前无诊断阻塞；也用于清除上一次诊断 |
-| `0x01` | `NO_STREAM` | 没有可用/新鲜的惯性数据流 |
-| `0x02` | `GYRO_MOVING` | 角速度超过静止判据 |
-| `0x03` | `ACCEL_MAGNITUDE` | 比力/加速度模长偏离静止重力允许范围 |
-| `0x04` | `GRAVITY_DIRECTION` | 当前重力方向与要求的面/方向不符 |
-| `0x05` | `VARIANCE` | 采样窗口方差超限 |
-| `0x06` | `SAMPLE_GAP` | 样本间隔/数据连续性不满足要求 |
-
-发送规则：
-
-- 只在 START 前、Calibration 事务相关阶段发送；
-- `reason` 发生变化时发送一次，不得按 IMU 采样频率重复发送同一 reason；
-- reason 从非 `NONE` 恢复为 `NONE` 时发送一次，用于 Ground Station/PC 清除旧错误提示；
-- `CAL START`、`CAL RESET` 或进入一个新的 SIX_FACE face 时应重置诊断状态；必要时可发送 `NONE`；
-- `CAL FACE` 在命令刚被接受/拒绝时若飞控已经知道明确的静止、比力或方向原因，应在安全发送机会发送对应 `CALIBRATION_DIAGNOSTIC`；
-- 采样期间因运动、比力、方差或 sample gap 导致窗口自动作废并重试时，Calibration 不必进入 `FAILED`；诊断事件只解释当前等待/重试原因；
-- `CALIBRATION_FACE` 的 `PASSED/FAILED` 和 `CALIBRATION` 的 READY/FAILED 仍然是事务结果，`CALIBRATION_DIAGNOSTIC` 只是解释性状态事件。
-
-Ground Station/PC 应将 diagnostic reason 作为可读提示显示，但仍以 `PREFLIGHT_STATUS`、`CALIBRATION_FACE` 和 `CALIBRATION` 作为当前状态/最终结果的权威来源。
-
-### 9.2 Alignment READY 后的有效性
-
-Alignment 达到 `READY` 后、START 成功前，飞控必须继续进行非阻塞的 Alignment validity guard。具体运动判据和阈值属于固件 System/User 配置，不编码进 AIR Profile；典型输入可以包括 corrected gyro、静止比力条件和当前姿态相对 Alignment reference 的变化。
-
-当 guard 判定飞控在 START 前发生了足以使初始状态失效的运动：
-
-```text
-ALIGNMENT READY
-    -> STALE
-alignment_ready = 0
-system_ready 重新计算
-START 被阻止
-```
-
-同时发送：
-
-```text
-STATUS ALIGNMENT
-arg0 = STALE
-arg1 = 当前 source ready mask
-```
-
-并在后续 `PREFLIGHT_STATUS` 中持续反映：
-
-```text
-alignment_state = STALE
-flags.alignment_ready = 0
-start_block_reason = ALIGNMENT_REQUIRED
-```
-
-除非另有更高优先级的 START block reason。
-
-`STALE` 不允许自动恢复为 `READY`；用户必须显式执行新的 `ALIGN_START`。START 成功后 validity guard 停止，本机制不得对正常飞行运动产生影响。
-
-## 10. CMD（`0x30`，9 字节）
-
-布局：byte0=`type`、byte1=`seq`、byte2=`cmd_id`、byte3..6=`token u32`、byte7=`param0`、byte8=`param1`。
-
-| ID | 命令 | token | `param0` | `param1` |
+| ID | 命令 | token | param0 | param1 |
 |---:|---|---:|---|---|
 | `0x01` | `START_MISSION` | `0xA55A3CC3` | 0 | 0 |
-| `0x02` | `PING` | 不检查 | 0 | 0 |
+| `0x02` | `PING` | no check | 0 | 0 |
 | `0x03` | `LOCK` | `0xC33CA55A` | 0 | 0 |
 | `0x04` | `UNLOCK` | `0x55AA6996` | 0 | 0 |
-| `0x05` | `CAPABILITY_ACK` | 不检查 | 最近成功 Capability seq | `air_profile_id=0` |
-| `0x07` | `CAL_START` | `0x43414C30` | mode 0..2 | 0 |
-| `0x08` | `CAL_FACE` | `0x43414C30` | face 0..5 | 0 |
+| `0x05` | `CAPABILITY_ACK` | no check | Capability seq | `air_profile_id=0` |
+| `0x07` | `CAL_START` | `0x43414C30` | mode | 0 |
+| `0x08` | `CAL_FACE` | `0x43414C30` | face | 0 |
 | `0x09` | `CAL_STOP` | `0x43414C30` | 0 | 0 |
 | `0x0A` | `CAL_RESET` | `0x43414C30` | 0 | 0 |
 | `0x0B` | `ALIGN_START` | `0x414C4947` | 0 | 0 |
 | `0x0C` | `ALIGN_STOP` | `0x414C4947` | 0 | 0 |
 | `0x0D` | `ALIGN_RESET` | `0x414C4947` | 0 | 0 |
 
-`0x06` 未定义，必须按未知命令处理。相同 `seq+cmd_id` 的重发返回 ACK cache 的原结果，不重复执行副作用。
+`0x06` undefined。
 
-## 11. ACK（`0x40`，9 字节）
+AIR V0 不定义 SENSOR_STATUS_REQUEST / DEVICE_INFO_REQUEST。
 
-布局：byte0=`type`、byte1=ACK 帧 `seq`、byte2=被响应 command `seq`、byte3=被响应 `cmd_id`、byte4=`result`、byte5..8=`time_ms u32`。
+---
+
+## 25. ACK（`0x40`，9 bytes）
 
 | 值 | result |
 |---:|---|
@@ -374,41 +670,257 @@ start_block_reason = ALIGNMENT_REQUIRED
 | `0x15` | `HOOKS_UNAVAILABLE` |
 | `0x16` | `PREPARE_FAILED` |
 
-当 `result=BAD_CMD` 时，byte3 必须原样回显收到的未知 command byte；其他 result 仍要求 byte3 是已定义命令。ACK 长度始终为 9 字节。
+---
 
-## 12. START、命令策略与调度
-
-所有 START 的核心依赖固定为：
+## 26. START dependency
 
 ```text
-Calibration READY -> Alignment READY -> START READY
+Calibration READY
+↓
+Alignment READY
+↓
+START READY
 ```
 
-如果 Alignment 在 START 前进入 `STALE`，则 `alignment_ready=0`，必须重新执行 `ALIGN_START`，不能仅由 Ground Station/PC 忽略该状态继续 START。
+Alignment `READY → STALE` 后重新阻止 START，必须显式重新 `ALIGN_START`。
 
-AIR START 额外要求 Capability ACKED 和 interlock UNLOCKED。GNSS 是 Optional：无预飞 GNSS origin 不阻止 START，但本次任务不启用 GNSS 融合。
+AIR START 额外要求 Capability ACKED 与 interlock UNLOCKED。
 
-0.0.8 的 START 前发送优先级：
+GNSS 是 Optional；无预飞 GNSS origin 不阻止 START，本任务可关闭 GNSS fusion。
+
+---
+
+## 27. Alignment READY 后 sensor status burst
+
+```text
+ALIGN_START ACK
+↓
+Alignment COLLECTING
+↓
+Alignment CHECKING
+↓
+SENSOR_STATUS IMU
+↓
+SENSOR_STATUS GNSS
+↓
+SENSOR_STATUS BAROMETER
+↓
+SENSOR_STATUS MAGNETOMETER
+↓
+...
+↓
+STATUS ALIGNMENT READY
+```
+
+Ground Station 以 terminal `STATUS ALIGNMENT READY` 判断本次 sensor snapshot 结束。
+
+---
+
+## 28. Ground Station Alignment Details
+
+Ground Station 不通过 AIR command 请求传感器详情。
+
+Alignment 界面缓存最近一次 SENSOR_STATUS snapshot。
+
+主面板显示 Alignment state，并提供 `Sensor Details` 按钮。
+
+按钮只显示本地缓存，不产生无线命令。
+
+显示顺序：
+
+1. IMU
+2. GNSS
+3. remaining sensors by sensor_id
+
+未知 ID 显示：
+
+```text
+Unknown Sensor 0xNN
+```
+
+---
+
+## 29. Ground Station 主界面传感器抽象
+
+主 GUI 面向 canonical capability，而不是具体芯片型号。
+
+主页面建议：
+
+```text
+Inertial / Attitude
+GNSS
+Alignment
+Flight
+Link
+```
+
+具体传感器状态由 Alignment → Sensor Details 展示。
+
+---
+
+## 30. Sensor Status 与具体设备型号
+
+AIR V0 不发送具体型号字符串。
+
+只发送：
+
+```text
+canonical sensor class
+instance
+generic status
+```
+
+具体 Provider/model 使用 System Console INFO、Flight Log 或工程配置查看。
+
+---
+
+## 31. 预飞调度优先级
+
+未 Capability ACK：
 
 ```text
 1. ACK
-2. critical STATUS event
-3. Capability（未 ACK 时）
-4. PREFLIGHT_STATUS（ACK 后）
-5. PREFLIGHT_STATE
+2. critical STATUS
+3. CAPABILITY
+4. PREFLIGHT_STATE
 ```
 
-START 成功后：Capability、`PREFLIGHT_STATUS`、`PREFLIGHT_STATE` 永久停止；关键 `STATUS` 优先于 5 Hz `FLIGHT_STATE`。当前 `command_policy=PREFLIGHT_ONLY`，因此 Transport 可继续排空 RX，但应用层不解析、不执行、不 ACK 入站命令。该行为由 `command_policy` 决定，不由 profile 0 决定。
+Capability ACK 后：
 
-典型空口组合：握手前为 Capability 1 Hz + `PREFLIGHT_STATE` 5 Hz；握手后为 `PREFLIGHT_STATUS` 1 Hz + `PREFLIGHT_STATE` 5 Hz；START 后为 `FLIGHT_STATE` 5 Hz。
+```text
+1. ACK
+2. active Sensor Snapshot transaction
+3. corresponding terminal ALIGNMENT STATUS
+4. other critical STATUS
+5. PREFLIGHT_STATUS
+6. PREFLIGHT_STATE
+```
 
-## 13. Ground Station/PC 记录建议
+Sensor snapshot transaction 期间，PREFLIGHT_STATUS / PREFLIGHT_STATE 不插入 snapshot 中间；ACK 可以抢占。
 
-Ground Station/PC consumer 建议分别记录：
+---
 
-- `SESSION/CAPABILITY`：每个会话至少保存一次，用于解释该会话全部 AIR 帧；
-- `PREFLIGHT_STATUS snapshots`：每个收到的快照均可记录；
-- `STATUS EVENT`：全部记录，包括 Calibration diagnostic 和 Alignment `STALE`，不能被快照替代；
-- `PREFLIGHT_STATE` 和 `FLIGHT_STATE`：记录解析后的物理量，并同时保留 profile 与量程上下文。
+## 32. START 后调度
 
-飞控本地 TF/LOG 不需要机械保存每个 1 Hz `PREFLIGHT_STATUS` 广播；继续记录实际 Calibration、Alignment 和 System 状态变化事件。
+START 后停止：
+
+```text
+CAPABILITY
+PREFLIGHT_STATUS
+PREFLIGHT_STATE
+SENSOR_STATUS
+```
+
+继续：
+
+```text
+critical STATUS
+FLIGHT_STATE
+```
+
+FLIGHT_STATE 当前 5 Hz。
+
+---
+
+## 33. STATUS event 与状态 snapshot
+
+`STATUS` 表示“发生了什么”；`PREFLIGHT_STATUS` 表示“现在是什么状态”。
+
+二者同时保留。
+
+---
+
+## 34. Alignment STALE
+
+START 前持续 validity guard。
+
+发生足以使初始状态失效的运动：
+
+```text
+ALIGNMENT READY
+↓
+STALE
+```
+
+结果：
+
+```text
+alignment_ready = 0
+system_ready recalculated
+START blocked
+```
+
+发送：
+
+```text
+STATUS ALIGNMENT
+arg0 = STALE
+arg1 = 0xFF
+```
+
+STALE 不自动恢复，必须显式重新 `ALIGN_START`。
+
+---
+
+## 35. Sensor snapshot 与 Alignment source
+
+`SENSOR_STATUS.ALIGNMENT_USED` 表示当前 Alignment transaction 是否实际使用该 sensor。
+
+Gravity + Known Yaw：IMU 使用，Magnetometer 不使用。  
+Gravity + Magnetic TRIAD：IMU 与 Magnetometer 使用。
+
+因此 AIR 不再写死具体 Alignment source bit。
+
+---
+
+## 36. Calibration 与 Sensor snapshot
+
+`CALIBRATION_OK` 表示该 sensor 当前所需校准已经满足，或该 sensor 不要求独立校准。
+
+Calibration 事务本身仍由 PREFLIGHT_STATUS 和 Calibration STATUS events 表示。
+
+---
+
+## 37. Ground Station/PC session logging
+
+建议记录：
+
+- SESSION/CAPABILITY；
+- SENSOR_STATUS snapshots；
+- PREFLIGHT_STATUS；
+- STATUS；
+- PREFLIGHT_STATE；
+- FLIGHT_STATE。
+
+Unknown sensor ID 必须保留原值。
+
+---
+
+## 38. 飞控本地日志
+
+本地 LOG 不需要机械记录每次 AIR broadcast。
+
+继续记录 Calibration、Alignment、Sensor health changes、Mission start、Deploy、Landing、Navigation state 等实际状态变化。
+
+---
+
+## 39. V0 扩展原则
+
+未来新增 STAR_TRACKER、SUN_SENSOR、AIR_DATA 或其他普通传感器，只需：
+
+1. System Device Registry 注册；
+2. 分配 sensor_id；
+3. 提供 generic sensor status；
+4. Ground Station 可选增加友好名称。
+
+不需要改变 AIR V0 固定帧。
+
+---
+
+## 40. AIR V0 冻结目标
+
+AIR V0 当前尚未正式发布，因此仍可调整。
+
+正式发布后，普通硬件扩展不得要求修改 wire format。
+
+只有 application framing、fragmentation、encryption/authentication framing、多节点寻址、重大 telemetry encoding redesign 等级别变化，才考虑未来新的 Profile。

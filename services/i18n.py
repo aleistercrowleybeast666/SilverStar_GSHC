@@ -31,7 +31,7 @@ ZH_CN: dict[str, str] = {
     "group.system": "系统",
     "group.calibration": "校准",
     "group.alignment": "初对准",
-    "group.sensor_preflight": "传感器数据（PREFLIGHT_STATE）",
+    "group.sensor_preflight": "惯性 / 姿态（PREFLIGHT_STATE）",
     "group.gnss": "GNSS",
     "group.preflight_commands": "预飞任务操作",
     "group.important_status": "重要状态",
@@ -58,16 +58,12 @@ ZH_CN: dict[str, str] = {
     "field.ready": "就绪",
     "field.current_face": "当前面",
     "field.six_face": "六面进度",
-    "field.attitude": "姿态",
-    "field.gnss_origin": "GNSS 原点",
-    "field.baro_origin": "气压原点",
     "field.accel_mps2": "加速度 XYZ（m/s²）",
     "field.gyro_radps": "角速度 XYZ（rad/s）",
     "field.quat_raw": "四元数 raw/Q15",
     "field.quat_wxyz": "四元数 WXYZ",
     "field.euler_rpy_rad": "欧拉角 RPY（rad）",
     "field.position_usable": "定位可用",
-    "field.origin_ready": "原点就绪",
     "field.start_reason": "当前不能 START 的原因：",
     "field.mission_time": "任务时间",
     "field.packet_loss": "丢包",
@@ -225,7 +221,7 @@ EN_US: dict[str, str] = {
     "group.system": "System",
     "group.calibration": "Calibration",
     "group.alignment": "Alignment",
-    "group.sensor_preflight": "Sensor Data (PREFLIGHT_STATE)",
+    "group.sensor_preflight": "Inertial / Attitude (PREFLIGHT_STATE)",
     "group.gnss": "GNSS",
     "group.preflight_commands": "Preflight Mission Controls",
     "group.important_status": "Important Status",
@@ -252,16 +248,12 @@ EN_US: dict[str, str] = {
     "field.ready": "Ready",
     "field.current_face": "Current Face",
     "field.six_face": "Six-face Progress",
-    "field.attitude": "Attitude",
-    "field.gnss_origin": "GNSS Origin",
-    "field.baro_origin": "Barometer Origin",
     "field.accel_mps2": "Acceleration XYZ (m/s²)",
     "field.gyro_radps": "Angular Rate XYZ (rad/s)",
     "field.quat_raw": "Quaternion raw/Q15",
     "field.quat_wxyz": "Quaternion WXYZ",
     "field.euler_rpy_rad": "Euler RPY (rad)",
     "field.position_usable": "Position Usable",
-    "field.origin_ready": "Origin Ready",
     "field.start_reason": "Why START is blocked:",
     "field.mission_time": "Mission Time",
     "field.packet_loss": "Packet Loss",
@@ -409,15 +401,19 @@ EN_US: dict[str, str] = {
 ZH_CN.update(
     {
         "button.details": "详情",
+        "button.sensor_details": "传感器状态 / 详情",
         "button.calibration_start": "开始校准",
         "button.calibration_restart": "重新校准",
         "button.cal_restart": "重新开始所选校准",
         "button.recollect_face": "重新采集 {face}",
         "button.start_waiting": "等待 START 确认…",
         "dialog.link_details.title": "链路详情",
+        "dialog.sensor_details.title": "Alignment 传感器快照",
         "group.mission_state": "火箭当前状态",
         "field.current_issue": "当前提示",
         "field.alignment_hint": "对准提示",
+        "field.sensor_snapshot": "传感器快照",
+        "field.sensor_present": "设备存在",
         "field.mission_state": "当前任务状态",
         "field.last_key_event": "最近关键事件",
         "field.event_elapsed": "距该事件",
@@ -465,7 +461,7 @@ ZH_CN.update(
         "air_link.error": "链路异常",
         "link_details.body": "Capability / AIR 握手\n"
         "Profile / IMU 量程：{profile} / {accel} g / {gyro} dps\n"
-        "校准模式掩码 / 对准源掩码：{calibration_mask} / {alignment_mask}\n"
+        "校准模式掩码 / 传感器汇总标志：{calibration_mask} / {sensor_flags}\n"
         "命令策略：{policy}\n"
         "握手状态：{handshake_state}\n"
         "最新 Capability seq：{cap_seq}\n"
@@ -486,21 +482,52 @@ ZH_CN.update(
         "地面站 TX / RX / CRC：{gs_tx} / {gs_rx} / {gs_crc}\n"
         "RSSI / SNR：{rssi} / {snr}\n\n"
         "PC 接收 / 解析 / 日志\n{receive_health}",
+        "sensor.unknown_name": "未知传感器 0x{sensor_id:02X}",
+        "sensor.unknown_detail": "未知详情 0x{detail_code:02X}",
+        "sensor_snapshot.none": "尚未收到已终止的 Alignment 传感器快照。",
+        "sensor_snapshot.heading": "Alignment 传感器快照",
+        "sensor_snapshot.source": "来源：{source}",
+        "sensor_snapshot.source_last": "上一次 Alignment 终止快照（STALE 未生成新快照）",
+        "sensor_snapshot.source_alignment": "Alignment READY / FAILED 终止快照",
+        "sensor_snapshot.id": "快照 ID：{snapshot_id}",
+        "sensor_snapshot.complete": "完整：{value}",
+        "sensor_snapshot.result": "Alignment 结果：{result}",
+        "sensor_snapshot.count": "传感器帧：{received} / {expected}",
+        "sensor_snapshot.incomplete": "传感器快照不完整",
+        "sensor_snapshot.sensor_heading": "{name} #{instance}",
+        "sensor_snapshot.flag_line": "  {name}：{value}",
+        "sensor_snapshot.detail": "  详情：{detail}",
+        "sensor_snapshot.raw_flags": "  原始标志：0x{flags:02X}",
+        "sensor_snapshot.none_short": "尚无快照",
+        "sensor_snapshot.complete_short": "#{snapshot_id} · 完整 · {total} 个传感器",
+        "sensor_snapshot.incomplete_short": "#{snapshot_id} · 不完整 · {received}/{expected}",
+        "sensor.flag.REGISTERED": "已注册",
+        "sensor.flag.INITIALIZED": "已初始化",
+        "sensor.flag.ONLINE": "在线",
+        "sensor.flag.HEALTHY": "健康",
+        "sensor.flag.DATA_VALID": "数据有效",
+        "sensor.flag.CALIBRATION_OK": "校准正常",
+        "sensor.flag.ALIGNMENT_USED": "用于 Alignment",
+        "sensor.flag.REQUIRED_FOR_START": "START 必需",
     }
 )
 
 EN_US.update(
     {
         "button.details": "Details",
+        "button.sensor_details": "Sensor Status / Details",
         "button.calibration_start": "Start Calibration",
         "button.calibration_restart": "Restart Calibration",
         "button.cal_restart": "Restart Selected Calibration",
         "button.recollect_face": "Recollect {face}",
         "button.start_waiting": "Waiting for START confirmation…",
         "dialog.link_details.title": "Link Details",
+        "dialog.sensor_details.title": "Alignment Sensor Snapshot",
         "group.mission_state": "Mission State",
         "field.current_issue": "Current Issue",
         "field.alignment_hint": "Alignment Guidance",
+        "field.sensor_snapshot": "Sensor Snapshot",
+        "field.sensor_present": "Device Present",
         "field.mission_state": "Current Mission State",
         "field.last_key_event": "Last Key Event",
         "field.event_elapsed": "Time Since Event",
@@ -548,7 +575,7 @@ EN_US.update(
         "air_link.error": "Link Error",
         "link_details.body": "Capability / AIR Handshake\n"
         "Profile / IMU scales: {profile} / {accel} g / {gyro} dps\n"
-        "Calibration mode mask / alignment source mask: {calibration_mask} / {alignment_mask}\n"
+        "Calibration mode mask / sensor summary flags: {calibration_mask} / {sensor_flags}\n"
         "Command policy: {policy}\n"
         "Handshake state: {handshake_state}\n"
         "Latest Capability seq: {cap_seq}\n"
@@ -569,6 +596,33 @@ EN_US.update(
         "GS TX / RX / CRC: {gs_tx} / {gs_rx} / {gs_crc}\n"
         "RSSI / SNR: {rssi} / {snr}\n\n"
         "PC Receive / Parser / Logger\n{receive_health}",
+        "sensor.unknown_name": "Unknown Sensor 0x{sensor_id:02X}",
+        "sensor.unknown_detail": "Unknown detail 0x{detail_code:02X}",
+        "sensor_snapshot.none": "No terminal Alignment sensor snapshot has been received.",
+        "sensor_snapshot.heading": "Alignment Sensor Snapshot",
+        "sensor_snapshot.source": "Source: {source}",
+        "sensor_snapshot.source_last": "Last terminal Alignment snapshot (STALE produced no new snapshot)",
+        "sensor_snapshot.source_alignment": "Alignment READY / FAILED terminal snapshot",
+        "sensor_snapshot.id": "Snapshot ID: {snapshot_id}",
+        "sensor_snapshot.complete": "Complete: {value}",
+        "sensor_snapshot.result": "Alignment result: {result}",
+        "sensor_snapshot.count": "Sensor frames: {received} / {expected}",
+        "sensor_snapshot.incomplete": "Sensor snapshot incomplete",
+        "sensor_snapshot.sensor_heading": "{name} #{instance}",
+        "sensor_snapshot.flag_line": "  {name}: {value}",
+        "sensor_snapshot.detail": "  Detail: {detail}",
+        "sensor_snapshot.raw_flags": "  Raw flags: 0x{flags:02X}",
+        "sensor_snapshot.none_short": "No snapshot",
+        "sensor_snapshot.complete_short": "#{snapshot_id} · complete · {total} sensors",
+        "sensor_snapshot.incomplete_short": "#{snapshot_id} · incomplete · {received}/{expected}",
+        "sensor.flag.REGISTERED": "Registered",
+        "sensor.flag.INITIALIZED": "Initialized",
+        "sensor.flag.ONLINE": "Online",
+        "sensor.flag.HEALTHY": "Healthy",
+        "sensor.flag.DATA_VALID": "Data Valid",
+        "sensor.flag.CALIBRATION_OK": "Calibration OK",
+        "sensor.flag.ALIGNMENT_USED": "Used for Alignment",
+        "sensor.flag.REQUIRED_FOR_START": "Required for START",
     }
 )
 
@@ -707,6 +761,36 @@ _ENUM_KEYS["mission_phase"] = {
     "IN_FLIGHT": ("飞行中", "In Flight"),
     "RECOVERY": ("回收中 / 降落伞已展开", "Recovery / Parachute Deployed"),
     "LANDED": ("已着陆", "Landed"),
+}
+_ENUM_KEYS["sensor"] = {
+    "IMU": ("IMU", "IMU"),
+    "GNSS": ("GNSS", "GNSS"),
+    "BAROMETER": ("气压计", "Barometer"),
+    "MAGNETOMETER": ("磁力计", "Magnetometer"),
+    "AIR_DATA": ("空速 / 大气数据", "Air Data"),
+    "RANGEFINDER": ("测距仪", "Rangefinder"),
+    "RADAR_ALTIMETER": ("雷达高度计", "Radar Altimeter"),
+    "SUN_SENSOR": ("太阳敏感器", "Sun Sensor"),
+    "STAR_TRACKER": ("星敏感器", "Star Tracker"),
+    "VISION": ("视觉", "Vision"),
+    "EXTERNAL_ATTITUDE": ("外部姿态源", "External Attitude"),
+    "DUAL_GNSS_HEADING": ("双 GNSS 航向", "Dual-GNSS Heading"),
+    "TEMPERATURE": ("温度传感器", "Temperature"),
+    "HUMIDITY": ("湿度传感器", "Humidity"),
+}
+_ENUM_KEYS["sensor_detail"] = {
+    "NONE": ("正常", "OK"),
+    "NOT_REGISTERED": ("未注册", "Not Registered"),
+    "INIT_FAILED": ("初始化失败", "Initialization Failed"),
+    "OFFLINE": ("离线", "Offline"),
+    "UNHEALTHY": ("不健康", "Unhealthy"),
+    "NO_VALID_DATA": ("无有效数据", "No Valid Data"),
+    "CALIBRATION_REQUIRED": ("需要校准", "Calibration Required"),
+    "ALIGNMENT_INPUT_INVALID": ("Alignment 输入无效", "Alignment Input Invalid"),
+    "IO_ERROR": ("I/O 错误", "I/O Error"),
+    "CONFIG_ERROR": ("配置错误", "Configuration Error"),
+    "UNSUPPORTED": ("不支持", "Unsupported"),
+    "OTHER": ("其他", "Other"),
 }
 
 

@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from protocol.air import AirAckMessage, AirCapabilityMessage, AirFlightStateMessage
+from protocol.air import (
+    AirAckMessage,
+    AirCapabilityMessage,
+    AirFlightStateMessage,
+    AirSensorStatusMessage,
+)
 from protocol.common import AirAckResult, AirCmdId, AirStatusId, GspType
 from protocol.gsp_min import GspParser, build_gsp_frame
 from protocol.receive_pipeline import ReceivePipeline, protocol_event_log_records
@@ -16,7 +21,7 @@ from transport.protocol_worker import ProtocolWorker
 
 
 def capability_frame(profile: int = 0, seq: int = 1) -> bytes:
-    return struct.pack("<BBBBBBBH", 0x12, seq, profile, 1, 7, 7, 16, 2000)
+    return struct.pack("<BBBBBBBH", 0x12, seq, profile, 1, 7, 0x0F, 16, 2000)
 
 
 def flight_frame(sequence: int, time_ms: int) -> bytes:
@@ -68,6 +73,28 @@ def gs_status_gsp(counter: int) -> bytes:
 
 
 class ReceivePipelineStressTests(unittest.TestCase):
+    def test_sensor_status_json_preserves_canonical_and_unknown_values(self) -> None:
+        frames = (
+            bytes((0x14, 10, 3, 1, 0, 0xFF, 0, 0, 2)),
+            bytes((0x14, 11, 3, 0x90, 4, 0x81, 0x7E, 1, 2)),
+        )
+        events = ReceivePipeline().feed(b"".join(air_rx_gsp(frame) for frame in frames))
+
+        self.assertIsInstance(events[0].air_message, AirSensorStatusMessage)
+        records = [
+            record
+            for event in events
+            for record in protocol_event_log_records(event)
+            if record.get("kind") == "SENSOR_STATUS"
+        ]
+        self.assertEqual(records[0]["sensor_name"], "IMU")
+        self.assertEqual(records[0]["detail_name"], "NONE")
+        self.assertEqual(records[0]["raw_flags"], 0xFF)
+        self.assertEqual(records[0]["status_flag_names"][-1], "REQUIRED_FOR_START")
+        self.assertEqual(records[1]["sensor_name"], "UNKNOWN_SENSOR_0x90")
+        self.assertEqual(records[1]["detail_name"], "UNKNOWN_DETAIL(0x7E)")
+        self.assertEqual(records[1]["instance_id"], 4)
+
     def test_calibration_diagnostic_json_uses_canonical_status_name(self) -> None:
         diagnostic = struct.pack(
             "<BBBIBB",

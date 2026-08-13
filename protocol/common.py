@@ -26,6 +26,7 @@ class AirType(IntEnum):
     PREFLIGHT_STATE = 0x11
     CAPABILITY = 0x12
     PREFLIGHT_STATUS = 0x13
+    SENSOR_STATUS = 0x14
     STATUS = 0x20
     CMD = 0x30
     ACK = 0x40
@@ -77,10 +78,85 @@ class AirCalibrationDiagnosticReason(IntEnum):
     SAMPLE_GAP = 6
 
 
-class AirAlignmentCapability(IntFlag):
-    ATTITUDE = 1 << 0
-    GNSS_ORIGIN = 1 << 1
-    BARO_ORIGIN = 1 << 2
+class AirSensorSummaryFlag(IntFlag):
+    IMU_PRESENT = 1 << 0
+    GNSS_PRESENT = 1 << 1
+    AUX_SENSOR_PRESENT = 1 << 2
+    SENSOR_STATUS_SNAPSHOT_SUPPORTED = 1 << 3
+
+
+class AirSensorId(IntEnum):
+    IMU = 0x01
+    GNSS = 0x02
+    BAROMETER = 0x03
+    MAGNETOMETER = 0x04
+    AIR_DATA = 0x05
+    RANGEFINDER = 0x06
+    RADAR_ALTIMETER = 0x07
+    SUN_SENSOR = 0x08
+    STAR_TRACKER = 0x09
+    VISION = 0x0A
+    EXTERNAL_ATTITUDE = 0x0B
+    DUAL_GNSS_HEADING = 0x0C
+    TEMPERATURE = 0x0D
+    HUMIDITY = 0x0E
+
+
+class AirSensorStatusFlag(IntFlag):
+    REGISTERED = 1 << 0
+    INITIALIZED = 1 << 1
+    ONLINE = 1 << 2
+    HEALTHY = 1 << 3
+    DATA_VALID = 1 << 4
+    CALIBRATION_OK = 1 << 5
+    ALIGNMENT_USED = 1 << 6
+    REQUIRED_FOR_START = 1 << 7
+
+
+class AirSensorDetailCode(IntEnum):
+    NONE = 0x00
+    NOT_REGISTERED = 0x01
+    INIT_FAILED = 0x02
+    OFFLINE = 0x03
+    UNHEALTHY = 0x04
+    NO_VALID_DATA = 0x05
+    CALIBRATION_REQUIRED = 0x06
+    ALIGNMENT_INPUT_INVALID = 0x07
+    IO_ERROR = 0x08
+    CONFIG_ERROR = 0x09
+    UNSUPPORTED = 0x0A
+    OTHER = 0xFF
+
+
+@dataclass(frozen=True)
+class AirSensorDescriptor:
+    sensor_id: int
+    canonical_name: str
+
+
+# The single canonical sensor registry used by parser/model/UI/logging. Unknown
+# IDs deliberately remain valid AIR V0 data and are handled by the caller.
+AIR_SENSOR_DESCRIPTORS: dict[int, AirSensorDescriptor] = {
+    int(sensor_id): AirSensorDescriptor(int(sensor_id), sensor_id.name)
+    for sensor_id in AirSensorId
+}
+
+
+def air_sensor_descriptor(sensor_id: int) -> AirSensorDescriptor | None:
+    return AIR_SENSOR_DESCRIPTORS.get(int(sensor_id) & 0xFF)
+
+
+def air_sensor_canonical_name(sensor_id: int) -> str:
+    descriptor = air_sensor_descriptor(sensor_id)
+    if descriptor is not None:
+        return descriptor.canonical_name
+    return f"UNKNOWN_SENSOR_0x{int(sensor_id) & 0xFF:02X}"
+
+
+def air_sensor_sort_key(sensor_id: int, instance_id: int) -> tuple[int, int, int]:
+    value = int(sensor_id) & 0xFF
+    priority = 0 if value == int(AirSensorId.IMU) else 1 if value == int(AirSensorId.GNSS) else 2
+    return priority, value, int(instance_id) & 0xFF
 
 
 class AirLifecycleState(IntEnum):

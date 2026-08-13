@@ -6,10 +6,18 @@ import math
 import random
 from pathlib import Path
 
+from protocol.common import (
+    AirSensorDetailCode,
+    AirSensorStatusFlag,
+    air_sensor_canonical_name,
+    enum_name,
+)
+
 AIR_TYPE_FLIGHT_STATE = 0x10
 AIR_TYPE_PREFLIGHT_STATE = 0x11
 AIR_TYPE_CAPABILITY = 0x12
 AIR_TYPE_PREFLIGHT_STATUS = 0x13
+AIR_TYPE_SENSOR_STATUS = 0x14
 AIR_TYPE_STATUS = 0x20
 
 STATUS_MISSION_START = 0x03
@@ -102,7 +110,7 @@ def add_capability(records: list[dict], host_ts: float, seq: int) -> None:
             "profile_supported": True,
             "command_policy": 1,
             "calibration_mode_mask": 0x07,
-            "alignment_capability_mask": 0x07,
+            "sensor_summary_flags": 0x0F,
             "accel_full_scale_g": ACCEL_FULL_SCALE_G,
             "gyro_full_scale_dps": GYRO_FULL_SCALE_DPS,
         }
@@ -136,9 +144,6 @@ def add_preflight_status(
             "completed_face_mask": completed_face_mask,
             "current_face": 0xFF,
             "alignment_state": alignment_state,
-            "attitude_ready": alignment_ready,
-            "gnss_origin_ready": alignment_ready,
-            "baro_origin_ready": alignment_ready,
             "system_ready": alignment_ready,
             "start_unlocked": alignment_ready,
             "selftest_passed": True,
@@ -147,6 +152,51 @@ def add_preflight_status(
             "calibration_ready": calibration_state == 4,
             "alignment_ready": alignment_ready,
             "start_block_reason": 0 if alignment_ready else 0x0C,
+        }
+    )
+
+
+def add_sensor_status(
+    records: list[dict],
+    host_ts: float,
+    seq: int,
+    *,
+    snapshot_id: int,
+    sensor_id: int,
+    instance_id: int,
+    status_flags: int,
+    detail_code: int,
+    index: int,
+    total: int,
+) -> None:
+    records.append(
+        {
+            "ts": host_ts,
+            "dir": "RX",
+            "layer": "AIR_PARSED",
+            "kind": "SENSOR_STATUS",
+            "simulated": True,
+            "simulation_label": SIMULATION_LABEL,
+            "seq": seq & 0xFF,
+            "snapshot_id": snapshot_id & 0xFF,
+            "sensor_id": sensor_id & 0xFF,
+            "sensor_name": air_sensor_canonical_name(sensor_id),
+            "instance_id": instance_id & 0xFF,
+            "status_flags": status_flags & 0xFF,
+            "raw_flags": status_flags & 0xFF,
+            "status_flag_names": [
+                flag.name
+                for flag in AirSensorStatusFlag
+                if status_flags & int(flag)
+            ],
+            "detail_code": detail_code & 0xFF,
+            "detail_name": enum_name(
+                AirSensorDetailCode,
+                detail_code,
+                prefix="UNKNOWN_DETAIL",
+            ),
+            "index": index,
+            "total": total,
         }
     )
 
@@ -383,6 +433,29 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
         alignment_ready=False,
     )
     seq += 1
+    alignment_snapshot_id = 1
+    alignment_sensors = (
+        (0x01, 0, 0xFF, 0x00),
+        (0x02, 0, 0xDF, 0x00),
+        (0x03, 0, 0xCF, 0x00),
+        (0x04, 0, 0x4F, 0x00),
+    )
+    for index, (sensor_id, instance_id, status_flags, detail_code) in enumerate(
+        alignment_sensors
+    ):
+        add_sensor_status(
+            records,
+            host_t0 - 1.6 + index * 0.08,
+            seq,
+            snapshot_id=alignment_snapshot_id,
+            sensor_id=sensor_id,
+            instance_id=instance_id,
+            status_flags=status_flags,
+            detail_code=detail_code,
+            index=index,
+            total=len(alignment_sensors),
+        )
+        seq += 1
     add_status(
         records,
         host_t0 - 1.2,
@@ -390,7 +463,7 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
         STATUS_ALIGNMENT,
         mission_start_ms - 1200,
         3,
-        0x07,
+        alignment_snapshot_id,
     )
     seq += 1
     add_preflight_status(
