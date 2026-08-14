@@ -50,12 +50,12 @@ installer\output\SilverStar_GSHC_Setup_v0.0.3.exe
    默认：`%LOCALAPPDATA%\Programs\SilverStar_GSHC`
 
 2. 日志和数据目录  
-   默认：`Documents\SilverStar_GSHC`
+   默认：`D:\SilverStar_GSHC_Data`
 
 程序会在数据目录下创建：
 
 ```text
-SilverStar_GSHC\
+SilverStar_GSHC_Data\
 ├─ logs\
 └─ data\
 ```
@@ -66,7 +66,7 @@ SilverStar_GSHC\
 <程序安装目录>\config\user_paths.json
 ```
 
-程序启动时会读取这个文件，决定 `logs` 和 `data` 的位置。
+程序启动时会读取这个文件，决定 `logs` 和 `data` 的位置；也可以在“后期处理”页通过“选择数据目录”打开应用内设置弹窗。路径框旁的“浏览”才会打开系统文件夹选择器。勾选迁移后可选择覆盖（默认）、添加 `(1)` 改名、跳过或失败四种同名文件策略。迁移是移动操作：程序会在独立进度弹窗中先把数据安全写入新目录，成功切换 JSON 配置后再删除源文件；被跳过的冲突文件仍保留在旧目录。
 
 ## 4. 卸载
 

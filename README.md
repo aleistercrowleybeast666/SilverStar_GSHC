@@ -161,10 +161,10 @@ START 按钮由权威预飞快照驱动，至少要求 Capability、Calibration�
 默认用户数据根目录：
 
 ```text
-C:\Users\<用户名>\Documents\SilverStar_GSHC
+D:\SilverStar_GSHC_Data
 ```
 
-可通过环境变量 `SILVERSTAR_GSHC_DATA_ROOT` 或 `config/user_paths.json` 的 `data_root` 修改。QSettings 使用 organization=`SilverStar`、application=`SilverStar_GSHC`。
+可在“后期处理”页通过“选择数据目录”打开应用内设置弹窗；路径框默认显示当前目录，只有“浏览”按钮会打开系统文件夹选择器。目录改变时可勾选迁移旧日志和结果，并选择同名文件处理方式：覆盖（默认）、重命名并添加 `(1)`、跳过或停止并报错。迁移是移动操作；跨磁盘时会先把文件安全写入新目录，JSON 配置切换成功后再删除源文件，选择“跳过”的冲突文件会保留在旧目录。目录、子目录、迁移选择和冲突策略记录在 `config/user_paths.json`；也可通过环境变量 `SILVERSTAR_GSHC_DATA_ROOT` 覆盖。QSettings 使用 organization=`SilverStar`、application=`SilverStar_GSHC`。
 
 串口连接时创建 provisional session 日志；只有明确的 PC 串口断开/重连才建立新会话。Capability 广播本身不再被推测为“飞控重启”，也不会触发自动日志 rollover。
 

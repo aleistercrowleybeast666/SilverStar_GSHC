@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,6 +24,7 @@ from protocol.common import (
     AirSensorId,
     AirStatusId,
 )
+from services.data_migration import DataMigrationConflictPolicy
 from services.i18n import I18n, Language
 from services.preferences import ExportItem, ExportLanguage, Theme
 from services.state_model import (
@@ -81,6 +85,8 @@ class UiWorkflowTests(unittest.TestCase):
         self.window.link_details_dialog.close()
         self.window.sensor_details_dialog.close()
         self.window.export_options_dialog.close()
+        self.window.data_directory_dialog.close()
+        self.window.data_migration_progress_dialog.close()
         self.window.close()
         self.temporary_directory.cleanup()
 
@@ -151,7 +157,12 @@ class UiWorkflowTests(unittest.TestCase):
             "尚未生成模拟日志。",
         )
         self.assertEqual(self.window.btn_generate_sim.text(), "生成模拟日志")
+        self.assertEqual(self.window.btn_select_data_root.text(), "选择数据目录")
         self.assertEqual(self.window.btn_open_data_dir.text(), "打开结果目录")
+        self.assertLess(
+            self.window.folder_button_layout.indexOf(self.window.btn_select_data_root),
+            self.window.folder_button_layout.indexOf(self.window.btn_open_log_dir),
+        )
         self.assertEqual(
             self.window.lbl_processing_progress.text(),
             "尚未开始数据解算。",
@@ -192,6 +203,7 @@ class UiWorkflowTests(unittest.TestCase):
         self.application.processEvents()
         self.assertEqual(self.window.btn_cancel_processing.text(), "Cancel and Clean Up")
         self.assertEqual(self.window.btn_generate_sim.text(), "Generate Simulation Log")
+        self.assertEqual(self.window.btn_select_data_root.text(), "Select Data Directory")
         self.assertEqual(self.window.btn_open_data_dir.text(), "Open Results Folder")
         self.assertEqual(
             self.window.lbl_processing_progress.text(),
@@ -204,6 +216,142 @@ class UiWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(self.window.processing_progress_bar.value(), 100)
         self.assertIn("D:/data/result", self.window.lbl_processing_progress.text())
+
+    def test_data_directory_button_opens_application_dialog_with_browse_choice(self) -> None:
+        dialog = self.window.data_directory_dialog
+        default_root = Path("D:/SilverStar_GSHC_Data")
+        dialog.prepare(default_root)
+        self.assertEqual(dialog.path_edit.text(), str(default_root))
+        self.assertFalse(dialog.chk_migrate_existing.isEnabled())
+        self.assertFalse(dialog.conflict_policy_combo.isEnabled())
+        self.assertEqual(
+            dialog.conflict_policy_combo.currentData(),
+            DataMigrationConflictPolicy.OVERWRITE.value,
+        )
+
+        changed_root = Path("D:/SilverStar_GSHC_Archive")
+        dialog.path_edit.setText(str(changed_root))
+        self.assertTrue(dialog.chk_migrate_existing.isEnabled())
+        self.assertFalse(dialog.conflict_policy_combo.isEnabled())
+        dialog.chk_migrate_existing.setChecked(True)
+        self.assertTrue(dialog.conflict_policy_combo.isEnabled())
+        selection = dialog.selection()
+        self.assertEqual(selection.data_root, changed_root)
+        self.assertTrue(selection.migrate_existing_data)
+        self.assertEqual(
+            selection.conflict_policy,
+            DataMigrationConflictPolicy.OVERWRITE,
+        )
+
+        browsed_root = "D:/SilverStar_GSHC_Browsed"
+        with patch(
+            "ui.main_window.QFileDialog.getExistingDirectory",
+            return_value=browsed_root,
+        ) as browse:
+            dialog.btn_browse.click()
+        browse.assert_called_once()
+        self.assertEqual(dialog.path_edit.text(), browsed_root)
+
+        english_index = self.window.language_combo.findData(Language.EN_US.value)
+        self.window.language_combo.setCurrentIndex(english_index)
+        self.application.processEvents()
+        self.assertEqual(dialog.btn_browse.text(), "Browse…")
+        self.assertEqual(dialog.btn_accept.text(), "OK")
+        self.assertEqual(
+            dialog.conflict_policy_combo.itemText(
+                dialog.conflict_policy_combo.findData(
+                    DataMigrationConflictPolicy.OVERWRITE.value
+                )
+            ),
+            "Overwrite (Default)",
+        )
+        self.assertEqual(
+            dialog.conflict_policy_combo.itemText(
+                dialog.conflict_policy_combo.findData(
+                    DataMigrationConflictPolicy.RENAME.value
+                )
+            ),
+            "Rename and append (1)",
+        )
+
+    def test_data_migration_progress_uses_separate_modal_dialog(self) -> None:
+        dialog = self.window.data_migration_progress_dialog
+        self.window.begin_data_migration("D:/Old", "D:/New")
+        self.application.processEvents()
+        self.assertTrue(dialog.isModal())
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(dialog.progress_bar.minimum(), 0)
+        self.assertEqual(dialog.progress_bar.maximum(), 0)
+
+        self.window.set_data_migration_plan(4, 4096)
+        self.window.update_data_migration_progress(50, "logs/session.jsonl")
+        self.assertEqual(dialog.progress_bar.value(), 50)
+        self.assertIn("logs/session.jsonl", dialog.lbl_status.text())
+        self.window.mark_data_migration_committing()
+        self.assertFalse(dialog.btn_action.isEnabled())
+        self.window.finish_data_migration_completed(
+            4,
+            "D:/New",
+            skipped_count=2,
+        )
+        self.assertEqual(dialog.progress_bar.value(), 100)
+        self.assertEqual(dialog.btn_action.text(), "关闭")
+        self.assertIn("跳过 2 个同名文件", dialog.lbl_status.text())
+        dialog.close()
+
+    def test_controller_migration_thread_updates_dialog_and_switches_root(self) -> None:
+        from app import Controller
+
+        base_dir = Path(self.temporary_directory.name)
+        source_root = base_dir / "source"
+        target_root = base_dir / "target"
+        source_file = source_root / "logs" / "session.jsonl"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("flight-log", encoding="utf-8")
+
+        controller = Controller(self.window)
+        controller.data_root = source_root
+        controller.log_dir = source_root / "logs"
+        controller.data_dir = source_root / "data"
+        controller.logger.set_log_dir(controller.log_dir)
+        try:
+            with patch(
+                "app.save_user_data_root",
+                side_effect=lambda root, **_kwargs: Path(root),
+            ) as save_root:
+                controller._start_data_migration(
+                    target_root,
+                    DataMigrationConflictPolicy.RENAME,
+                )
+                deadline = time.monotonic() + 10.0
+                while (
+                    controller.data_migration_thread is not None
+                    and time.monotonic() < deadline
+                ):
+                    self.application.processEvents()
+                    time.sleep(0.01)
+
+            self.assertIsNone(controller.data_migration_thread)
+            self.assertEqual(controller.data_root, target_root)
+            self.assertFalse(source_file.exists())
+            self.assertEqual(
+                (target_root / "logs" / "session.jsonl").read_text(
+                    encoding="utf-8"
+                ),
+                "flight-log",
+            )
+            save_root.assert_called_once()
+            self.assertEqual(
+                save_root.call_args.kwargs["migration_conflict_policy"],
+                DataMigrationConflictPolicy.RENAME.value,
+            )
+            self.assertEqual(
+                self.window.data_migration_progress_dialog.progress_bar.value(),
+                100,
+            )
+        finally:
+            controller.shutdown()
+            self.window.data_migration_progress_dialog.close()
 
     def test_mission_auto_switches_once_and_does_not_steal_manual_selection(self) -> None:
         state = ready_state(generation=10)

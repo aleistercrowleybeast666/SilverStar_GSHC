@@ -103,6 +103,14 @@ class AsyncJsonlLogger:
         with self._state_lock:
             return self._session_active
 
+    def set_log_dir(self, log_dir: Path | str) -> None:
+        selected_log_dir = Path(log_dir)
+        selected_log_dir.mkdir(parents=True, exist_ok=True)
+        with self._state_lock:
+            if self._session_active or self._queue.unfinished_tasks:
+                raise RuntimeError("Cannot change the log directory during an active session")
+            self.log_dir = selected_log_dir
+
     def open_session(
         self,
         reason: str,

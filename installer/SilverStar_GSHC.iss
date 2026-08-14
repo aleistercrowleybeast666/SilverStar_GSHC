@@ -47,7 +47,7 @@ begin
     ''
   );
   DataDirectoryPage.Add('');
-  DataDirectoryPage.Values[0] := ExpandConstant('{userdocs}\SilverStar_GSHC');
+  DataDirectoryPage.Values[0] := 'D:\SilverStar_GSHC_Data';
 end;
 
 function JsonPath(Value: String): String;
@@ -74,7 +74,10 @@ begin
   ConfigText := '{' + #13#10 +
     '  "data_root": "' + JsonPath(DataRoot) + '",' + #13#10 +
     '  "logs_dir": "' + JsonPath(DataRoot + '\logs') + '",' + #13#10 +
-    '  "data_dir": "' + JsonPath(DataRoot + '\data') + '"' + #13#10 +
+    '  "data_dir": "' + JsonPath(DataRoot + '\data') + '",' + #13#10 +
+    '  "migration_requested": false,' + #13#10 +
+    '  "migration_conflict_policy": "overwrite",' + #13#10 +
+    '  "previous_data_root": ""' + #13#10 +
     '}' + #13#10;
   SaveStringToFile(ConfigDirectory + '\user_paths.json', ConfigText, False);
 end;

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -13,10 +15,12 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QProgressBar,
@@ -51,6 +55,7 @@ from protocol.common import (
     air_sensor_descriptor,
     enum_name,
 )
+from services.data_migration import DataMigrationConflictPolicy
 from services.i18n import I18n, Language
 from services.preferences import (
     ALL_EXPORT_ITEMS,
@@ -576,6 +581,372 @@ class SensorDetailsDialog(QDialog):
             self.details_text.setPlainText(text)
 
 
+@dataclass(frozen=True)
+class DataDirectorySelection:
+    data_root: Path
+    migrate_existing_data: bool
+    conflict_policy: DataMigrationConflictPolicy = (
+        DataMigrationConflictPolicy.OVERWRITE
+    )
+
+
+class DataDirectoryDialog(QDialog):
+    def __init__(self, i18n: I18n, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.i18n = i18n
+        self._current_root = Path()
+        self._selected_root: Path | None = None
+        self.setMinimumWidth(680)
+
+        root = QVBoxLayout(self)
+        self.lbl_path = QLabel()
+        root.addWidget(self.lbl_path)
+
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit()
+        self.btn_browse = QPushButton()
+        self.btn_browse.setMinimumWidth(112)
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(self.btn_browse)
+        root.addLayout(path_row)
+
+        self.chk_migrate_existing = QCheckBox()
+        root.addWidget(self.chk_migrate_existing)
+        self.lbl_migration_note = QLabel()
+        self.lbl_migration_note.setWordWrap(True)
+        root.addWidget(self.lbl_migration_note)
+
+        conflict_row = QHBoxLayout()
+        self.lbl_conflict_policy = QLabel()
+        self.conflict_policy_combo = QComboBox()
+        self.conflict_policy_combo.setMinimumWidth(280)
+        conflict_row.addWidget(self.lbl_conflict_policy)
+        conflict_row.addWidget(self.conflict_policy_combo, 1)
+        root.addLayout(conflict_row)
+
+        self.lbl_error = QLabel()
+        self.lbl_error.setWordWrap(True)
+        self.lbl_error.setStyleSheet("color: palette(bright-text); font-weight: bold;")
+        self.lbl_error.hide()
+        root.addWidget(self.lbl_error)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.btn_cancel = QPushButton()
+        self.btn_accept = QPushButton()
+        self.btn_cancel.setMinimumWidth(104)
+        self.btn_accept.setMinimumWidth(104)
+        action_row.addWidget(self.btn_cancel)
+        action_row.addWidget(self.btn_accept)
+        root.addLayout(action_row)
+
+        self.path_edit.textChanged.connect(self._update_controls)
+        self.chk_migrate_existing.toggled.connect(self._update_controls)
+        self.btn_browse.clicked.connect(self._browse)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_accept.clicked.connect(self.accept)
+        self.retranslate_ui()
+
+    @staticmethod
+    def _paths_equal(left: Path, right: Path) -> bool:
+        try:
+            return left.resolve(strict=False) == right.resolve(strict=False)
+        except OSError:
+            return str(left).casefold() == str(right).casefold()
+
+    def prepare(self, current_root: Path | str) -> None:
+        self._current_root = Path(current_root).expanduser()
+        self._selected_root = None
+        self.path_edit.setText(str(self._current_root))
+        self.chk_migrate_existing.setChecked(False)
+        overwrite_index = self.conflict_policy_combo.findData(
+            DataMigrationConflictPolicy.OVERWRITE.value
+        )
+        self.conflict_policy_combo.setCurrentIndex(max(0, overwrite_index))
+        self.lbl_error.clear()
+        self.lbl_error.hide()
+        self._update_controls()
+
+    def selection(self) -> DataDirectorySelection:
+        selected_root = self._selected_root
+        if selected_root is None:
+            selected_root = Path(self.path_edit.text().strip()).expanduser()
+        policy_value = self.conflict_policy_combo.currentData()
+        try:
+            conflict_policy = DataMigrationConflictPolicy(policy_value)
+        except (TypeError, ValueError):
+            conflict_policy = DataMigrationConflictPolicy.OVERWRITE
+        return DataDirectorySelection(
+            data_root=selected_root,
+            migrate_existing_data=(
+                self.chk_migrate_existing.isEnabled()
+                and self.chk_migrate_existing.isChecked()
+            ),
+            conflict_policy=conflict_policy,
+        )
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(self.i18n.tr("data_directory.dialog.title"))
+        self.lbl_path.setText(self.i18n.tr("data_directory.path.label"))
+        self.path_edit.setPlaceholderText(
+            self.i18n.tr("data_directory.path.placeholder")
+        )
+        self.btn_browse.setText(self.i18n.tr("button.browse"))
+        self.chk_migrate_existing.setText(
+            self.i18n.tr("data_directory.migrate_existing")
+        )
+        self.lbl_migration_note.setText(
+            self.i18n.tr("data_directory.migrate_note")
+        )
+        selected_policy = (
+            self.conflict_policy_combo.currentData()
+            or DataMigrationConflictPolicy.OVERWRITE.value
+        )
+        self.lbl_conflict_policy.setText(
+            self.i18n.tr("data_directory.conflict.label")
+        )
+        self.conflict_policy_combo.clear()
+        for policy in DataMigrationConflictPolicy:
+            self.conflict_policy_combo.addItem(
+                self.i18n.tr(f"data_directory.conflict.{policy.value}"),
+                policy.value,
+            )
+        selected_index = self.conflict_policy_combo.findData(selected_policy)
+        if selected_index < 0:
+            selected_index = self.conflict_policy_combo.findData(
+                DataMigrationConflictPolicy.OVERWRITE.value
+            )
+        self.conflict_policy_combo.setCurrentIndex(max(0, selected_index))
+        self.btn_cancel.setText(self.i18n.tr("button.cancel"))
+        self.btn_accept.setText(self.i18n.tr("button.confirm"))
+
+    def _browse(self) -> None:
+        initial_path = self.path_edit.text().strip() or str(self._current_root)
+        selected_path = QFileDialog.getExistingDirectory(
+            self,
+            self.i18n.tr("data_directory.browse.title"),
+            initial_path,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if selected_path:
+            self.path_edit.setText(selected_path)
+
+    def _update_controls(self) -> None:
+        path_text = self.path_edit.text().strip()
+        changed = False
+        if path_text:
+            try:
+                changed = not self._paths_equal(
+                    Path(path_text).expanduser(),
+                    self._current_root,
+                )
+            except (OSError, ValueError):
+                changed = True
+        self.chk_migrate_existing.setEnabled(changed)
+        if not changed:
+            self.chk_migrate_existing.setChecked(False)
+        conflict_enabled = (
+            changed
+            and self.chk_migrate_existing.isEnabled()
+            and self.chk_migrate_existing.isChecked()
+        )
+        self.lbl_conflict_policy.setEnabled(conflict_enabled)
+        self.conflict_policy_combo.setEnabled(conflict_enabled)
+        self.btn_accept.setEnabled(bool(path_text))
+        self.lbl_error.hide()
+
+    def accept(self) -> None:
+        path_text = self.path_edit.text().strip()
+        if not path_text:
+            self.lbl_error.setText(self.i18n.tr("data_directory.error.empty"))
+            self.lbl_error.show()
+            return
+        selected_root = Path(path_text).expanduser()
+        if not selected_root.is_absolute():
+            self.lbl_error.setText(self.i18n.tr("data_directory.error.absolute"))
+            self.lbl_error.show()
+            return
+        self._selected_root = selected_root
+        super().accept()
+
+
+class DataMigrationProgressDialog(QDialog):
+    def __init__(self, i18n: I18n, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.i18n = i18n
+        self.on_cancel: Callable[[], None] | None = None
+        self._active = False
+        self._cancel_requested = False
+        self._status_key = "data_migration.scanning"
+        self._status_params: dict[str, object] = {}
+        self.setMinimumWidth(620)
+        self.setModal(True)
+
+        root = QVBoxLayout(self)
+        self.lbl_status = QLabel()
+        self.lbl_status.setWordWrap(True)
+        root.addWidget(self.lbl_status)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimumHeight(34)
+        root.addWidget(self.progress_bar)
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.btn_action = QPushButton()
+        action_row.addWidget(self.btn_action)
+        root.addLayout(action_row)
+        self.btn_action.clicked.connect(self._action_clicked)
+        self.retranslate_ui()
+
+    @staticmethod
+    def _format_bytes(byte_count: int) -> str:
+        value = float(max(0, int(byte_count)))
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if value < 1024.0 or unit == "TB":
+                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= 1024.0
+        return f"{value:.1f} TB"
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(self.i18n.tr("data_migration.dialog.title"))
+        self.lbl_status.setText(
+            self.i18n.tr(self._status_key, **self._status_params)
+        )
+        self.btn_action.setText(
+            self.i18n.tr(
+                "button.cancel_migration" if self._active else "button.close"
+            )
+        )
+
+    def begin(self, source_root: Path | str, target_root: Path | str) -> None:
+        self._active = True
+        self._cancel_requested = False
+        self._status_key = "data_migration.scanning"
+        self._status_params = {
+            "source": str(source_root),
+            "target": str(target_root),
+        }
+        self.progress_bar.setRange(0, 0)
+        self.btn_action.setEnabled(True)
+        self.retranslate_ui()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def set_plan(self, file_count: int, byte_count: int) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self._status_key = "data_migration.preparing"
+        self._status_params = {
+            "files": int(file_count),
+            "size": self._format_bytes(byte_count),
+        }
+        self.retranslate_ui()
+
+    def update_progress(self, percent: int, detail: str) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(max(0, min(100, int(percent))))
+        self._status_key = "data_migration.copying"
+        self._status_params = {"detail": detail}
+        self.retranslate_ui()
+
+    def mark_committing(self) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(max(95, self.progress_bar.value()))
+        self._status_key = "data_migration.committing"
+        self._status_params = {}
+        self.btn_action.setEnabled(False)
+        self.retranslate_ui()
+
+    def mark_cancelling(self) -> None:
+        self._status_key = "data_migration.cancelling"
+        self._status_params = {}
+        self.btn_action.setEnabled(False)
+        self.retranslate_ui()
+
+    def finish_completed(
+        self,
+        file_count: int,
+        target_root: Path | str,
+        warning: str = "",
+        skipped_count: int = 0,
+    ) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        if skipped_count and warning:
+            self._status_key = "data_migration.completed_skipped_warning"
+            self._status_params = {
+                "files": int(file_count),
+                "skipped": int(skipped_count),
+                "target": str(target_root),
+                "warning": warning,
+            }
+        elif skipped_count:
+            self._status_key = "data_migration.completed_skipped"
+            self._status_params = {
+                "files": int(file_count),
+                "skipped": int(skipped_count),
+                "target": str(target_root),
+            }
+        elif warning:
+            self._status_key = "data_migration.completed_warning"
+            self._status_params = {
+                "files": int(file_count),
+                "target": str(target_root),
+                "warning": warning,
+            }
+        else:
+            self._status_key = "data_migration.completed"
+            self._status_params = {
+                "files": int(file_count),
+                "target": str(target_root),
+            }
+        self._finish()
+
+    def finish_cancelled(self) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self._status_key = "data_migration.cancelled"
+        self._status_params = {}
+        self._finish()
+
+    def finish_failed(self, error: str) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self._status_key = "data_migration.failed"
+        self._status_params = {"error": error}
+        self._finish()
+
+    def _finish(self) -> None:
+        self._active = False
+        self._cancel_requested = False
+        self.btn_action.setEnabled(True)
+        self.retranslate_ui()
+
+    def _action_clicked(self) -> None:
+        if not self._active:
+            self.accept()
+            return
+        if self._cancel_requested:
+            return
+        self._cancel_requested = True
+        self.mark_cancelling()
+        if self.on_cancel is not None:
+            self.on_cancel()
+
+    def reject(self) -> None:
+        if self._active:
+            self._action_clicked()
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._active:
+            event.ignore()
+            self._action_clicked()
+            return
+        super().closeEvent(event)
+
+
 class ExportOptionsDialog(QDialog):
     def __init__(
         self,
@@ -756,6 +1127,8 @@ class MainWindow(QMainWindow):
         self.on_cancel_sim_data: Callable[[], None] | None = None
         self.on_process_data: Callable[[], None] | None = None
         self.on_cancel_process_data: Callable[[], None] | None = None
+        self.on_select_data_root: Callable[[], None] | None = None
+        self.on_cancel_data_migration: Callable[[], None] | None = None
         self.on_open_log_dir: Callable[[], None] | None = None
         self.on_open_data_dir: Callable[[], None] | None = None
         self.on_language_changed: Callable[[], None] | None = None
@@ -880,6 +1253,8 @@ class MainWindow(QMainWindow):
         self.link_details_dialog.retranslate_ui()
         self.sensor_details_dialog.retranslate_ui()
         self.export_options_dialog.retranslate_ui()
+        self.data_directory_dialog.retranslate_ui()
+        self.data_migration_progress_dialog.retranslate_ui()
         self._retranslate_plots()
         self._last_sensor_revision = -1
         self._last_event_revision = -1
@@ -950,6 +1325,15 @@ class MainWindow(QMainWindow):
             self.i18n,
             self.preferences,
             self,
+        )
+        self.data_directory_dialog = DataDirectoryDialog(self.i18n, self)
+        self.data_migration_progress_dialog = DataMigrationProgressDialog(
+            self.i18n,
+            self,
+        )
+        self.data_migration_progress_dialog.on_cancel = (
+            lambda: self.on_cancel_data_migration
+            and self.on_cancel_data_migration()
         )
 
     def _build_top_bar(self) -> QWidget:
@@ -1362,12 +1746,14 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         self.btn_generate_sim = QPushButton()
         self.btn_process_data = QPushButton()
+        self.btn_select_data_root = QPushButton()
         self.btn_open_log_dir = QPushButton()
         self.btn_open_data_dir = QPushButton()
         self.btn_cancel_sim = QPushButton()
         self.btn_cancel_processing = QPushButton()
         self._bind_text(self.btn_generate_sim, "button.generate_sim")
         self._bind_text(self.btn_process_data, "button.process_data")
+        self._bind_text(self.btn_select_data_root, "button.select_data_root")
         self._bind_text(self.btn_open_log_dir, "button.open_logs")
         self._bind_text(self.btn_open_data_dir, "button.open_data")
         self._bind_text(self.btn_cancel_sim, "button.cancel_and_clean")
@@ -1413,7 +1799,12 @@ class MainWindow(QMainWindow):
         layout.addSpacing(18)
 
         folder_row = QHBoxLayout()
-        for button in (self.btn_open_log_dir, self.btn_open_data_dir):
+        self.folder_button_layout = folder_row
+        for button in (
+            self.btn_select_data_root,
+            self.btn_open_log_dir,
+            self.btn_open_data_dir,
+        ):
             button.setMinimumHeight(42)
             button.setStyleSheet(self._cmd_button_style)
             folder_row.addWidget(button, 1)
@@ -1429,6 +1820,9 @@ class MainWindow(QMainWindow):
         self.btn_process_data.clicked.connect(lambda: self.on_process_data and self.on_process_data())
         self.btn_cancel_processing.clicked.connect(
             lambda: self.on_cancel_process_data and self.on_cancel_process_data()
+        )
+        self.btn_select_data_root.clicked.connect(
+            lambda: self.on_select_data_root and self.on_select_data_root()
         )
         self.btn_open_log_dir.clicked.connect(
             lambda: self.on_open_log_dir and self.on_open_log_dir()
@@ -1511,6 +1905,15 @@ class MainWindow(QMainWindow):
             self.theme,
         )
 
+    def request_data_directory(
+        self,
+        current_root: Path | str,
+    ) -> DataDirectorySelection | None:
+        self.data_directory_dialog.prepare(current_root)
+        if self.data_directory_dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return self.data_directory_dialog.selection()
+
     def _apply_theme(self, theme: Theme, *, persist: bool) -> None:
         self.theme = theme
         application = QApplication.instance()
@@ -1592,6 +1995,46 @@ class MainWindow(QMainWindow):
 
     def set_connection_status(self, text: str) -> None:
         self._set_dynamic_label_text(self.conn_label, text)
+
+    def begin_data_migration(
+        self,
+        source_root: Path | str,
+        target_root: Path | str,
+    ) -> None:
+        self.set_data_tools_busy(True)
+        self.data_migration_progress_dialog.begin(source_root, target_root)
+
+    def set_data_migration_plan(self, file_count: int, byte_count: int) -> None:
+        self.data_migration_progress_dialog.set_plan(file_count, byte_count)
+
+    def update_data_migration_progress(self, percent: int, detail: str) -> None:
+        self.data_migration_progress_dialog.update_progress(percent, detail)
+
+    def mark_data_migration_committing(self) -> None:
+        self.data_migration_progress_dialog.mark_committing()
+
+    def mark_data_migration_cancelling(self) -> None:
+        self.data_migration_progress_dialog.mark_cancelling()
+
+    def finish_data_migration_completed(
+        self,
+        file_count: int,
+        target_root: Path | str,
+        warning: str = "",
+        skipped_count: int = 0,
+    ) -> None:
+        self.data_migration_progress_dialog.finish_completed(
+            file_count,
+            target_root,
+            warning,
+            skipped_count,
+        )
+
+    def finish_data_migration_cancelled(self) -> None:
+        self.data_migration_progress_dialog.finish_cancelled()
+
+    def finish_data_migration_failed(self, error: str) -> None:
+        self.data_migration_progress_dialog.finish_failed(error)
 
     def set_data_tools_busy(self, busy: bool) -> None:
         self._data_tools_busy = bool(busy)
@@ -1713,6 +2156,9 @@ class MainWindow(QMainWindow):
         )
         self.btn_cancel_processing.setEnabled(
             self._processing_task_active and self._processing_cancel_enabled
+        )
+        self.btn_select_data_root.setEnabled(
+            high_load_enabled and not bool(self._state and self._state.connected)
         )
         # Merely opening the folders is not a high-load operation.
         self.btn_open_log_dir.setEnabled(True)

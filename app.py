@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
+from typing import Callable
+from uuid import uuid4
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -17,9 +21,9 @@ from config import (
     APP_ORGANIZATION,
     APP_VERSION,
     APP_WINDOW_TITLE,
-    DATA_DIR,
     DEFAULT_BAUDRATE,
-    LOG_DIR,
+    USER_DATA_ROOT,
+    save_user_data_root,
 )
 from protocol.air import (
     TOKEN_ALIGNMENT,
@@ -54,8 +58,9 @@ from protocol.common import (
 )
 from protocol.gsp_min import GsStatus, GspAck, build_pc_to_gs_air_frame
 from protocol.receive_pipeline import ProtocolEvent
-from services.logger import AsyncJsonlLogger
+from services.data_migration import DataMigrationConflictPolicy
 from services.i18n import EnumParam, I18n
+from services.logger import AsyncJsonlLogger
 from services.preferences import ResolvedExportOptions
 from services.state_model import (
     EventHistory,
@@ -364,6 +369,619 @@ class ProcessingWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class DataMigrationCancelledError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class _DataMigrationFile:
+    source: Path
+    target: Path
+    relative_path: Path
+    size: int
+
+
+@dataclass(frozen=True)
+class _DataMigrationTargetChange:
+    target: Path
+    backup: Path | None
+
+
+class DataMigrationWorker(QObject):
+    planned = Signal(int, object)
+    progress = Signal(int, str)
+    ready_to_commit = Signal()
+    finished = Signal(int, object, int, str)
+    cancelled = Signal()
+    failed = Signal(str)
+
+    COPY_CHUNK_BYTES = 4 * 1024 * 1024
+
+    def __init__(
+        self,
+        source_root: Path,
+        target_root: Path,
+        conflict_policy: DataMigrationConflictPolicy = (
+            DataMigrationConflictPolicy.OVERWRITE
+        ),
+    ) -> None:
+        super().__init__()
+        self.source_root = Path(source_root)
+        self.target_root = Path(target_root)
+        self.conflict_policy = DataMigrationConflictPolicy(conflict_policy)
+        self._cancel_event = Event()
+        self._commit_event = Event()
+        self._commit_lock = Lock()
+        self._commit_approved = False
+        self._commit_error = ""
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+
+    def finish_commit(self, approved: bool, error: str = "") -> None:
+        with self._commit_lock:
+            self._commit_approved = bool(approved)
+            self._commit_error = str(error)
+            self._commit_event.set()
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise DataMigrationCancelledError()
+
+    @staticmethod
+    def _is_nested(path: Path, parent: Path) -> bool:
+        return path != parent and parent in path.parents
+
+    def _scan_files(self) -> tuple[Path, Path, list[_DataMigrationFile]]:
+        source_root = self.source_root.expanduser().resolve(strict=False)
+        target_root = self.target_root.expanduser().resolve(strict=False)
+        if source_root == target_root:
+            raise ValueError("The new data directory is the same as the previous directory")
+        if self._is_nested(target_root, source_root) or self._is_nested(
+            source_root,
+            target_root,
+        ):
+            raise ValueError(
+                "The previous and new data directories cannot contain one another"
+            )
+
+        target_root.mkdir(parents=True, exist_ok=True)
+        migration_files: list[_DataMigrationFile] = []
+        for category in ("logs", "data"):
+            category_root = source_root / category
+            if not category_root.exists():
+                continue
+            if not category_root.is_dir():
+                raise NotADirectoryError(str(category_root))
+            for source_path in category_root.rglob("*"):
+                self._check_cancelled()
+                if source_path.is_symlink() or not source_path.is_file():
+                    continue
+                relative_path = source_path.relative_to(source_root)
+                migration_files.append(
+                    _DataMigrationFile(
+                        source=source_path,
+                        target=target_root / relative_path,
+                        relative_path=relative_path,
+                        size=max(0, int(source_path.stat().st_size)),
+                    )
+                )
+        migration_files.sort(key=lambda item: str(item.relative_path).casefold())
+
+        return source_root, target_root, migration_files
+
+    @staticmethod
+    def _path_conflicts(path: Path) -> bool:
+        return path.exists() or path.is_symlink()
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        return str(path.resolve(strict=False)).casefold()
+
+    @classmethod
+    def _renamed_target(
+        cls,
+        original_target: Path,
+        unavailable_keys: set[str],
+    ) -> Path:
+        suffix = "".join(original_target.suffixes)
+        base_name = (
+            original_target.name[: -len(suffix)]
+            if suffix
+            else original_target.name
+        )
+        index = 1
+        while True:
+            candidate = original_target.with_name(
+                f"{base_name} ({index}){suffix}"
+            )
+            candidate_key = cls._path_key(candidate)
+            if (
+                candidate_key not in unavailable_keys
+                and not cls._path_conflicts(candidate)
+            ):
+                return candidate
+            index += 1
+
+    def _plan_files(
+        self,
+        target_root: Path,
+        migration_files: list[_DataMigrationFile],
+    ) -> tuple[list[_DataMigrationFile], int, set[str]]:
+        original_target_keys: set[str] = set()
+        for item in migration_files:
+            target_key = self._path_key(item.target)
+            if target_key in original_target_keys:
+                raise FileExistsError(
+                    "Multiple source files map to the same destination: "
+                    f"{item.relative_path}"
+                )
+            original_target_keys.add(target_key)
+
+        planned_files: list[_DataMigrationFile] = []
+        planned_target_keys: set[str] = set()
+        skipped_count = 0
+        unavailable_keys = set(original_target_keys)
+        for item in migration_files:
+            self._check_cancelled()
+            resolved_parent = item.target.parent.resolve(strict=False)
+            if (
+                resolved_parent != target_root
+                and target_root not in resolved_parent.parents
+            ):
+                raise ValueError(
+                    "A destination directory link points outside the selected "
+                    f"data root: {item.relative_path}"
+                )
+            target = item.target
+            has_conflict = self._path_conflicts(target)
+            if has_conflict:
+                if self.conflict_policy is DataMigrationConflictPolicy.FAIL:
+                    raise FileExistsError(
+                        "The new directory already contains "
+                        f"{item.relative_path}"
+                    )
+                if self.conflict_policy is DataMigrationConflictPolicy.SKIP:
+                    skipped_count += 1
+                    continue
+                if self.conflict_policy is DataMigrationConflictPolicy.RENAME:
+                    target = self._renamed_target(target, unavailable_keys)
+                elif target.is_dir() and not target.is_symlink():
+                    raise IsADirectoryError(
+                        "A directory blocks the destination file: "
+                        f"{item.relative_path}"
+                    )
+
+            target_key = self._path_key(target)
+            if target_key in planned_target_keys:
+                raise FileExistsError(
+                    "Multiple source files map to the same destination: "
+                    f"{item.relative_path}"
+                )
+            planned_target_keys.add(target_key)
+            unavailable_keys.add(target_key)
+            planned_files.append(
+                _DataMigrationFile(
+                    source=item.source,
+                    target=target,
+                    relative_path=item.relative_path,
+                    size=item.size,
+                )
+            )
+
+        required_bytes = sum(item.size for item in planned_files)
+        free_bytes = shutil.disk_usage(target_root).free
+        if required_bytes > free_bytes:
+            raise OSError(
+                f"Not enough free space in {target_root}: "
+                f"need {required_bytes} bytes, available {free_bytes} bytes"
+            )
+        return planned_files, skipped_count, unavailable_keys
+
+    def _copy_to_temporary(
+        self,
+        item: _DataMigrationFile,
+        advance: Callable[[int, str], None],
+    ) -> Path:
+        item.target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = item.target.with_name(
+            f".{item.target.name}.{uuid4().hex}.migration"
+        )
+        detail = str(item.relative_path)
+        try:
+            with item.source.open("rb") as source_file, temporary_path.open(
+                "xb"
+            ) as target_file:
+                copied_bytes = 0
+                while True:
+                    self._check_cancelled()
+                    chunk = source_file.read(self.COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    target_file.write(chunk)
+                    copied_bytes += len(chunk)
+                    advance(len(chunk), detail)
+                target_file.flush()
+                os.fsync(target_file.fileno())
+            if copied_bytes != item.size:
+                raise OSError(
+                    f"Source file size changed during migration: {item.source}"
+                )
+            if item.size == 0:
+                advance(1, detail)
+            shutil.copystat(item.source, temporary_path, follow_symlinks=False)
+            return temporary_path
+        except Exception:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    @classmethod
+    def _install_without_overwrite(
+        cls,
+        temporary_path: Path,
+        target_path: Path,
+    ) -> None:
+        try:
+            try:
+                os.link(
+                    temporary_path,
+                    target_path,
+                    follow_symlinks=False,
+                )
+            except TypeError:
+                os.link(temporary_path, target_path)
+            return
+        except FileExistsError:
+            raise
+        except OSError:
+            if cls._path_conflicts(target_path):
+                raise FileExistsError(str(target_path))
+
+        target_created = False
+        try:
+            with temporary_path.open("rb") as source_file, target_path.open(
+                "xb"
+            ) as target_file:
+                target_created = True
+                shutil.copyfileobj(
+                    source_file,
+                    target_file,
+                    length=cls.COPY_CHUNK_BYTES,
+                )
+                target_file.flush()
+                os.fsync(target_file.fileno())
+            shutil.copystat(
+                temporary_path,
+                target_path,
+                follow_symlinks=False,
+            )
+        except Exception:
+            if target_created:
+                try:
+                    target_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
+    @classmethod
+    def _unique_backup_path(cls, target_path: Path) -> Path:
+        while True:
+            backup_path = target_path.with_name(
+                f".{target_path.name}.{uuid4().hex}.backup"
+            )
+            if not cls._path_conflicts(backup_path):
+                return backup_path
+
+    def _install_overwrite(
+        self,
+        temporary_path: Path,
+        target_path: Path,
+        target_changes: list[_DataMigrationTargetChange],
+    ) -> None:
+        while True:
+            if not self._path_conflicts(target_path):
+                try:
+                    self._install_without_overwrite(
+                        temporary_path,
+                        target_path,
+                    )
+                except FileExistsError:
+                    continue
+                target_changes.append(
+                    _DataMigrationTargetChange(target_path, None)
+                )
+                return
+
+            if target_path.is_dir() and not target_path.is_symlink():
+                raise IsADirectoryError(
+                    f"A directory blocks the destination file: {target_path}"
+                )
+            backup_path = self._unique_backup_path(target_path)
+            try:
+                target_path.replace(backup_path)
+            except FileNotFoundError:
+                continue
+            try:
+                temporary_path.replace(target_path)
+            except Exception:
+                try:
+                    backup_path.replace(target_path)
+                except OSError as rollback_error:
+                    raise RuntimeError(
+                        "Unable to install the replacement or restore the "
+                        f"previous destination: {rollback_error}"
+                    ) from rollback_error
+                raise
+            target_changes.append(
+                _DataMigrationTargetChange(target_path, backup_path)
+            )
+            return
+
+    def _install_file(
+        self,
+        temporary_path: Path,
+        item: _DataMigrationFile,
+        original_target: Path,
+        unavailable_keys: set[str],
+        target_changes: list[_DataMigrationTargetChange],
+    ) -> _DataMigrationFile | None:
+        if self.conflict_policy is DataMigrationConflictPolicy.OVERWRITE:
+            self._install_overwrite(
+                temporary_path,
+                item.target,
+                target_changes,
+            )
+            return item
+
+        target_path = item.target
+        while True:
+            try:
+                self._install_without_overwrite(
+                    temporary_path,
+                    target_path,
+                )
+            except FileExistsError:
+                if self.conflict_policy is DataMigrationConflictPolicy.FAIL:
+                    raise FileExistsError(
+                        "The destination appeared during migration: "
+                        f"{target_path}"
+                    )
+                if self.conflict_policy is DataMigrationConflictPolicy.SKIP:
+                    return None
+                target_path = self._renamed_target(
+                    original_target,
+                    unavailable_keys,
+                )
+                unavailable_keys.add(self._path_key(target_path))
+                continue
+
+            target_changes.append(
+                _DataMigrationTargetChange(target_path, None)
+            )
+            if target_path == item.target:
+                return item
+            return _DataMigrationFile(
+                source=item.source,
+                target=target_path,
+                relative_path=item.relative_path,
+                size=item.size,
+            )
+
+    def _copy_file(
+        self,
+        item: _DataMigrationFile,
+        original_target: Path,
+        advance: Callable[[int, str], None],
+        unavailable_keys: set[str],
+        target_changes: list[_DataMigrationTargetChange],
+    ) -> _DataMigrationFile | None:
+        temporary_path = self._copy_to_temporary(item, advance)
+        try:
+            return self._install_file(
+                temporary_path,
+                item,
+                original_target,
+                unavailable_keys,
+                target_changes,
+            )
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @classmethod
+    def _rollback_target_changes(
+        cls,
+        target_root: Path,
+        target_changes: list[_DataMigrationTargetChange],
+    ) -> str:
+        errors: list[str] = []
+        for change in reversed(target_changes):
+            target_path = change.target
+            try:
+                if target_path.is_dir() and not target_path.is_symlink():
+                    raise IsADirectoryError(str(target_path))
+                target_path.unlink(missing_ok=True)
+                if change.backup is not None:
+                    change.backup.replace(target_path)
+            except OSError as exc:
+                errors.append(f"{target_path}: {exc}")
+                continue
+            if change.backup is not None:
+                continue
+            parent = target_path.parent
+            while parent != target_root and target_root in parent.parents:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        return "\n".join(errors)
+
+    @staticmethod
+    def _finalize_target_backups(
+        target_changes: list[_DataMigrationTargetChange],
+    ) -> str:
+        errors: list[str] = []
+        for change in target_changes:
+            backup_path = change.backup
+            if backup_path is None:
+                continue
+            try:
+                if backup_path.is_dir() and not backup_path.is_symlink():
+                    raise IsADirectoryError(str(backup_path))
+                backup_path.unlink(missing_ok=True)
+            except OSError as exc:
+                errors.append(f"{backup_path}: {exc}")
+        return "\n".join(errors)
+
+    @staticmethod
+    def _cleanup_source_files(
+        source_root: Path,
+        migration_files: list[_DataMigrationFile],
+    ) -> str:
+        errors: list[str] = []
+        for item in migration_files:
+            try:
+                item.source.unlink(missing_ok=True)
+            except OSError as exc:
+                errors.append(f"{item.source}: {exc}")
+
+        for category in ("logs", "data"):
+            category_root = source_root / category
+            if not category_root.exists() or not category_root.is_dir():
+                continue
+            directories = [
+                path
+                for path in category_root.rglob("*")
+                if path.is_dir() and not path.is_symlink()
+            ]
+            for directory in sorted(
+                directories,
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            try:
+                category_root.rmdir()
+            except OSError:
+                pass
+
+        if len(errors) > 20:
+            omitted = len(errors) - 20
+            errors = errors[:20] + [f"... and {omitted} more cleanup errors"]
+        return "\n".join(errors)
+
+    def run(self) -> None:
+        target_changes: list[_DataMigrationTargetChange] = []
+        target_root = self.target_root
+        try:
+            source_root, target_root, migration_files = self._scan_files()
+            planned_files, skipped_count, unavailable_keys = self._plan_files(
+                target_root,
+                migration_files,
+            )
+            total_bytes = sum(item.size for item in planned_files)
+            total_work = max(
+                1,
+                sum(max(1, item.size) for item in planned_files),
+            )
+            completed_work = 0
+            self.planned.emit(len(planned_files), total_bytes)
+
+            def advance(amount: int, detail: str) -> None:
+                nonlocal completed_work
+                completed_work += max(0, int(amount))
+                percent = min(94, int(completed_work * 94 / total_work))
+                self.progress.emit(percent, detail)
+
+            moved_files: list[_DataMigrationFile] = []
+            for item in planned_files:
+                self._check_cancelled()
+                moved_item = self._copy_file(
+                    item,
+                    target_root / item.relative_path,
+                    advance,
+                    unavailable_keys,
+                    target_changes,
+                )
+                if moved_item is None:
+                    skipped_count += 1
+                else:
+                    moved_files.append(moved_item)
+
+            self._check_cancelled()
+            self.ready_to_commit.emit()
+            while not self._commit_event.wait(0.1):
+                self._check_cancelled()
+            self._check_cancelled()
+            with self._commit_lock:
+                commit_approved = self._commit_approved
+                commit_error = self._commit_error
+            if not commit_approved:
+                raise RuntimeError(commit_error or "Unable to switch the data directory")
+
+            warning_parts: list[str] = []
+            cleanup_steps = (
+                (
+                    "Unable to remove destination backups",
+                    lambda: self._finalize_target_backups(target_changes),
+                ),
+                (
+                    "Unable to remove some source files",
+                    lambda: self._cleanup_source_files(
+                        source_root,
+                        moved_files,
+                    ),
+                ),
+            )
+            for error_prefix, cleanup_step in cleanup_steps:
+                try:
+                    warning = cleanup_step()
+                except Exception as cleanup_error:
+                    warning = f"{error_prefix}: {cleanup_error}"
+                if warning:
+                    warning_parts.append(warning)
+            cleanup_warning = "\n".join(warning_parts)
+            self.finished.emit(
+                len(moved_files),
+                sum(item.size for item in moved_files),
+                skipped_count,
+                cleanup_warning,
+            )
+        except DataMigrationCancelledError:
+            rollback_warning = self._rollback_target_changes(
+                target_root,
+                target_changes,
+            )
+            if rollback_warning:
+                self.failed.emit(
+                    "Migration was cancelled, but some destination changes "
+                    f"could not be rolled back:\n{rollback_warning}"
+                )
+            else:
+                self.cancelled.emit()
+        except Exception as exc:
+            rollback_warning = self._rollback_target_changes(
+                target_root,
+                target_changes,
+            )
+            error = str(exc)
+            if rollback_warning:
+                error = (
+                    f"{error}\n\nSome destination changes could not be "
+                    f"rolled back:\n{rollback_warning}"
+                )
+            self.failed.emit(error)
+
+
 class Controller(QObject):
     def __init__(self, window: MainWindow) -> None:
         super().__init__(window)
@@ -371,7 +989,10 @@ class Controller(QObject):
         self.link = SerialLink()
         self.worker = None
         self.protocol_worker: ProtocolWorker | None = None
-        self.logger = AsyncJsonlLogger(auto_start_session=False)
+        self.data_root = Path(USER_DATA_ROOT)
+        self.log_dir = self.data_root / "logs"
+        self.data_dir = self.data_root / "data"
+        self.logger = AsyncJsonlLogger(self.log_dir, auto_start_session=False)
 
         self._connection_generation = 0
         self._state_generation = 0
@@ -397,6 +1018,14 @@ class Controller(QObject):
         self.simulation_thread: QThread | None = None
         self.simulation_worker: SimulationWorker | None = None
         self.simulation_cancel_requested = False
+        self.data_migration_thread: QThread | None = None
+        self.data_migration_worker: DataMigrationWorker | None = None
+        self.data_migration_cancel_requested = False
+        self.pending_data_root: Path | None = None
+        self.previous_data_root: Path | None = None
+        self.pending_data_migration_conflict_policy = (
+            DataMigrationConflictPolicy.OVERWRITE
+        )
         self.mission_packet_tracking_active = False
         self.last_flight_time_ms: int | None = None
         self.received_flight_packets = 0
@@ -420,6 +1049,8 @@ class Controller(QObject):
         self.window.on_cancel_sim_data = self.cancel_sim_validation_data
         self.window.on_process_data = self.choose_and_process_data
         self.window.on_cancel_process_data = self.cancel_processing
+        self.window.on_select_data_root = self.choose_data_root
+        self.window.on_cancel_data_migration = self.cancel_data_migration
         self.window.on_open_log_dir = self.open_log_dir
         self.window.on_open_data_dir = self.open_data_dir
         self.refresh_ports()
@@ -477,6 +1108,13 @@ class Controller(QObject):
         self.window.set_ports(list_serial_port_names())
 
     def connect(self) -> None:
+        if self.data_migration_thread is not None:
+            QMessageBox.information(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.data_root_busy"),
+            )
+            return
         port = self.window.current_port()
         baud = self.window.current_baudrate() or DEFAULT_BAUDRATE
         if not port:
@@ -604,7 +1242,13 @@ class Controller(QObject):
             self.simulation_worker.request_cancel()
         if self.processing_worker is not None:
             self.processing_worker.request_cancel()
-        for thread in (self.simulation_thread, self.processing_thread):
+        if self.data_migration_worker is not None:
+            self.data_migration_worker.request_cancel()
+        for thread in (
+            self.simulation_thread,
+            self.processing_thread,
+            self.data_migration_thread,
+        ):
             if thread is not None and thread.isRunning():
                 thread.quit()
                 thread.wait(30000)
@@ -1942,8 +2586,8 @@ class Controller(QObject):
             self.state.receive_health.warning = f"日志写入异常: {exc}"
 
     def _ensure_user_dirs(self) -> None:
-        Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
-        Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def _open_folder(self, folder: Path) -> None:
         folder.mkdir(parents=True, exist_ok=True)
@@ -1955,10 +2599,228 @@ class Controller(QObject):
             )
 
     def open_log_dir(self) -> None:
-        self._open_folder(Path(LOG_DIR))
+        self._open_folder(self.log_dir)
 
     def open_data_dir(self) -> None:
-        self._open_folder(Path(DATA_DIR))
+        self._open_folder(self.data_dir)
+
+    def choose_data_root(self) -> None:
+        if (
+            self.logger.session_active
+            or self.protocol_worker is not None
+            or self.simulation_thread is not None
+            or self.processing_thread is not None
+            or self.data_migration_thread is not None
+        ):
+            QMessageBox.information(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.data_root_busy"),
+            )
+            return
+
+        selection = self.window.request_data_directory(self.data_root)
+        if selection is None:
+            return
+        selected_root = Path(selection.data_root).expanduser()
+        if self._data_roots_equal(selected_root, self.data_root):
+            return
+
+        if selection.migrate_existing_data:
+            self._start_data_migration(
+                selected_root,
+                selection.conflict_policy,
+            )
+            return
+
+        try:
+            self._apply_data_root(
+                selected_root,
+                migrate_existing_data=False,
+                previous_data_root=self.data_root,
+                migration_conflict_policy=selection.conflict_policy,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self.window,
+                self._tr("app.title"),
+                self._tr("message.data_root_failed", error=exc),
+            )
+
+    @staticmethod
+    def _data_roots_equal(left: Path, right: Path) -> bool:
+        try:
+            return left.resolve(strict=False) == right.resolve(strict=False)
+        except OSError:
+            return str(left).casefold() == str(right).casefold()
+
+    def _apply_data_root(
+        self,
+        selected_root: Path,
+        *,
+        migrate_existing_data: bool,
+        previous_data_root: Path,
+        migration_conflict_policy: DataMigrationConflictPolicy = (
+            DataMigrationConflictPolicy.OVERWRITE
+        ),
+    ) -> None:
+        selected_root = Path(selected_root).expanduser()
+        if not selected_root.is_absolute():
+            raise ValueError("The data root must be an absolute path")
+        selected_log_dir = selected_root / "logs"
+        selected_data_dir = selected_root / "data"
+        previous_log_dir = self.log_dir
+
+        self.logger.set_log_dir(selected_log_dir)
+        try:
+            saved_root = save_user_data_root(
+                selected_root,
+                migrate_existing_data=migrate_existing_data,
+                previous_data_root=previous_data_root,
+                migration_conflict_policy=migration_conflict_policy.value,
+            )
+        except Exception:
+            self.logger.set_log_dir(previous_log_dir)
+            raise
+
+        self.data_root = saved_root
+        self.log_dir = saved_root / "logs"
+        self.data_dir = saved_root / "data"
+
+    def _start_data_migration(
+        self,
+        selected_root: Path,
+        conflict_policy: DataMigrationConflictPolicy = (
+            DataMigrationConflictPolicy.OVERWRITE
+        ),
+    ) -> None:
+        if self.data_migration_thread is not None:
+            return
+        self.previous_data_root = self.data_root
+        self.pending_data_root = Path(selected_root)
+        self.pending_data_migration_conflict_policy = (
+            DataMigrationConflictPolicy(conflict_policy)
+        )
+        self.data_migration_cancel_requested = False
+        self.window.begin_data_migration(
+            self.previous_data_root,
+            self.pending_data_root,
+        )
+
+        self.data_migration_thread = QThread(self.window)
+        self.data_migration_worker = DataMigrationWorker(
+            self.previous_data_root,
+            self.pending_data_root,
+            self.pending_data_migration_conflict_policy,
+        )
+        self.data_migration_worker.moveToThread(self.data_migration_thread)
+        self.data_migration_thread.started.connect(self.data_migration_worker.run)
+        self.data_migration_worker.planned.connect(
+            self.window.set_data_migration_plan,
+            Qt.QueuedConnection,
+        )
+        self.data_migration_worker.progress.connect(
+            self.window.update_data_migration_progress,
+            Qt.QueuedConnection,
+        )
+        self.data_migration_worker.ready_to_commit.connect(
+            self._on_data_migration_ready_to_commit,
+            Qt.QueuedConnection,
+        )
+        self.data_migration_worker.finished.connect(
+            self._on_data_migration_finished,
+            Qt.QueuedConnection,
+        )
+        self.data_migration_worker.cancelled.connect(
+            self._on_data_migration_cancelled,
+            Qt.QueuedConnection,
+        )
+        self.data_migration_worker.failed.connect(
+            self._on_data_migration_failed,
+            Qt.QueuedConnection,
+        )
+        self.data_migration_thread.finished.connect(
+            self._on_data_migration_thread_finished
+        )
+        self.data_migration_thread.start()
+
+    def cancel_data_migration(self) -> None:
+        if self.data_migration_worker is None:
+            return
+        self.data_migration_cancel_requested = True
+        self.data_migration_worker.request_cancel()
+        self.window.mark_data_migration_cancelling()
+
+    def _on_data_migration_ready_to_commit(self) -> None:
+        worker = self.data_migration_worker
+        selected_root = self.pending_data_root
+        previous_root = self.previous_data_root
+        if worker is None or selected_root is None or previous_root is None:
+            return
+        if self.data_migration_cancel_requested:
+            worker.request_cancel()
+            worker.finish_commit(False)
+            return
+        self.window.mark_data_migration_committing()
+        try:
+            self._apply_data_root(
+                selected_root,
+                migrate_existing_data=True,
+                previous_data_root=previous_root,
+                migration_conflict_policy=(
+                    self.pending_data_migration_conflict_policy
+                ),
+            )
+        except Exception as exc:
+            worker.finish_commit(False, str(exc))
+        else:
+            worker.finish_commit(True)
+
+    def _request_data_migration_thread_stop(self) -> None:
+        if self.data_migration_worker is not None:
+            self.data_migration_worker.deleteLater()
+        if (
+            self.data_migration_thread is not None
+            and self.data_migration_thread.isRunning()
+        ):
+            self.data_migration_thread.quit()
+
+    def _on_data_migration_finished(
+        self,
+        file_count: int,
+        _byte_count: object,
+        skipped_count: int,
+        warning: str,
+    ) -> None:
+        target_root = self.data_root
+        self.window.finish_data_migration_completed(
+            file_count,
+            target_root,
+            warning,
+            skipped_count,
+        )
+        self._request_data_migration_thread_stop()
+
+    def _on_data_migration_cancelled(self) -> None:
+        self.window.finish_data_migration_cancelled()
+        self._request_data_migration_thread_stop()
+
+    def _on_data_migration_failed(self, error: str) -> None:
+        self.window.finish_data_migration_failed(error)
+        self._request_data_migration_thread_stop()
+
+    def _on_data_migration_thread_finished(self) -> None:
+        self.window.set_data_tools_busy(False)
+        self.data_migration_worker = None
+        if self.data_migration_thread is not None:
+            self.data_migration_thread.deleteLater()
+        self.data_migration_thread = None
+        self.data_migration_cancel_requested = False
+        self.pending_data_root = None
+        self.previous_data_root = None
+        self.pending_data_migration_conflict_policy = (
+            DataMigrationConflictPolicy.OVERWRITE
+        )
 
     def generate_sim_validation_data(self) -> None:
         if self.state.mission_started:
@@ -1968,7 +2830,11 @@ class Controller(QObject):
                 self._tr("message.mission_sim_disabled"),
             )
             return
-        if self.simulation_thread is not None or self.processing_thread is not None:
+        if (
+            self.simulation_thread is not None
+            or self.processing_thread is not None
+            or self.data_migration_thread is not None
+        ):
             return
 
         self._ensure_user_dirs()
@@ -1976,7 +2842,7 @@ class Controller(QObject):
         self.window.begin_simulation_task()
         self.simulation_thread = QThread(self.window)
         self.simulation_worker = SimulationWorker(
-            Path(LOG_DIR),
+            self.log_dir,
             int(time.time()) & 0xFFFFFFFF,
         )
         self.simulation_worker.moveToThread(self.simulation_thread)
@@ -2017,9 +2883,8 @@ class Controller(QObject):
         self.simulation_worker.request_cancel()
         self.window.mark_simulation_cancelling()
 
-    @staticmethod
-    def _remove_simulation_output(output_path: Path | str) -> None:
-        root = Path(LOG_DIR).resolve()
+    def _remove_simulation_output(self, output_path: Path | str) -> None:
+        root = self.log_dir.resolve()
         target = Path(output_path).resolve()
         if (
             target.parent != root
@@ -2085,6 +2950,8 @@ class Controller(QObject):
         self.simulation_thread = None
 
     def choose_and_process_data(self) -> None:
+        if self.data_migration_thread is not None:
+            return
         if self.state.mission_started:
             QMessageBox.information(
                 self.window,
@@ -2096,7 +2963,7 @@ class Controller(QObject):
         log_path_text, _ = QFileDialog.getOpenFileName(
             self.window,
             self._tr("message.choose_log"),
-            str(Path(LOG_DIR)),
+            str(self.log_dir),
             self._tr("message.log_filter"),
         )
         if not log_path_text:
@@ -2125,7 +2992,7 @@ class Controller(QObject):
         log_path: Path,
         language_suffix: str,
     ) -> bool:
-        data_dir = Path(DATA_DIR)
+        data_dir = self.data_dir
         if not data_dir.exists():
             return False
         try:
@@ -2149,7 +3016,11 @@ class Controller(QObject):
         log_path: Path,
         export_options: ResolvedExportOptions,
     ) -> None:
-        if self.processing_thread is not None or self.simulation_thread is not None:
+        if (
+            self.processing_thread is not None
+            or self.simulation_thread is not None
+            or self.data_migration_thread is not None
+        ):
             QMessageBox.information(
                 self.window, self._tr("app.title"), self._tr("message.processing_running")
             )
@@ -2160,7 +3031,7 @@ class Controller(QObject):
         self.processing_thread = QThread(self.window)
         self.processing_worker = ProcessingWorker(
             log_path,
-            Path(DATA_DIR),
+            self.data_dir,
             export_options,
         )
         self.processing_worker.moveToThread(self.processing_thread)
@@ -2207,7 +3078,7 @@ class Controller(QObject):
             try:
                 from processing.flight_log_processor import FlightLogProcessor
 
-                FlightLogProcessor(output_root=Path(DATA_DIR)).remove_output_dir(output_dir)
+                FlightLogProcessor(output_root=self.data_dir).remove_output_dir(output_dir)
             except Exception as exc:
                 self.window.finish_processing_task(
                     "task.processing.failed",
@@ -2284,6 +3155,7 @@ def main() -> int:
 
 __all__ = [
     "Controller",
+    "DataMigrationWorker",
     "PendingAirCommand",
     "PendingCapabilityAck",
     "ProcessingWorker",

@@ -1,5 +1,8 @@
 {
-  "data_root": "D:\\SilverStar_GSHC",
-  "logs_dir": "D:\\SilverStar_GSHC\\logs",
-  "data_dir": "D:\\SilverStar_GSHC\\data"
+  "data_root": "D:\\SilverStar_GSHC_Data",
+  "logs_dir": "D:\\SilverStar_GSHC_Data\\logs",
+  "data_dir": "D:\\SilverStar_GSHC_Data\\data",
+  "migration_requested": true,
+  "migration_conflict_policy": "overwrite",
+  "previous_data_root": "D:\\SilverStar_GSHC"
 }
