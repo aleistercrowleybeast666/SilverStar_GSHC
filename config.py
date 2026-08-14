@@ -5,8 +5,16 @@ import os
 import sys
 from pathlib import Path
 
-APP_NAME = "二代飞控地面站"
-APP_EN_NAME = "SS1GroundStation"
+APP_NAME = "SilverStar_GSHC"
+APP_EN_NAME = "SilverStar_GSHC"
+APP_ORGANIZATION = "SilverStar"
+APP_VERSION = "0.0.3"
+APP_WINDOW_TITLE = "SilverStar_GSHC"
+APP_ZH_DISPLAY_NAME = "SilverStar地面站上位机"
+APP_EN_DISPLAY_NAME = "SilverStar Ground Station Host Computer"
+APP_UI_VERSION_TEXT = f"{APP_WINDOW_TITLE} {APP_VERSION}"
+APP_EXECUTABLE_NAME = "SilverStar_GSHC"
+APP_DATA_DIRECTORY_NAME = "SilverStar_GSHC"
 DEFAULT_BAUDRATE = 230400
 PLOT_WINDOW_SECONDS = 10.0
 MAX_LIVE_POINTS = 2000
@@ -32,11 +40,14 @@ def _app_base_dir() -> Path:
 APP_BASE_DIR = _app_base_dir()
 CONFIG_DIR = APP_BASE_DIR / "config"
 USER_PATHS_FILE = CONFIG_DIR / "user_paths.json"
-DEFAULT_USER_DATA_ROOT = Path.home() / "Documents" / "SS1_host_computer_data"
+DEFAULT_USER_DATA_ROOT = Path.home() / "Documents" / APP_DATA_DIRECTORY_NAME
 
 
 def _read_user_data_root() -> Path:
-    env_value = os.environ.get("SS1_HOST_COMPUTER_DATA_ROOT", "").strip()
+    env_value = os.environ.get(
+        "SILVERSTAR_GSHC_DATA_ROOT",
+        "",
+    ).strip()
     if env_value:
         return Path(env_value).expanduser()
 

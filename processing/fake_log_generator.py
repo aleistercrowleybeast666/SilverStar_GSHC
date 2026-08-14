@@ -5,6 +5,7 @@ import json
 import math
 import random
 from pathlib import Path
+from typing import Callable
 
 from protocol.common import (
     AirSensorDetailCode,
@@ -31,6 +32,12 @@ ACCEL_FULL_SCALE_G = 16.0
 GYRO_FULL_SCALE_DPS = 2000.0
 STANDARD_GRAVITY_MPS2 = 9.80665
 SIMULATION_LABEL = "SIMULATION_VALIDATION"
+SimulationProgressCallback = Callable[[int, int], None]
+SimulationCancelCallback = Callable[[], bool]
+
+
+class SimulationCancelledError(RuntimeError):
+    """Raised when synthetic-log generation is cancelled by the user."""
 
 
 def clamp_i16(value: int) -> int:
@@ -351,7 +358,13 @@ def impact_profile(tau: float, g: float = STANDARD_GRAVITY_MPS2) -> tuple[float,
     return 0.0, (0.0, 0.0, 0.0)
 
 
-def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
+def simulate(
+    duration_s: float = 90.0,
+    seed: int = 42,
+    *,
+    progress: SimulationProgressCallback | None = None,
+    cancel_requested: SimulationCancelCallback | None = None,
+) -> list[dict]:
     """
     Generate a 5 Hz synthetic JSONL log matching the current upper-computer log format.
 
@@ -361,6 +374,11 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
       pre-landing impact peaks -> acceleration/gyro become zero.
     - The last telemetry samples therefore represent a landed state.
     """
+    def check_cancel() -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise SimulationCancelledError("Simulation-data generation was cancelled.")
+
+    check_cancel()
     random.seed(seed)
 
     records: list[dict] = []
@@ -489,6 +507,7 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
 
     t = 0.0
     max_sim_s = max(duration_s, 120.0)
+    total_iterations = max(1, int(math.ceil(max_sim_s / sim_dt)) + 1)
 
     t_apogee: float | None = None
     t_ground_contact: float | None = None
@@ -498,6 +517,11 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
     last_roll = last_pitch = last_yaw = 0.0
 
     while t <= max_sim_s:
+        iteration = min(total_iterations, int(round(t / sim_dt)))
+        if iteration % 100 == 0:
+            check_cancel()
+            if progress is not None:
+                progress(iteration, total_iterations)
         time_ms = mission_start_ms + int(round(t * 1000.0))
         host_ts = host_t0 + t
 
@@ -656,6 +680,7 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
 
         t += sim_dt
 
+    check_cancel()
     if not landing_sent:
         # Fallback: force a final landed sample and landing status.
         t = min(max_sim_s, t)
@@ -674,6 +699,9 @@ def simulate(duration_s: float = 90.0, seed: int = 42) -> list[dict]:
     ]
 
     records.sort(key=lambda r: float(r.get("ts", 0.0)))
+    check_cancel()
+    if progress is not None:
+        progress(total_iterations, total_iterations)
     return records
 
 

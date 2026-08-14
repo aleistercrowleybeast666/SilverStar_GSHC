@@ -1,4 +1,4 @@
-# SS1 上位机接收与显示架构
+# SilverStar_GSHC 接收与显示架构
 
 本文描述 SilverStar AIR V0 / Profile 0 上位机的实时接收、状态、日志和 GUI 边界。AIR 字段以 [AIR_PROTOCOL.md](AIR_PROTOCOL.md) 为准，GSP wire format 以 [GSP_MIN_PROTOCOL.md](GSP_MIN_PROTOCOL.md) 为准。
 

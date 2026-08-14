@@ -6,6 +6,15 @@ from typing import Any, Mapping
 
 from PySide6.QtCore import QSettings
 
+from config import (
+    APP_EN_DISPLAY_NAME,
+    APP_EN_NAME,
+    APP_ORGANIZATION,
+    APP_VERSION,
+    APP_WINDOW_TITLE,
+    APP_ZH_DISPLAY_NAME,
+)
+
 
 class Language(str, Enum):
     ZH_CN = "zh_CN"
@@ -19,8 +28,11 @@ class EnumParam:
 
 
 ZH_CN: dict[str, str] = {
-    "app.title": "二代飞控地面站",
-    "language.label": "语言 / Language：",
+    "app.title": APP_WINDOW_TITLE,
+    "app.brand": APP_ZH_DISPLAY_NAME,
+    "app.product_version": f"{APP_WINDOW_TITLE} {APP_VERSION}",
+    "app.credit": "辰星引力开发",
+    "language.label": "语言",
     "page.preflight": "预飞行",
     "page.flight": "飞行",
     "page.post_process": "后期处理",
@@ -87,10 +99,11 @@ ZH_CN: dict[str, str] = {
     "button.lock": "锁定",
     "button.unlock": "解锁",
     "button.start": "开始任务",
-    "button.generate_sim": "生成模拟验证数据",
+    "button.generate_sim": "生成模拟日志",
     "button.process_data": "处理数据",
+    "button.cancel_and_clean": "取消并清理",
     "button.open_logs": "打开日志目录",
-    "button.open_data": "打开数据目录",
+    "button.open_data": "打开结果目录",
     "button.close": "关闭",
     "button.cal_start": "开始所选校准",
     "button.collect_face": "采集 {face}",
@@ -153,6 +166,7 @@ ZH_CN: dict[str, str] = {
     "radio.start_blocked": "START 被阻止：{reason}",
     "radio.calibration_mode_unsupported": "飞控 Capability 未声明支持所选校准模式",
     "radio.calibration_face_invalid": "CAL_FACE 参数必须是 0..5",
+    "radio.calibration_face_unavailable": "只有 SIX_FACE 的等待放置或就绪状态允许单面采集",
     "radio.alignment_requires_calibration": "Calibration 尚未 READY，不能开始 Alignment",
     "ack.waiting": "等待 ACK：seq={seq} cmd={command}，第 {attempt}/{total} 次",
     "ack.timeout": "ACK 超时：seq={seq} cmd={command}，已发送 {attempts} 次",
@@ -191,9 +205,9 @@ ZH_CN: dict[str, str] = {
     "message.log_open_failed": "无法创建会话日志：\n{error}",
     "message.connect_ground_station_first": "请先连接地面站串口。",
     "message.open_folder_failed": "无法打开文件夹：\n{folder}",
-    "message.mission_sim_disabled": "任务进行中，已禁用高负载模拟数据生成。",
-    "message.sim_success": "模拟验证数据生成成功：\n{path}",
-    "message.sim_failed": "模拟验证数据生成失败：\n{error}",
+    "message.mission_sim_disabled": "任务进行中，已禁用高负载模拟日志生成。",
+    "message.sim_success": "模拟日志生成成功：\n{path}",
+    "message.sim_failed": "模拟日志生成失败：\n{error}",
     "message.mission_processing_disabled": "任务进行中，已禁用高负载后处理。",
     "message.choose_log": "选择要处理的数据日志",
     "message.log_filter": "JSONL 日志 (*.jsonl);;所有文件 (*.*)",
@@ -205,12 +219,31 @@ ZH_CN: dict[str, str] = {
     "message.processing_progress": "正在处理数据…\n{detail}",
     "message.processing_success": "数据处理成功：\n{path}",
     "message.processing_failed": "文件有问题，无法处理：\n{error}",
+    "task.simulation.idle": "尚未生成模拟日志。",
+    "task.simulation.preparing": "正在准备生成模拟日志…",
+    "task.simulation.generating": "正在生成模拟飞行日志…",
+    "task.simulation.writing": "正在写入模拟日志…",
+    "task.simulation.cancelling": "正在取消并清理本次模拟日志…",
+    "task.simulation.cancelled": "模拟日志生成已取消，本次生成内容已清理。",
+    "task.simulation.completed": "模拟日志生成完成：{path}",
+    "task.simulation.failed": "模拟日志生成失败：{error}",
+    "task.processing.idle": "尚未开始数据解算。",
+    "task.processing.preparing": "正在准备数据解算…",
+    "task.processing.running": "正在解算数据：{detail}",
+    "task.processing.cancelling": "正在取消并清理本次解算结果…",
+    "task.processing.cancelled": "数据解算已取消，本次生成内容已清理。",
+    "task.processing.completed": "数据解算完成：{path}",
+    "task.processing.partial": "数据解算完成，但部分导出失败：\n{path}\n{errors}",
+    "task.processing.failed": "数据解算失败：{error}",
 }
 
 
 EN_US: dict[str, str] = {
-    "app.title": "SilverStar Flight Controller Ground Station",
-    "language.label": "Language:",
+    "app.title": APP_WINDOW_TITLE,
+    "app.brand": APP_EN_DISPLAY_NAME,
+    "app.product_version": f"{APP_WINDOW_TITLE} {APP_VERSION}",
+    "app.credit": "by CXYL",
+    "language.label": "Language",
     "page.preflight": "Preflight",
     "page.flight": "Flight",
     "page.post_process": "Post Process",
@@ -277,10 +310,11 @@ EN_US: dict[str, str] = {
     "button.lock": "Lock",
     "button.unlock": "Unlock",
     "button.start": "Start Mission",
-    "button.generate_sim": "Generate Validation Data",
+    "button.generate_sim": "Generate Simulation Log",
     "button.process_data": "Process Data",
+    "button.cancel_and_clean": "Cancel and Clean Up",
     "button.open_logs": "Open Logs Folder",
-    "button.open_data": "Open Data Folder",
+    "button.open_data": "Open Results Folder",
     "button.close": "Close",
     "button.cal_start": "Start Selected Calibration",
     "button.collect_face": "Collect {face}",
@@ -343,6 +377,7 @@ EN_US: dict[str, str] = {
     "radio.start_blocked": "START blocked: {reason}",
     "radio.calibration_mode_unsupported": "Capability does not declare the selected calibration mode",
     "radio.calibration_face_invalid": "CAL_FACE must be in the range 0..5",
+    "radio.calibration_face_unavailable": "A face can be collected only while SIX_FACE is Waiting for Face or Ready",
     "radio.alignment_requires_calibration": "Calibration must be READY before Alignment can start",
     "ack.waiting": "Waiting for ACK: seq={seq} cmd={command}, attempt {attempt}/{total}",
     "ack.timeout": "ACK timeout: seq={seq} cmd={command}, sent {attempts} times",
@@ -381,9 +416,9 @@ EN_US: dict[str, str] = {
     "message.log_open_failed": "Unable to create the session log:\n{error}",
     "message.connect_ground_station_first": "Connect the Ground Station serial port first.",
     "message.open_folder_failed": "Unable to open the folder:\n{folder}",
-    "message.mission_sim_disabled": "High-load validation-data generation is disabled during a mission.",
-    "message.sim_success": "Validation data generated successfully:\n{path}",
-    "message.sim_failed": "Validation-data generation failed:\n{error}",
+    "message.mission_sim_disabled": "Simulation log generation is disabled during a mission.",
+    "message.sim_success": "Simulation log generated successfully:\n{path}",
+    "message.sim_failed": "Simulation log generation failed:\n{error}",
     "message.mission_processing_disabled": "High-load post-processing is disabled during a mission.",
     "message.choose_log": "Choose a Data Log",
     "message.log_filter": "JSONL logs (*.jsonl);;All files (*.*)",
@@ -395,6 +430,22 @@ EN_US: dict[str, str] = {
     "message.processing_progress": "Processing data…\n{detail}",
     "message.processing_success": "Data processing completed:\n{path}",
     "message.processing_failed": "The file could not be processed:\n{error}",
+    "task.simulation.idle": "No simulation log has been generated.",
+    "task.simulation.preparing": "Preparing to generate a simulation log…",
+    "task.simulation.generating": "Generating the simulated flight log…",
+    "task.simulation.writing": "Writing the simulation log…",
+    "task.simulation.cancelling": "Cancelling simulation log generation and cleaning up this run…",
+    "task.simulation.cancelled": "Simulation log generation was cancelled and this run was cleaned up.",
+    "task.simulation.completed": "Simulation log generated: {path}",
+    "task.simulation.failed": "Simulation log generation failed: {error}",
+    "task.processing.idle": "Data processing has not started.",
+    "task.processing.preparing": "Preparing data processing…",
+    "task.processing.running": "Processing data: {detail}",
+    "task.processing.cancelling": "Cancelling and cleaning up this processing run…",
+    "task.processing.cancelled": "Data processing was cancelled and this run was cleaned up.",
+    "task.processing.completed": "Data processing completed: {path}",
+    "task.processing.partial": "Data processing completed with partial export failures:\n{path}\n{errors}",
+    "task.processing.failed": "Data processing failed: {error}",
 }
 
 
@@ -626,6 +677,62 @@ EN_US.update(
     }
 )
 
+ZH_CN.update(
+    {
+        "app.title": APP_WINDOW_TITLE,
+        "theme.label": "主题",
+        "theme.light": "浅色",
+        "theme.dark": "深色",
+        "button.process_data": "选择日志并导出",
+        "button.export_start": "开始导出",
+        "button.cancel": "取消",
+        "button.select_all": "全选",
+        "button.select_none": "全不选",
+        "export.dialog.title": "后处理导出设置",
+        "export.language.label": "输出语言",
+        "export.language.follow_ui": "跟随界面",
+        "export.language.zh_CN": "简体中文",
+        "export.language.en_US": "English",
+        "export.items.title": "导出内容（可多选）",
+        "export.item.processed_data": "处理后原始数据 TXT",
+        "export.item.summary": "状态与飞行摘要 TXT",
+        "export.item.charts": "曲线图 PNG",
+        "export.item.attitude_3d": "姿态与轨迹 3D 动图",
+        "export.item.session_info": "会话信息与 manifest JSON",
+        "export.items.required": "请至少选择一个导出项。",
+        "export.suffix.note": "文件名将按输出语言自动添加 _ZH / _EN 后缀。",
+        "message.processing_partial": "导出已完成，但部分项目失败：\\n{path}\\n\\n{errors}",
+    }
+)
+
+EN_US.update(
+    {
+        "app.title": APP_WINDOW_TITLE,
+        "theme.label": "Theme",
+        "theme.light": "Light",
+        "theme.dark": "Dark",
+        "button.process_data": "Select Log and Export",
+        "button.export_start": "Start Export",
+        "button.cancel": "Cancel",
+        "button.select_all": "Select All",
+        "button.select_none": "Select None",
+        "export.dialog.title": "Post-process Export Settings",
+        "export.language.label": "Export Language",
+        "export.language.follow_ui": "Follow UI",
+        "export.language.zh_CN": "简体中文",
+        "export.language.en_US": "English",
+        "export.items.title": "Export Items (multiple selections allowed)",
+        "export.item.processed_data": "Processed Raw Data TXT",
+        "export.item.summary": "Status and Flight Summary TXT",
+        "export.item.charts": "Charts PNG",
+        "export.item.attitude_3d": "Attitude and Trajectory 3D Animation",
+        "export.item.session_info": "Session Information and Manifest JSON",
+        "export.items.required": "Select at least one export item.",
+        "export.suffix.note": "Filenames automatically use the _ZH / _EN language suffix.",
+        "message.processing_partial": "Export completed with some failed items:\\n{path}\\n\\n{errors}",
+    }
+)
+
 
 _ENUM_KEYS: dict[str, dict[str, tuple[str, str]]] = {
     "command_policy": {
@@ -795,8 +902,8 @@ _ENUM_KEYS["sensor_detail"] = {
 
 
 class I18n:
-    SETTINGS_ORGANIZATION = "SilverStar"
-    SETTINGS_APPLICATION = "SS1GroundStation"
+    SETTINGS_ORGANIZATION = APP_ORGANIZATION
+    SETTINGS_APPLICATION = APP_EN_NAME
     SETTINGS_LANGUAGE_KEY = "language"
 
     def __init__(self, settings: QSettings | None = None) -> None:

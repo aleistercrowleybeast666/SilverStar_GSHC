@@ -16,7 +16,11 @@ from processing.flight_log_processor import (
     FlightLogProcessor,
     calculate_packet_loss_stats,
 )
-from processing.fake_log_generator import quat_to_q15, simulate
+from processing.fake_log_generator import (
+    SimulationCancelledError,
+    quat_to_q15,
+    simulate,
+)
 from processing.flight_plotter import FlightPlotter
 from services.state_model import LiveFlightPlotBuffer
 
@@ -140,6 +144,17 @@ class PostProcessingTests(unittest.TestCase):
         self.assertIn(0x0C, status_ids)  # CALIBRATION_FACE
         self.assertEqual(quat_to_q15((-1.0, 0.0, 0.0, 0.0))[0], -32768)
 
+    def test_fake_log_generation_honors_cancellation_callback(self) -> None:
+        progress_updates: list[tuple[int, int]] = []
+        with self.assertRaises(SimulationCancelledError):
+            simulate(
+                duration_s=1.0,
+                seed=42,
+                progress=lambda done, total: progress_updates.append((done, total)),
+                cancel_requested=lambda: bool(progress_updates),
+            )
+        self.assertTrue(progress_updates)
+
     def test_mixed_log_recovers_raw_capability_and_preflight_metadata(self) -> None:
         capability = struct.pack("<BBBBBBBH", 0x12, 1, 0, 1, 7, 3, 8, 1000)
         preflight_status = bytes([0x13, 2, 3, 0x24, 0x3F, 0xFF, 0x33, 0x7F, 0])
@@ -262,12 +277,16 @@ class PostProcessingTests(unittest.TestCase):
             with patch.object(FlightPlotter, "generate_attitude_motion_gif", return_value=iter(())):
                 output_dir = processor.process_file(log_path)
 
-            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (output_dir / "manifest_EN.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(manifest["protocol"], "SilverStar_0.0.8_AIR_PROFILE_COMPACT_V0")
             self.assertEqual(manifest["capability"]["air_profile_id"], 0)
             self.assertEqual(manifest["preflight"]["calibration_final_state"], 4)
             self.assertEqual(manifest["packet_loss"]["lost_packets"], 1)
-            self.assertGreater((output_dir / "velocity.png").stat().st_size, 0)
+            self.assertGreater((output_dir / "velocity_EN.png").stat().st_size, 0)
+            self.assertEqual(manifest["export"]["language"], "en_US")
+            self.assertEqual(manifest["export"]["filename_language_suffix"], "EN")
 
     def test_first_flight_state_is_valid_fallback_start(self) -> None:
         records = [

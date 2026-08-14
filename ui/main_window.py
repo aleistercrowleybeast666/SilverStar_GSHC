@@ -7,8 +7,10 @@ import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QTextCursor, QVector3D
+from PySide6.QtGui import QColor, QFont, QTextCursor, QVector3D
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QGridLayout,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QPlainTextEdit,
     QSizePolicy,
@@ -27,7 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import PLOT_REFRESH_INTERVAL_MS, PLOT_WINDOW_SECONDS
+from config import (
+    APP_WINDOW_TITLE,
+    PLOT_REFRESH_INTERVAL_MS,
+    PLOT_WINDOW_SECONDS,
+)
 from protocol.common import (
     AirAckResult,
     AirAlignmentState,
@@ -45,12 +52,22 @@ from protocol.common import (
     enum_name,
 )
 from services.i18n import I18n, Language
+from services.preferences import (
+    ALL_EXPORT_ITEMS,
+    AppPreferences,
+    ExportItem,
+    ExportLanguage,
+    ResolvedExportOptions,
+    Theme,
+    resolve_export_language,
+)
 from services.state_model import (
     EventHistory,
     FlightControllerState,
     HandshakeState,
     MissionPhase,
 )
+from ui.theme import ThemeColors, apply_application_theme, theme_colors
 
 
 def calibration_diagnostic_text(i18n: I18n, state: FlightControllerState) -> str:
@@ -254,7 +271,7 @@ class CalibrationDialog(QDialog):
         issue = calibration_diagnostic_text(self.i18n, state)
         self.lbl_issue.setText(f"{self.i18n.tr('field.current_issue')}: {issue}")
         self.lbl_issue.setStyleSheet(
-            "color: #e04b4b; font-weight: bold;"
+            "color: palette(bright-text); font-weight: bold;"
             if state.latest_calibration_diagnostic_reason
             else ""
         )
@@ -283,7 +300,10 @@ class CalibrationDialog(QDialog):
         self.btn_reset.setEnabled(preflight_entry_allowed and no_command_pending)
 
         six_face_active = calibration.mode == int(AirCalibrationMode.SIX_FACE)
-        waiting_for_face = calibration.state == int(AirCalibrationState.WAIT_FACE)
+        waiting_for_face = calibration.state in (
+            int(AirCalibrationState.WAIT_FACE),
+            int(AirCalibrationState.READY),
+        )
         collecting = calibration.state in (
             int(AirCalibrationState.COLLECTING),
             int(AirCalibrationState.CHECKING),
@@ -322,7 +342,7 @@ class CalibrationDialog(QDialog):
                     else "cal.face.collect_tooltip"
                 )
             )
-            # A completed face remains selectable in WAIT_FACE.  Only the
+            # A completed face remains selectable in WAIT_FACE or READY.  Only the
             # flight-controller snapshot/event may clear or restore its check.
             button.setEnabled(
                 preflight_entry_allowed
@@ -556,15 +576,165 @@ class SensorDetailsDialog(QDialog):
             self.details_text.setPlainText(text)
 
 
+class ExportOptionsDialog(QDialog):
+    def __init__(
+        self,
+        i18n: I18n,
+        preferences: AppPreferences,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.i18n = i18n
+        self.preferences = preferences
+        self.setMinimumWidth(520)
+
+        root = QVBoxLayout(self)
+        language_row = QHBoxLayout()
+        self.lbl_language = QLabel()
+        self.language_combo = QComboBox()
+        language_row.addWidget(self.lbl_language)
+        language_row.addWidget(self.language_combo, 1)
+        root.addLayout(language_row)
+
+        self.items_group = QGroupBox()
+        items_layout = QVBoxLayout(self.items_group)
+        self.item_checkboxes: dict[ExportItem, QCheckBox] = {}
+        for item in ALL_EXPORT_ITEMS:
+            checkbox = QCheckBox()
+            checkbox.toggled.connect(self._update_accept_enabled)
+            items_layout.addWidget(checkbox)
+            self.item_checkboxes[item] = checkbox
+        selection_row = QHBoxLayout()
+        self.btn_select_all = QPushButton()
+        self.btn_select_none = QPushButton()
+        selection_row.addWidget(self.btn_select_all)
+        selection_row.addWidget(self.btn_select_none)
+        selection_row.addStretch(1)
+        items_layout.addLayout(selection_row)
+        root.addWidget(self.items_group)
+
+        self.lbl_suffix_note = QLabel()
+        self.lbl_suffix_note.setWordWrap(True)
+        root.addWidget(self.lbl_suffix_note)
+        self.lbl_required = QLabel()
+        self.lbl_required.setStyleSheet(
+            "color: palette(bright-text); font-weight: bold;"
+        )
+        self.lbl_required.setWordWrap(True)
+        root.addWidget(self.lbl_required)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.btn_cancel = QPushButton()
+        self.btn_accept = QPushButton()
+        action_row.addWidget(self.btn_cancel)
+        action_row.addWidget(self.btn_accept)
+        root.addLayout(action_row)
+
+        self.btn_select_all.clicked.connect(lambda: self._set_all_checked(True))
+        self.btn_select_none.clicked.connect(lambda: self._set_all_checked(False))
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_accept.clicked.connect(self.accept)
+        self.retranslate_ui()
+        self.reload_preferences()
+
+    def retranslate_ui(self) -> None:
+        selected_language = self.language_combo.currentData()
+        self.setWindowTitle(self.i18n.tr("export.dialog.title"))
+        self.lbl_language.setText(self.i18n.tr("export.language.label"))
+        self.language_combo.clear()
+        for language in ExportLanguage:
+            self.language_combo.addItem(
+                self.i18n.tr(f"export.language.{language.value}"),
+                language.value,
+            )
+        if selected_language is not None:
+            index = self.language_combo.findData(selected_language)
+            if index >= 0:
+                self.language_combo.setCurrentIndex(index)
+        self.items_group.setTitle(self.i18n.tr("export.items.title"))
+        for item, checkbox in self.item_checkboxes.items():
+            checkbox.setText(self.i18n.tr(f"export.item.{item.value}"))
+        self.btn_select_all.setText(self.i18n.tr("button.select_all"))
+        self.btn_select_none.setText(self.i18n.tr("button.select_none"))
+        self.btn_cancel.setText(self.i18n.tr("button.cancel"))
+        self.btn_accept.setText(self.i18n.tr("button.export_start"))
+        self.lbl_suffix_note.setText(self.i18n.tr("export.suffix.note"))
+        self.lbl_required.setText(self.i18n.tr("export.items.required"))
+        self._update_accept_enabled()
+
+    def reload_preferences(self) -> None:
+        language = self.preferences.export_language()
+        index = self.language_combo.findData(language.value)
+        if index >= 0:
+            self.language_combo.setCurrentIndex(index)
+        selected = self.preferences.export_items()
+        for item, checkbox in self.item_checkboxes.items():
+            checkbox.setChecked(item in selected)
+        self._update_accept_enabled()
+
+    def _set_all_checked(self, checked: bool) -> None:
+        for checkbox in self.item_checkboxes.values():
+            checkbox.setChecked(checked)
+        self._update_accept_enabled()
+
+    def _update_accept_enabled(self) -> None:
+        has_selection = any(
+            checkbox.isChecked() for checkbox in self.item_checkboxes.values()
+        )
+        self.btn_accept.setEnabled(has_selection)
+        self.lbl_required.setVisible(not has_selection)
+
+    def resolved_options(
+        self,
+        ui_language: Language,
+        theme: Theme,
+    ) -> ResolvedExportOptions:
+        export_language = ExportLanguage(str(self.language_combo.currentData()))
+        items = frozenset(
+            item
+            for item, checkbox in self.item_checkboxes.items()
+            if checkbox.isChecked()
+        )
+        self.preferences.set_export_language(export_language)
+        self.preferences.set_export_items(items)
+        return ResolvedExportOptions(
+            language=resolve_export_language(export_language, ui_language),
+            theme=theme,
+            items=items,
+        )
+
+
 class MainWindow(QMainWindow):
     DEFAULT_CAMERA_DISTANCE = 6.5
     DEFAULT_CAMERA_ELEVATION = 20.0
     DEFAULT_CAMERA_AZIMUTH = 35.0
     DEFAULT_CAMERA_CENTER = (0.0, 0.0, 0.9)
+    ROCKET_FACE_COLOR_HEX = {
+        Theme.LIGHT: (
+            "#ff5a5f",
+            "#22c55e",
+            "#3b82f6",
+            "#f5b942",
+            "#a8b3c2",
+            "#7f8b9d",
+        ),
+        Theme.DARK: (
+            "#ff7b86",
+            "#4ade80",
+            "#60a5fa",
+            "#facc15",
+            "#cbd5e1",
+            "#94a3b8",
+        ),
+    }
 
     def __init__(self, i18n: I18n | None = None) -> None:
         super().__init__()
         self.i18n = i18n or I18n()
+        self.preferences = AppPreferences(self.i18n.settings)
+        self.theme = self.preferences.theme()
+        self._theme_colors: ThemeColors = theme_colors(self.theme)
         self._translation_bindings: list[tuple[object, str, dict[str, object]]] = []
         self.resize(1760, 960)
 
@@ -583,7 +753,9 @@ class MainWindow(QMainWindow):
         self.on_align_stop: Callable[[], None] | None = None
         self.on_align_reset: Callable[[], None] | None = None
         self.on_generate_sim_data: Callable[[], None] | None = None
+        self.on_cancel_sim_data: Callable[[], None] | None = None
         self.on_process_data: Callable[[], None] | None = None
+        self.on_cancel_process_data: Callable[[], None] | None = None
         self.on_open_log_dir: Callable[[], None] | None = None
         self.on_open_data_dir: Callable[[], None] | None = None
         self.on_language_changed: Callable[[], None] | None = None
@@ -591,6 +763,14 @@ class MainWindow(QMainWindow):
         self._state: FlightControllerState | None = None
         self._events: EventHistory | None = None
         self._data_tools_busy = False
+        self._simulation_task_active = False
+        self._simulation_cancel_enabled = False
+        self._simulation_status_key = "task.simulation.idle"
+        self._simulation_status_params: dict[str, object] = {}
+        self._processing_task_active = False
+        self._processing_cancel_enabled = False
+        self._processing_status_key = "task.processing.idle"
+        self._processing_status_params: dict[str, object] = {}
         self._last_sensor_revision = -1
         self._last_plot_revision = -1
         self._last_event_revision = -1
@@ -610,13 +790,12 @@ class MainWindow(QMainWindow):
 
         self._cmd_button_style = (
             "QPushButton { padding: 4px 8px; }"
-            "QPushButton:disabled { background-color: #2b2b2b; color: #8a8a8a; "
-            "border: 1px solid #555555; }"
         )
 
         self._build_ui()
         self._build_3d_scene()
         self._build_plots()
+        self._apply_theme(self.theme, persist=False)
         self.retranslate_ui()
 
         self.render_timer = QTimer(self)
@@ -651,6 +830,15 @@ class MainWindow(QMainWindow):
             if self.on_language_changed is not None:
                 self.on_language_changed()
 
+    def _on_theme_changed(self, index: int) -> None:
+        theme_value = self.theme_combo.itemData(index)
+        if theme_value is None:
+            return
+        selected = Theme(str(theme_value))
+        if selected is self.theme:
+            return
+        self._apply_theme(selected, persist=True)
+
     def retranslate_ui(self) -> None:
         self.setWindowTitle(self.i18n.tr("app.title"))
         for widget, key, params in self._translation_bindings:
@@ -659,6 +847,7 @@ class MainWindow(QMainWindow):
                 widget.setTitle(text)
             else:
                 widget.setText(text)  # type: ignore[attr-defined]
+        self._render_data_task_status()
         self.pages.setTabText(self.pages.indexOf(self.preflight_page), self.i18n.tr("page.preflight"))
         self.pages.setTabText(self.pages.indexOf(self.flight_page), self.i18n.tr("page.flight"))
         self.pages.setTabText(
@@ -669,6 +858,19 @@ class MainWindow(QMainWindow):
             blocked = self.language_combo.blockSignals(True)
             self.language_combo.setCurrentIndex(language_index)
             self.language_combo.blockSignals(blocked)
+        self.theme_combo.setItemText(
+            self.theme_combo.findData(Theme.LIGHT.value),
+            self.i18n.tr("theme.light"),
+        )
+        self.theme_combo.setItemText(
+            self.theme_combo.findData(Theme.DARK.value),
+            self.i18n.tr("theme.dark"),
+        )
+        theme_index = self.theme_combo.findData(self.theme.value)
+        if theme_index >= 0 and theme_index != self.theme_combo.currentIndex():
+            blocked = self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(theme_index)
+            self.theme_combo.blockSignals(blocked)
         self._set_3d_camera_unlocked(self.btn_toggle_camera_lock.isChecked())
         self.calibration_dialog.retranslate_ui()
         if self._state is not None:
@@ -677,6 +879,7 @@ class MainWindow(QMainWindow):
             self.calibration_dialog.render(self._state)
         self.link_details_dialog.retranslate_ui()
         self.sensor_details_dialog.retranslate_ui()
+        self.export_options_dialog.retranslate_ui()
         self._retranslate_plots()
         self._last_sensor_revision = -1
         self._last_event_revision = -1
@@ -719,6 +922,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left)
 
         self.pages = QTabWidget()
+        self.pages.setObjectName("pageTabs")
+        self.pages.setDocumentMode(True)
+        self.pages.setUsesScrollButtons(False)
+        self.pages.tabBar().setObjectName("pageNavigation")
+        self.pages.tabBar().setExpanding(True)
+        self.pages.tabBar().setDrawBase(False)
         self.preflight_page = self._build_preflight_page()
         self.flight_page = self._build_flight_page()
         self.post_process_page = self._build_post_process_page()
@@ -737,46 +946,93 @@ class MainWindow(QMainWindow):
         self.calibration_dialog.on_reset = lambda: self.on_cal_reset and self.on_cal_reset()
         self.link_details_dialog = LinkDetailsDialog(self.i18n, self)
         self.sensor_details_dialog = SensorDetailsDialog(self.i18n, self)
+        self.export_options_dialog = ExportOptionsDialog(
+            self.i18n,
+            self.preferences,
+            self,
+        )
 
     def _build_top_bar(self) -> QWidget:
-        box = QGroupBox()
-        self._bind_text(box, "group.connection")
-        layout = QHBoxLayout(box)
+        bar = QWidget()
+        bar.setObjectName("headerBar")
+        self.header_bar = bar
+        root_layout = QVBoxLayout(bar)
+        root_layout.setContentsMargins(10, 5, 10, 5)
+        root_layout.setSpacing(3)
+        connection_layout = QHBoxLayout()
+        connection_layout.setSpacing(4)
+        identity_layout = QHBoxLayout()
+        identity_layout.setSpacing(4)
+        self.header_connection_layout = connection_layout
+        self.header_identity_layout = identity_layout
+
+        self.header_title = QLabel()
+        self.header_title.setObjectName("headerTitle")
+        self._bind_text(self.header_title, "app.brand")
+        connection_layout.addWidget(self.header_title)
+        self.header_connection = QLabel()
+        self.header_connection.setObjectName("headerSection")
+        self._bind_text(self.header_connection, "group.connection")
+        connection_layout.addWidget(self.header_connection)
+
         self.port_combo = QComboBox()
-        self.port_combo.setMinimumContentsLength(12)
+        self.port_combo.setMinimumContentsLength(8)
         self.btn_refresh = QPushButton()
         self._bind_text(self.btn_refresh, "button.refresh_ports")
         self.baud_spin = QSpinBox()
         self.baud_spin.setRange(9600, 2_000_000)
         self.baud_spin.setValue(230400)
-        self.baud_spin.setFixedWidth(100)
+        self.baud_spin.setFixedWidth(88)
         self.btn_connect = QPushButton()
         self.btn_disconnect = QPushButton()
         self._bind_text(self.btn_connect, "button.connect")
         self._bind_text(self.btn_disconnect, "button.disconnect")
         self.conn_label = QLabel()
-        self._configure_dynamic_label(self.conn_label, 260, show_tooltip=True)
+        self._configure_dynamic_label(self.conn_label, 110, show_tooltip=True)
 
         self.lbl_port_name = QLabel()
         self._bind_text(self.lbl_port_name, "field.port")
-        layout.addWidget(self.lbl_port_name)
-        layout.addWidget(self.port_combo)
-        layout.addWidget(self.btn_refresh)
+        connection_layout.addWidget(self.lbl_port_name)
+        connection_layout.addWidget(self.port_combo)
+        connection_layout.addWidget(self.btn_refresh)
         self.lbl_baud_name = QLabel()
         self._bind_text(self.lbl_baud_name, "field.baudrate")
-        layout.addWidget(self.lbl_baud_name)
-        layout.addWidget(self.baud_spin)
-        layout.addWidget(self.btn_connect)
-        layout.addWidget(self.btn_disconnect)
-        layout.addWidget(self.conn_label)
-        layout.addStretch(1)
+        connection_layout.addWidget(self.lbl_baud_name)
+        connection_layout.addWidget(self.baud_spin)
+        connection_layout.addWidget(self.btn_connect)
+        connection_layout.addWidget(self.btn_disconnect)
+        connection_layout.addWidget(self.conn_label)
+        connection_layout.addStretch(1)
+        root_layout.addLayout(connection_layout)
+        identity_layout.addStretch(1)
+
+        self.header_version = QLabel()
+        self.header_version.setObjectName("headerVersion")
+        self._bind_text(self.header_version, "app.product_version")
+        identity_layout.addWidget(self.header_version)
+        self.header_credit = QLabel()
+        self.header_credit.setObjectName("headerCredit")
+        self._bind_text(self.header_credit, "app.credit")
+        identity_layout.addWidget(self.header_credit)
+
         self.lbl_language = QLabel()
         self._bind_text(self.lbl_language, "language.label")
         self.language_combo = QComboBox()
         self.language_combo.addItem("简体中文", Language.ZH_CN.value)
         self.language_combo.addItem("English", Language.EN_US.value)
-        layout.addWidget(self.lbl_language)
-        layout.addWidget(self.language_combo)
+        self.language_combo.setMinimumWidth(88)
+        identity_layout.addWidget(self.lbl_language)
+        identity_layout.addWidget(self.language_combo)
+
+        self.lbl_theme = QLabel()
+        self._bind_text(self.lbl_theme, "theme.label")
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("", Theme.LIGHT.value)
+        self.theme_combo.addItem("", Theme.DARK.value)
+        self.theme_combo.setMinimumWidth(70)
+        identity_layout.addWidget(self.lbl_theme)
+        identity_layout.addWidget(self.theme_combo)
+        root_layout.addLayout(identity_layout)
 
         self.btn_refresh.clicked.connect(lambda: self.on_refresh_ports and self.on_refresh_ports())
         self.btn_connect.clicked.connect(lambda: self.on_connect_clicked and self.on_connect_clicked())
@@ -784,7 +1040,8 @@ class MainWindow(QMainWindow):
             lambda: self.on_disconnect_clicked and self.on_disconnect_clicked()
         )
         self.language_combo.currentIndexChanged.connect(self._on_language_changed)
-        return box
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        return bar
 
     def _build_preflight_page(self) -> QWidget:
         page = QWidget()
@@ -1102,30 +1359,77 @@ class MainWindow(QMainWindow):
         box = QGroupBox()
         self._bind_text(box, "group.post_process")
         layout = QVBoxLayout(box)
+        layout.setSpacing(10)
         self.btn_generate_sim = QPushButton()
         self.btn_process_data = QPushButton()
         self.btn_open_log_dir = QPushButton()
         self.btn_open_data_dir = QPushButton()
+        self.btn_cancel_sim = QPushButton()
+        self.btn_cancel_processing = QPushButton()
         self._bind_text(self.btn_generate_sim, "button.generate_sim")
         self._bind_text(self.btn_process_data, "button.process_data")
         self._bind_text(self.btn_open_log_dir, "button.open_logs")
         self._bind_text(self.btn_open_data_dir, "button.open_data")
-        for button in (
-            self.btn_generate_sim,
-            self.btn_process_data,
-            self.btn_open_log_dir,
-            self.btn_open_data_dir,
-        ):
+        self._bind_text(self.btn_cancel_sim, "button.cancel_and_clean")
+        self._bind_text(self.btn_cancel_processing, "button.cancel_and_clean")
+
+        for button in (self.btn_generate_sim, self.btn_process_data):
             button.setMinimumHeight(42)
             button.setStyleSheet(self._cmd_button_style)
-            layout.addWidget(button)
+        for button in (self.btn_cancel_sim, self.btn_cancel_processing):
+            button.setObjectName("cancelTaskButton")
+            button.setMinimumHeight(36)
+            button.setEnabled(False)
+
+        self.lbl_simulation_progress = QLabel()
+        self.lbl_simulation_progress.setWordWrap(True)
+        self.simulation_progress_bar = QProgressBar()
+        self.simulation_progress_bar.setObjectName("simulationProgress")
+        self.simulation_progress_bar.setRange(0, 100)
+        self.simulation_progress_bar.setValue(0)
+        self.simulation_progress_bar.setMinimumHeight(36)
+        simulation_progress_row = QHBoxLayout()
+        simulation_progress_row.addWidget(self.simulation_progress_bar, 1)
+        simulation_progress_row.addWidget(self.btn_cancel_sim)
+
+        self.lbl_processing_progress = QLabel()
+        self.lbl_processing_progress.setWordWrap(True)
+        self.processing_progress_bar = QProgressBar()
+        self.processing_progress_bar.setObjectName("processingProgress")
+        self.processing_progress_bar.setRange(0, 100)
+        self.processing_progress_bar.setValue(0)
+        self.processing_progress_bar.setMinimumHeight(36)
+        processing_progress_row = QHBoxLayout()
+        processing_progress_row.addWidget(self.processing_progress_bar, 1)
+        processing_progress_row.addWidget(self.btn_cancel_processing)
+
+        layout.addWidget(self.btn_generate_sim)
+        layout.addWidget(self.lbl_simulation_progress)
+        layout.addLayout(simulation_progress_row)
+        layout.addSpacing(18)
+        layout.addWidget(self.btn_process_data)
+        layout.addWidget(self.lbl_processing_progress)
+        layout.addLayout(processing_progress_row)
+        layout.addSpacing(18)
+
+        folder_row = QHBoxLayout()
+        for button in (self.btn_open_log_dir, self.btn_open_data_dir):
+            button.setMinimumHeight(42)
+            button.setStyleSheet(self._cmd_button_style)
+            folder_row.addWidget(button, 1)
+        layout.addLayout(folder_row)
         layout.addStretch(1)
-        root.addWidget(box)
-        root.addStretch(1)
+        root.addWidget(box, 1)
         self.btn_generate_sim.clicked.connect(
             lambda: self.on_generate_sim_data and self.on_generate_sim_data()
         )
+        self.btn_cancel_sim.clicked.connect(
+            lambda: self.on_cancel_sim_data and self.on_cancel_sim_data()
+        )
         self.btn_process_data.clicked.connect(lambda: self.on_process_data and self.on_process_data())
+        self.btn_cancel_processing.clicked.connect(
+            lambda: self.on_cancel_process_data and self.on_cancel_process_data()
+        )
         self.btn_open_log_dir.clicked.connect(
             lambda: self.on_open_log_dir and self.on_open_log_dir()
         )
@@ -1198,6 +1502,79 @@ class MainWindow(QMainWindow):
         self.sensor_details_dialog.raise_()
         self.sensor_details_dialog.activateWindow()
 
+    def request_export_options(self) -> ResolvedExportOptions | None:
+        self.export_options_dialog.reload_preferences()
+        if self.export_options_dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return self.export_options_dialog.resolved_options(
+            self.i18n.language,
+            self.theme,
+        )
+
+    def _apply_theme(self, theme: Theme, *, persist: bool) -> None:
+        self.theme = theme
+        application = QApplication.instance()
+        if application is not None:
+            self._theme_colors = apply_application_theme(application, theme)
+        else:
+            self._theme_colors = theme_colors(theme)
+        if persist:
+            self.preferences.set_theme(theme)
+        self._apply_3d_theme()
+        self._apply_plot_theme()
+        if self._state is not None:
+            self.render_state()
+
+    def _rocket_face_colors(self) -> np.ndarray:
+        return np.asarray(
+            [
+                QColor(color).getRgbF()
+                for color in self.ROCKET_FACE_COLOR_HEX[self.theme]
+            ],
+            dtype=float,
+        )
+
+    def _apply_3d_theme(self) -> None:
+        if not hasattr(self, "gl_view"):
+            return
+        colors = self._theme_colors
+        self.gl_view.setBackgroundColor(QColor(colors.base))
+        if hasattr(self, "ground_grid"):
+            self.ground_grid.setColor(QColor(colors.grid))
+        if hasattr(self, "world_direction_labels"):
+            direction_colors = {
+                "E": colors.error,
+                "W": colors.text,
+                "N": colors.success,
+                "S": colors.text,
+                "U": colors.highlight,
+            }
+            for name, label in self.world_direction_labels.items():
+                label.setData(color=QColor(direction_colors[name]))
+        if hasattr(self, "body_nose_label"):
+            self.body_nose_label.setData(color=QColor(colors.text))
+        if hasattr(self, "base_colors"):
+            self.base_colors = self._rocket_face_colors()
+        if hasattr(self, "mesh_item"):
+            self._apply_quat_to_mesh(self.latest_quat)
+            self.mesh_item.setMeshData(
+                meshdata=self.mesh_item.opts["meshdata"],
+                edgeColor=pg.glColor(QColor(colors.mesh_edge)),
+            )
+        self.gl_view.update()
+
+    def _apply_plot_theme(self) -> None:
+        if not hasattr(self, "plot_widgets"):
+            return
+        colors = self._theme_colors
+        for key, plot_widget in self.plot_widgets.items():
+            plot_widget.setBackground(colors.base)
+            for axis_name in ("left", "bottom"):
+                axis = plot_widget.getAxis(axis_name)
+                axis.setPen(pg.mkPen(colors.border))
+                axis.setTextPen(pg.mkPen(colors.text))
+            self.curves[key].setPen(pg.mkPen(colors.plot_curve, width=2))
+
     def set_ports(self, ports: list[str]) -> None:
         current = self.port_combo.currentText()
         self.port_combo.clear()
@@ -1220,11 +1597,123 @@ class MainWindow(QMainWindow):
         self._data_tools_busy = bool(busy)
         self._render_data_tool_buttons()
 
+    @staticmethod
+    def _set_progress_value(progress_bar: QProgressBar, done: int, total: int) -> None:
+        total = max(0, int(total))
+        if total == 0:
+            progress_bar.setRange(0, 0)
+            return
+        done = max(0, min(int(done), total))
+        progress_bar.setRange(0, total)
+        progress_bar.setValue(done)
+
+    def _render_data_task_status(self) -> None:
+        if not hasattr(self, "lbl_simulation_progress"):
+            return
+        self.lbl_simulation_progress.setText(
+            self.i18n.tr(self._simulation_status_key, **self._simulation_status_params)
+        )
+        self.lbl_processing_progress.setText(
+            self.i18n.tr(self._processing_status_key, **self._processing_status_params)
+        )
+
+    def begin_simulation_task(self) -> None:
+        self._simulation_task_active = True
+        self._simulation_cancel_enabled = True
+        self._simulation_status_key = "task.simulation.preparing"
+        self._simulation_status_params = {}
+        self._set_progress_value(self.simulation_progress_bar, 0, 100)
+        self.set_data_tools_busy(True)
+        self._render_data_task_status()
+
+    def update_simulation_progress(
+        self,
+        done: int,
+        total: int,
+        status_key: str,
+        **params: object,
+    ) -> None:
+        self._simulation_status_key = status_key
+        self._simulation_status_params = dict(params)
+        self._set_progress_value(self.simulation_progress_bar, done, total)
+        self._render_data_task_status()
+
+    def mark_simulation_cancelling(self) -> None:
+        self._simulation_cancel_enabled = False
+        self._simulation_status_key = "task.simulation.cancelling"
+        self._simulation_status_params = {}
+        self._render_data_tool_buttons()
+        self._render_data_task_status()
+
+    def finish_simulation_task(
+        self,
+        status_key: str,
+        *,
+        completed: bool,
+        **params: object,
+    ) -> None:
+        self._simulation_task_active = False
+        self._simulation_cancel_enabled = False
+        self._simulation_status_key = status_key
+        self._simulation_status_params = dict(params)
+        self._set_progress_value(self.simulation_progress_bar, 100 if completed else 0, 100)
+        self.set_data_tools_busy(False)
+        self._render_data_task_status()
+
+    def begin_processing_task(self) -> None:
+        self._processing_task_active = True
+        self._processing_cancel_enabled = True
+        self._processing_status_key = "task.processing.preparing"
+        self._processing_status_params = {}
+        self._set_progress_value(self.processing_progress_bar, 0, 100)
+        self.set_data_tools_busy(True)
+        self._render_data_task_status()
+
+    def update_processing_progress(
+        self,
+        done: int,
+        total: int,
+        status_key: str,
+        **params: object,
+    ) -> None:
+        self._processing_status_key = status_key
+        self._processing_status_params = dict(params)
+        self._set_progress_value(self.processing_progress_bar, done, total)
+        self._render_data_task_status()
+
+    def mark_processing_cancelling(self) -> None:
+        self._processing_cancel_enabled = False
+        self._processing_status_key = "task.processing.cancelling"
+        self._processing_status_params = {}
+        self._render_data_tool_buttons()
+        self._render_data_task_status()
+
+    def finish_processing_task(
+        self,
+        status_key: str,
+        *,
+        completed: bool,
+        **params: object,
+    ) -> None:
+        self._processing_task_active = False
+        self._processing_cancel_enabled = False
+        self._processing_status_key = status_key
+        self._processing_status_params = dict(params)
+        self._set_progress_value(self.processing_progress_bar, 100 if completed else 0, 100)
+        self.set_data_tools_busy(False)
+        self._render_data_task_status()
+
     def _render_data_tool_buttons(self) -> None:
         mission = bool(self._state and self._state.mission_started)
         high_load_enabled = not self._data_tools_busy and not mission
         self.btn_generate_sim.setEnabled(high_load_enabled)
         self.btn_process_data.setEnabled(high_load_enabled)
+        self.btn_cancel_sim.setEnabled(
+            self._simulation_task_active and self._simulation_cancel_enabled
+        )
+        self.btn_cancel_processing.setEnabled(
+            self._processing_task_active and self._processing_cancel_enabled
+        )
         # Merely opening the folders is not a high-load operation.
         self.btn_open_log_dir.setEnabled(True)
         self.btn_open_data_dir.setEnabled(True)
@@ -1379,7 +1868,11 @@ class MainWindow(QMainWindow):
 
         health = state.receive_health
         health_text = self.i18n.tr("common.backlog" if health.is_backlogged() else "common.normal")
-        health_style = "color: #ff5555; font-weight: bold;" if health.is_backlogged() else ""
+        health_style = (
+            f"color: {self._theme_colors.error}; font-weight: bold;"
+            if health.is_backlogged()
+            else ""
+        )
         for label in (self.lbl_flight_processing,):
             label.setText(health_text)
             label.setStyleSheet(health_style)
@@ -1444,12 +1937,12 @@ class MainWindow(QMainWindow):
         self.lbl_pf_air_link.setText(self.i18n.tr(key))
         self.lbl_pf_air_link.setToolTip("")
         color = {
-            "air_link.connected": "#35b96f",
-            "air_link.handshaking": "#d7a928",
-            "air_link.downlink_wait": "#d7a928",
-            "air_link.unsupported": "#e04b4b",
-            "air_link.error": "#e04b4b",
-            "air_link.not_detected": "#888888",
+            "air_link.connected": self._theme_colors.success,
+            "air_link.handshaking": self._theme_colors.warning,
+            "air_link.downlink_wait": self._theme_colors.warning,
+            "air_link.unsupported": self._theme_colors.error,
+            "air_link.error": self._theme_colors.error,
+            "air_link.not_detected": self._theme_colors.muted,
         }[key]
         self.lbl_pf_air_link.setStyleSheet(f"color: {color}; font-weight: bold;")
 
@@ -1498,14 +1991,13 @@ class MainWindow(QMainWindow):
             )
         )
 
-    @staticmethod
-    def _set_semantic_style(label: QLabel, state: str) -> None:
+    def _set_semantic_style(self, label: QLabel, state: str) -> None:
         color = {
-            "ready": "#35b96f",
-            "waiting": "#d7a928",
-            "error": "#e04b4b",
-            "unknown": "#888888",
-        }.get(state, "#888888")
+            "ready": self._theme_colors.success,
+            "waiting": self._theme_colors.warning,
+            "error": self._theme_colors.error,
+            "unknown": self._theme_colors.muted,
+        }.get(state, self._theme_colors.muted)
         label.setStyleSheet(f"color: {color}; font-weight: bold;")
 
     def _render_sensor(self, state: FlightControllerState) -> None:
@@ -1844,17 +2336,7 @@ class MainWindow(QMainWindow):
             dtype=np.uint32,
         )
 
-        colors = np.array(
-            [
-                [1.00, 0.25, 0.25, 1.00],
-                [0.20, 0.80, 0.35, 1.00],
-                [0.20, 0.55, 1.00, 1.00],
-                [1.00, 0.85, 0.20, 1.00],
-                [0.45, 0.45, 0.45, 1.00],
-                [0.35, 0.35, 0.35, 1.00],
-            ],
-            dtype=float,
-        )
+        colors = self._rocket_face_colors()
 
         self.base_vertices = verts.copy()
         self.base_faces = faces.copy()
@@ -1864,9 +2346,10 @@ class MainWindow(QMainWindow):
         self.mesh_item = gl.GLMeshItem(
             meshdata=mesh_data,
             smooth=False,
+            computeNormals=False,
             drawEdges=True,
             edgeColor=(1, 1, 1, 1),
-            shader="shaded",
+            shader=None,
         )
         self.gl_view.addItem(self.mesh_item)
 

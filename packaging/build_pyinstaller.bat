@@ -8,19 +8,12 @@ python -m pip install pyinstaller
 
 echo [2/3] Cleaning old build...
 rmdir /s /q build 2>nul
-rmdir /s /q dist\SS1GroundStation 2>nul
+rmdir /s /q dist\SilverStar_GSHC 2>nul
 
 echo [3/3] Building onedir package...
-python -m PyInstaller ^
-  --noconfirm ^
-  --clean ^
-  --onedir ^
-  --windowed ^
-  --name SS1GroundStation ^
-  --hidden-import OpenGL.platform.win32 ^
-  main.py
+python -m PyInstaller --noconfirm --clean SilverStar_GSHC.spec
 
 echo.
 echo Done. Output:
-echo dist\SS1GroundStation\SS1GroundStation.exe
+echo dist\SilverStar_GSHC\SilverStar_GSHC.exe
 pause

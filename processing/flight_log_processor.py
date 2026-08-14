@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,13 @@ from protocol.common import (
     AirStatusId,
     air_sensor_canonical_name,
     enum_name,
+)
+from services.i18n import Language
+from services.preferences import (
+    ALL_EXPORT_ITEMS,
+    ExportItem,
+    ResolvedExportOptions,
+    Theme,
 )
 
 from .flight_plotter import FlightPlotter, PlotterConfig
@@ -62,6 +70,60 @@ STATUS_NAME = {
 }
 
 ProgressCallback = Callable[[int, int, str], None]
+CancelCallback = Callable[[], bool]
+
+
+class ProcessingCancelledError(RuntimeError):
+    """Raised when the current offline export is cancelled by the user."""
+
+
+EXPORT_TEXT: dict[str, tuple[str, str]] = {
+    "processed_title": ("离线飞行处理数据", "Flight offline processed data"),
+    "summary_title": ("飞行摘要", "Flight summary"),
+    "data_kind": ("数据类型", "data_kind"),
+    "simulated": ("模拟数据", "simulated"),
+    "simulation_label": ("模拟标记", "simulation_label"),
+    "source_log": ("源日志", "source_log"),
+    "mission_start_ms": ("任务开始时间_ms", "mission_start_ms"),
+    "mission_end_ms": ("任务结束时间_ms", "mission_end_ms"),
+    "duration_s": ("任务时长_s", "duration_s"),
+    "air_profile_id": ("AIR配置ID", "air_profile_id"),
+    "command_policy": ("命令策略", "command_policy"),
+    "accel_full_scale_g": ("加速度满量程_g", "accel_full_scale_g"),
+    "gyro_full_scale_dps": ("陀螺仪满量程_dps", "gyro_full_scale_dps"),
+    "parachute_time_s": ("开伞时间_s", "parachute_time_s"),
+    "warning": ("警告", "warning"),
+    "status_events": ("状态事件", "status_events"),
+    "time_s": ("时间_s", "time_s"),
+    "status": ("状态", "status"),
+    "link_quality": ("链路质量", "link_quality"),
+    "rssi_dbm": ("RSSI_dBm", "rssi_dbm"),
+    "snr_db": ("SNR_dB", "snr_db"),
+    "final_preflight_lifecycle": ("最终预飞生命周期", "final_preflight_lifecycle"),
+    "calibration_mode": ("校准模式", "calibration_mode"),
+    "calibration_final_state": ("校准最终状态", "calibration_final_state"),
+    "alignment_final_state": ("初对准最终状态", "alignment_final_state"),
+    "gnss_position_usable_before_start": (
+        "任务开始前GNSS定位可用",
+        "gnss_position_usable_before_start",
+    ),
+    "max_accel": ("最大加速度", "max_accel"),
+    "max_velocity": ("最大速度", "max_velocity"),
+    "max_height": ("最大高度", "max_height"),
+    "packet_loss": ("丢包统计", "packet_loss"),
+    "no_accel_data": ("无加速度数据", "no accel data"),
+    "no_velocity_data": ("无速度数据", "no velocity data"),
+    "no_position_data": ("无位置数据", "no position data"),
+    "not_found": ("未找到", "not_found"),
+    "expected_period_ms": ("预期周期_ms", "expected_period_ms"),
+    "expected_rate_hz": ("预期频率_Hz", "expected_rate_hz"),
+    "received_packets": ("接收包数", "received_packets"),
+    "expected_packets": ("预期包数", "expected_packets"),
+    "lost_packets": ("丢失包数", "lost_packets"),
+    "packet_loss_rate": ("丢包率", "packet_loss_rate"),
+    "packet_loss_percent": ("丢包百分比", "packet_loss_percent"),
+    "loss_window_end_basis": ("丢包窗口结束依据", "loss_window_end_basis"),
+}
 
 
 @dataclass
@@ -368,80 +430,262 @@ class FlightLogProcessor:
         gif_fps: int = 5,
         gap_threshold_s: Optional[float] = None,
         pos_z_is_height: bool = True,
+        export_options: ResolvedExportOptions | None = None,
     ) -> None:
         self.output_root = Path(output_root)
         self.gif_fps = max(1, min(30, int(gif_fps)))
         self.gap_threshold_s = gap_threshold_s
         self.pos_z_is_height = pos_z_is_height
+        self.export_options = export_options or ResolvedExportOptions(
+            language=Language.EN_US,
+            theme=Theme.LIGHT,
+            items=frozenset(ALL_EXPORT_ITEMS),
+        )
+        self.last_export_errors: dict[str, str] = {}
 
-    def process_file(self, log_path: Path | str, progress: ProgressCallback | None = None) -> Path:
-        log_path = Path(log_path)
+    def _export_text(self, key: str) -> str:
+        values = EXPORT_TEXT.get(key)
+        if values is None:
+            return key
+        return (
+            values[0]
+            if self.export_options.language is Language.ZH_CN
+            else values[1]
+        )
+
+    def process_file(
+        self,
+        log_path: Path | str,
+        progress: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
+    ) -> Path:
         output_dir = self._make_output_dir()
+        try:
+            return self._process_file(
+                Path(log_path),
+                output_dir,
+                progress,
+                cancel_requested,
+            )
+        except ProcessingCancelledError:
+            self.remove_output_dir(output_dir)
+            raise
 
-        raw_records = self._read_jsonl(log_path)
+    def remove_output_dir(self, output_dir: Path | str) -> None:
+        root = self.output_root.resolve()
+        target = Path(output_dir).resolve()
+        if target.parent != root:
+            raise RuntimeError(f"Refusing to remove output outside data root: {target}")
+        if target.exists():
+            shutil.rmtree(target)
+
+    def _process_file(
+        self,
+        log_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback | None,
+        cancel_requested: CancelCallback | None,
+    ) -> Path:
+        options = self.export_options
+        if not options.items:
+            raise ValueError("At least one export item must be selected.")
+
+        def check_cancel() -> None:
+            if cancel_requested is not None and cancel_requested():
+                raise ProcessingCancelledError("Data processing was cancelled.")
+
+        check_cancel()
+        raw_records = self._read_jsonl(log_path, cancel_requested=cancel_requested)
+        check_cancel()
         data = self._extract_flight_data(raw_records, log_path)
+        check_cancel()
 
         plotter = FlightPlotter(
             PlotterConfig(
                 gif_fps=self.gif_fps,
                 gap_threshold_s=self.gap_threshold_s,
                 pos_z_is_height=self.pos_z_is_height,
+                language=options.language,
+                theme=options.theme,
+                filename_suffix=options.language_suffix,
             )
         )
 
-        frame_count = plotter.estimate_gif_frame_count(data)
-        total_steps = 2 + 7 + frame_count + 1
+        frame_count = (
+            plotter.estimate_gif_frame_count(data)
+            if ExportItem.ATTITUDE_3D in options.items
+            else 0
+        )
+        total_steps = 0
+        total_steps += int(ExportItem.PROCESSED_DATA in options.items)
+        total_steps += int(ExportItem.SUMMARY in options.items)
+        total_steps += 7 if ExportItem.CHARTS in options.items else 0
+        total_steps += frame_count + 1 if ExportItem.ATTITUDE_3D in options.items else 0
+        total_steps += int(ExportItem.SESSION_INFO in options.items)
         done = 0
+        self.last_export_errors = {}
 
         def step(msg: str) -> None:
             nonlocal done
+            check_cancel()
             done += 1
             if progress is not None:
                 progress(done, total_steps, msg)
 
-        self._write_processed_data(data, output_dir / "processed_data.txt")
-        step("processed_data.txt")
+        def run_export(name: str, action: Callable[[], None]) -> None:
+            check_cancel()
+            try:
+                action()
+                check_cancel()
+            except ProcessingCancelledError:
+                raise
+            except Exception as exc:
+                self.last_export_errors[name] = f"{type(exc).__name__}: {exc}"
+            step(name)
 
-        self._write_summary(data, output_dir / "summary.txt")
-        step("summary.txt")
+        if ExportItem.PROCESSED_DATA in options.items:
+            name = options.output_name("processed_data", "txt")
+            run_export(
+                name,
+                lambda: self._write_processed_data(data, output_dir / name),
+            )
 
-        plotter.plot_vector_figure(output_dir / "accel.png", "ACC", data.accel, ("ax", "ay", "az"), "ACC / m/s^2", data.parachute_time_s)
-        step("accel.png")
+        if ExportItem.SUMMARY in options.items:
+            name = options.output_name("summary", "txt")
+            run_export(name, lambda: self._write_summary(data, output_dir / name))
 
-        plotter.plot_vector_figure(output_dir / "gyro.png", "GYRO", data.gyro, ("gx", "gy", "gz"), "GYRO / rad/s", data.parachute_time_s)
-        step("gyro.png")
+        if ExportItem.CHARTS in options.items:
+            chart_jobs: tuple[tuple[str, Callable[[Path], None]], ...] = (
+                (
+                    "accel",
+                    lambda path: plotter.plot_vector_figure(
+                        path,
+                        plotter.text("acceleration"),
+                        data.accel,
+                        ("X", "Y", "Z"),
+                        plotter.text("axis_acceleration"),
+                        data.parachute_time_s,
+                    ),
+                ),
+                (
+                    "gyro",
+                    lambda path: plotter.plot_vector_figure(
+                        path,
+                        plotter.text("angular_rate"),
+                        data.gyro,
+                        ("X", "Y", "Z"),
+                        plotter.text("axis_angular_rate"),
+                        data.parachute_time_s,
+                    ),
+                ),
+                (
+                    "euler",
+                    lambda path: plotter.plot_vector_figure(
+                        path,
+                        plotter.text("euler_angle"),
+                        data.euler,
+                        (
+                            plotter.text("roll"),
+                            plotter.text("pitch"),
+                            plotter.text("yaw"),
+                        ),
+                        plotter.text("axis_angle"),
+                        data.parachute_time_s,
+                    ),
+                ),
+                (
+                    "velocity",
+                    lambda path: plotter.plot_vector_figure(
+                        path,
+                        plotter.text("velocity"),
+                        data.vel,
+                        (
+                            plotter.text("east"),
+                            plotter.text("north"),
+                            plotter.text("up"),
+                        ),
+                        plotter.text("axis_velocity"),
+                        data.parachute_time_s,
+                    ),
+                ),
+                (
+                    "position",
+                    lambda path: plotter.plot_vector_figure(
+                        path,
+                        plotter.text("position"),
+                        data.pos,
+                        (
+                            plotter.text("east"),
+                            plotter.text("north"),
+                            plotter.text("up"),
+                        ),
+                        plotter.text("axis_position"),
+                        data.parachute_time_s,
+                    ),
+                ),
+                (
+                    "link_quality",
+                    lambda path: plotter.plot_link_quality(
+                        path,
+                        data.link,
+                        data.parachute_time_s,
+                    ),
+                ),
+                (
+                    "packet_loss_per_second",
+                    lambda path: plotter.plot_packet_loss_per_second(
+                        path,
+                        data.packet_loss.loss_per_second,
+                    ),
+                ),
+            )
+            for stem, chart_action in chart_jobs:
+                name = options.output_name(stem, "png")
+                run_export(
+                    name,
+                    lambda path=output_dir / name, action=chart_action: action(path),
+                )
 
-        plotter.plot_vector_figure(output_dir / "euler.png", "EULER FROM QUAT", data.euler, ("roll", "pitch", "yaw"), "ANGLE / rad", data.parachute_time_s)
-        step("euler.png")
+        if ExportItem.ATTITUDE_3D in options.items:
+            check_cancel()
+            frames_dir = output_dir / f"gif_frames_{options.language_suffix}"
+            frames_dir.mkdir(exist_ok=True)
+            gif_name = options.output_name("attitude_motion", "gif")
+            gif_path = output_dir / gif_name
+            try:
+                for frame_path in plotter.generate_attitude_motion_gif(
+                    data,
+                    gif_path,
+                    frames_dir,
+                ):
+                    step(frame_path.name)
+            except ProcessingCancelledError:
+                raise
+            except Exception as exc:
+                self.last_export_errors[gif_name] = f"{type(exc).__name__}: {exc}"
+            step(gif_name)
 
-        plotter.plot_vector_figure(output_dir / "velocity.png", "VEL", data.vel, ("vx", "vy", "vz"), "VEL / m/s", data.parachute_time_s)
-        step("velocity.png")
-
-        plotter.plot_vector_figure(output_dir / "position.png", "POS", data.pos, ("x", "y", "z"), "POS / m", data.parachute_time_s)
-        step("position.png")
-
-        plotter.plot_link_quality(output_dir / "link_quality.png", data.link, data.parachute_time_s)
-        step("link_quality.png")
-
-        plotter.plot_packet_loss_per_second(
-            output_dir / "packet_loss_per_second.png",
-            data.packet_loss.loss_per_second,
-        )
-        step("packet_loss_per_second.png")
-
-        frames_dir = output_dir / "gif_frames"
-        frames_dir.mkdir(exist_ok=True)
-        gif_path = output_dir / "attitude_motion.gif"
-
-        for _ in plotter.generate_attitude_motion_gif(data, gif_path, frames_dir):
-            step("gif frame")
-
-        step("attitude_motion.gif")
-
-        self._write_manifest(data, output_dir / "manifest.json", log_path)
+        if ExportItem.SESSION_INFO in options.items:
+            manifest_name = options.output_name("manifest", "json")
+            run_export(
+                manifest_name,
+                lambda: self._write_manifest(
+                    data,
+                    output_dir / manifest_name,
+                    log_path,
+                    export_options=options,
+                    export_errors=self.last_export_errors,
+                ),
+            )
+        check_cancel()
         return output_dir
 
-    def _read_jsonl(self, log_path: Path) -> list[dict]:
+    def _read_jsonl(
+        self,
+        log_path: Path,
+        *,
+        cancel_requested: CancelCallback | None = None,
+    ) -> list[dict]:
         if log_path.suffix.lower() != ".jsonl":
             raise ValueError("请选择 .jsonl 日志文件。")
         if not log_path.exists() or not log_path.is_file():
@@ -455,6 +699,12 @@ class FlightLogProcessor:
         try:
             with log_path.open("r", encoding="utf-8") as f:
                 for line_no, line in enumerate(f, start=1):
+                    if (
+                        line_no % 256 == 0
+                        and cancel_requested is not None
+                        and cancel_requested()
+                    ):
+                        raise ProcessingCancelledError("Data processing was cancelled.")
                     line = line.strip()
                     if not line:
                         continue
@@ -891,30 +1141,43 @@ class FlightLogProcessor:
     def _write_processed_data(self, data: FlightData, path: Path) -> None:
         def write_vec(f, title: str, samples: list[TimedVector], labels: tuple[str, ...]) -> None:
             f.write(f"\n[{title}]\n")
-            f.write("time_s\t" + "\t".join(labels) + "\n")
+            f.write(self._export_text("time_s") + "\t" + "\t".join(labels) + "\n")
             for s in samples:
                 f.write(f"{s.time_s:.6f}\t" + "\t".join(f"{v:.9g}" for v in s.values) + "\n")
 
         with path.open("w", encoding="utf-8") as f:
-            f.write("Flight offline processed data\n")
-            f.write(f"data_kind: {data.log_kind}\n")
-            f.write(f"simulated: {str(data.simulated).lower()}\n")
+            f.write(self._export_text("processed_title") + "\n")
+            f.write(f"{self._export_text('data_kind')}: {data.log_kind}\n")
+            f.write(f"{self._export_text('simulated')}: {str(data.simulated).lower()}\n")
             if data.simulation_label:
-                f.write(f"simulation_label: {data.simulation_label}\n")
-            f.write(f"source_log: {data.source_log}\n")
-            f.write(f"mission_start_ms: {data.mission_start_ms}\n")
-            f.write(f"mission_end_ms: {data.end_ms}\n")
-            f.write(f"duration_s: {data.duration_s:.3f}\n")
-            f.write(f"air_profile_id: {data.air_profile_id}\n")
-            f.write(f"command_policy: {data.command_policy}\n")
-            f.write(f"accel_full_scale_g: {data.accel_full_scale_g}\n")
-            f.write(f"gyro_full_scale_dps: {data.gyro_full_scale_dps}\n")
-            f.write(f"parachute_time_s: {data.parachute_time_s if data.parachute_time_s is not None else 'not_found'}\n")
+                f.write(
+                    f"{self._export_text('simulation_label')}: {data.simulation_label}\n"
+                )
+            f.write(f"{self._export_text('source_log')}: {data.source_log}\n")
+            f.write(f"{self._export_text('mission_start_ms')}: {data.mission_start_ms}\n")
+            f.write(f"{self._export_text('mission_end_ms')}: {data.end_ms}\n")
+            f.write(f"{self._export_text('duration_s')}: {data.duration_s:.3f}\n")
+            f.write(f"{self._export_text('air_profile_id')}: {data.air_profile_id}\n")
+            f.write(f"{self._export_text('command_policy')}: {data.command_policy}\n")
+            f.write(
+                f"{self._export_text('accel_full_scale_g')}: {data.accel_full_scale_g}\n"
+            )
+            f.write(
+                f"{self._export_text('gyro_full_scale_dps')}: {data.gyro_full_scale_dps}\n"
+            )
+            parachute = (
+                data.parachute_time_s
+                if data.parachute_time_s is not None
+                else self._export_text("not_found")
+            )
+            f.write(f"{self._export_text('parachute_time_s')}: {parachute}\n")
             for w in data.warnings:
-                f.write(f"warning: {w}\n")
+                f.write(f"{self._export_text('warning')}: {w}\n")
 
-            f.write("\n[status_events]\n")
-            f.write("time_s\tstatus\targ0\targ1\n")
+            f.write(f"\n[{self._export_text('status_events')}]\n")
+            f.write(
+                f"{self._export_text('time_s')}\t{self._export_text('status')}\targ0\targ1\n"
+            )
             for ev in data.status_events:
                 f.write(f"{ev.time_s:.6f}\t{ev.name}\t{ev.arg0}\t{ev.arg1}\n")
 
@@ -926,8 +1189,10 @@ class FlightLogProcessor:
             write_vec(f, "velocity_mps", data.vel, ("vx", "vy", "vz"))
             write_vec(f, "position_m", data.pos, ("x", "y", "z"))
 
-            f.write("\n[link_quality]\n")
-            f.write("time_s\trssi_dbm\tsnr_db\n")
+            f.write(f"\n[{self._export_text('link_quality')}]\n")
+            f.write(
+                f"{self._export_text('time_s')}\t{self._export_text('rssi_dbm')}\t{self._export_text('snr_db')}\n"
+            )
             for s in data.link:
                 f.write(f"{s.time_s:.6f}\t{s.rssi_dbm:.3f}\t{s.snr_db:.3f}\n")
 
@@ -937,32 +1202,42 @@ class FlightLogProcessor:
         max_height = self._max_z(data.pos)
 
         with path.open("w", encoding="utf-8") as f:
-            f.write("Flight summary\n")
-            f.write(f"data_kind: {data.log_kind}\n")
-            f.write(f"simulated: {str(data.simulated).lower()}\n")
+            f.write(self._export_text("summary_title") + "\n")
+            f.write(f"{self._export_text('data_kind')}: {data.log_kind}\n")
+            f.write(f"{self._export_text('simulated')}: {str(data.simulated).lower()}\n")
             if data.simulation_label:
-                f.write(f"simulation_label: {data.simulation_label}\n")
-            f.write(f"source_log: {data.source_log}\n")
-            f.write(f"duration_s: {data.duration_s:.3f}\n")
-            f.write(f"air_profile_id: {data.air_profile_id}\n")
-            f.write(f"command_policy: {data.command_policy}\n")
-            f.write(f"accel_full_scale_g: {data.accel_full_scale_g}\n")
-            f.write(f"gyro_full_scale_dps: {data.gyro_full_scale_dps}\n")
-            f.write(f"final_preflight_lifecycle: {data.final_preflight_lifecycle}\n")
-            f.write(f"calibration_mode: {data.calibration_mode}\n")
-            f.write(f"calibration_final_state: {data.calibration_final_state}\n")
-            f.write(f"alignment_final_state: {data.alignment_final_state}\n")
+                f.write(
+                    f"{self._export_text('simulation_label')}: {data.simulation_label}\n"
+                )
+            for key, value in (
+                ("source_log", data.source_log),
+                ("duration_s", f"{data.duration_s:.3f}"),
+                ("air_profile_id", data.air_profile_id),
+                ("command_policy", data.command_policy),
+                ("accel_full_scale_g", data.accel_full_scale_g),
+                ("gyro_full_scale_dps", data.gyro_full_scale_dps),
+                ("final_preflight_lifecycle", data.final_preflight_lifecycle),
+                ("calibration_mode", data.calibration_mode),
+                ("calibration_final_state", data.calibration_final_state),
+                ("alignment_final_state", data.alignment_final_state),
+            ):
+                f.write(f"{self._export_text(key)}: {value}\n")
             f.write(
-                "gnss_position_usable_before_start: "
+                f"{self._export_text('gnss_position_usable_before_start')}: "
                 f"{data.gnss_position_usable_before_start}\n"
             )
-            f.write(f"parachute_time_s: {data.parachute_time_s if data.parachute_time_s is not None else 'not_found'}\n")
+            parachute = (
+                data.parachute_time_s
+                if data.parachute_time_s is not None
+                else self._export_text("not_found")
+            )
+            f.write(f"{self._export_text('parachute_time_s')}: {parachute}\n")
             for w in data.warnings:
-                f.write(f"warning: {w}\n")
+                f.write(f"{self._export_text('warning')}: {w}\n")
 
-            f.write("\nmax_accel:\n")
+            f.write(f"\n{self._export_text('max_accel')}:\n")
             if max_accel is None:
-                f.write("no accel data\n")
+                f.write(self._export_text("no_accel_data") + "\n")
             else:
                 t, values, norm = max_accel
                 f.write(f"time_s: {t:.6f}\n")
@@ -971,9 +1246,9 @@ class FlightLogProcessor:
                 f.write(f"az_mps2: {values[2]:.6g}\n")
                 f.write(f"norm_mps2: {norm:.6g}\n")
 
-            f.write("\nmax_velocity:\n")
+            f.write(f"\n{self._export_text('max_velocity')}:\n")
             if max_vel is None:
-                f.write("no velocity data\n")
+                f.write(self._export_text("no_velocity_data") + "\n")
             else:
                 t, values, norm = max_vel
                 f.write(f"time_s: {t:.6f}\n")
@@ -982,24 +1257,31 @@ class FlightLogProcessor:
                 f.write(f"vz_mps: {values[2]:.6g}\n")
                 f.write(f"norm_mps: {norm:.6g}\n")
 
-            f.write("\nmax_height:\n")
+            f.write(f"\n{self._export_text('max_height')}:\n")
             if max_height is None:
-                f.write("no position data\n")
+                f.write(self._export_text("no_position_data") + "\n")
             else:
                 t, z = max_height
                 f.write(f"time_s: {t:.6f}\n")
                 f.write(f"z_m: {z:.6g}\n")
 
             packet_loss = data.packet_loss
-            f.write("\npacket_loss:\n")
-            f.write(f"expected_period_ms: {packet_loss.expected_period_ms}\n")
-            f.write(f"expected_rate_hz: {packet_loss.expected_rate_hz}\n")
-            f.write(f"received_packets: {packet_loss.received_packets}\n")
-            f.write(f"expected_packets: {packet_loss.expected_packets}\n")
-            f.write(f"lost_packets: {packet_loss.lost_packets}\n")
-            f.write(f"packet_loss_rate: {packet_loss.packet_loss_rate:.9g}\n")
-            f.write(f"packet_loss_percent: {packet_loss.packet_loss_rate * 100.0:.6g}%\n")
-            f.write(f"loss_window_end_basis: {packet_loss.loss_window_end_basis}\n")
+            f.write(f"\n{self._export_text('packet_loss')}:\n")
+            packet_loss_values = (
+                ("expected_period_ms", packet_loss.expected_period_ms),
+                ("expected_rate_hz", packet_loss.expected_rate_hz),
+                ("received_packets", packet_loss.received_packets),
+                ("expected_packets", packet_loss.expected_packets),
+                ("lost_packets", packet_loss.lost_packets),
+                ("packet_loss_rate", f"{packet_loss.packet_loss_rate:.9g}"),
+                (
+                    "packet_loss_percent",
+                    f"{packet_loss.packet_loss_rate * 100.0:.6g}%",
+                ),
+                ("loss_window_end_basis", packet_loss.loss_window_end_basis),
+            )
+            for key, value in packet_loss_values:
+                f.write(f"{self._export_text(key)}: {value}\n")
 
     def _max_norm(self, samples: list[TimedVector]) -> tuple[float, tuple[float, ...], float] | None:
         if not samples:
@@ -1025,7 +1307,16 @@ class FlightLogProcessor:
                 best = (s.time_s, z)
         return best
 
-    def _write_manifest(self, data: FlightData, path: Path, log_path: Path) -> None:
+    def _write_manifest(
+        self,
+        data: FlightData,
+        path: Path,
+        log_path: Path,
+        *,
+        export_options: ResolvedExportOptions | None = None,
+        export_errors: dict[str, str] | None = None,
+    ) -> None:
+        options = export_options or self.export_options
         manifest = {
             "source_log": str(log_path),
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1060,6 +1351,15 @@ class FlightLogProcessor:
                 "packet_loss_percent": data.packet_loss.packet_loss_rate * 100.0,
                 "loss_window_end_basis": data.packet_loss.loss_window_end_basis,
             },
+            "export": {
+                "language": options.language.value,
+                "theme": options.theme.value,
+                "filename_language_suffix": options.language_suffix,
+                "items": [
+                    item.value for item in ALL_EXPORT_ITEMS if item in options.items
+                ],
+                "partial_failures": dict(export_errors or {}),
+            },
             "warnings": data.warnings,
         }
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1072,9 +1372,37 @@ def main() -> None:
     parser.add_argument("log", type=Path, help="Path to flight JSONL log")
     parser.add_argument("--output-root", type=Path, default=Path("data"))
     parser.add_argument("--gif-fps", type=int, default=5, help="Target GIF fps when interpolation is needed. Default 5.")
+    parser.add_argument(
+        "--language",
+        choices=[language.value for language in Language],
+        default=Language.EN_US.value,
+        help="Export text language. Default en_US.",
+    )
+    parser.add_argument(
+        "--theme",
+        choices=[theme.value for theme in Theme],
+        default=Theme.LIGHT.value,
+        help="Export chart theme. Default light.",
+    )
+    parser.add_argument(
+        "--export-items",
+        nargs="+",
+        choices=[item.value for item in ALL_EXPORT_ITEMS],
+        default=[item.value for item in ALL_EXPORT_ITEMS],
+        help="One or more export items. Default: all.",
+    )
     args = parser.parse_args()
 
-    processor = FlightLogProcessor(output_root=args.output_root, gif_fps=args.gif_fps)
+    language = Language(args.language)
+    processor = FlightLogProcessor(
+        output_root=args.output_root,
+        gif_fps=args.gif_fps,
+        export_options=ResolvedExportOptions(
+            language=language,
+            theme=Theme(args.theme),
+            items=frozenset(ExportItem(item) for item in args.export_items),
+        ),
+    )
 
     def progress(done: int, total: int, msg: str) -> None:
         print(f"[{done}/{total}] {msg}")

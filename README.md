@@ -1,6 +1,6 @@
-# SS1 地面站上位机开发说明
+# SilverStar_GSHC 开发与发布说明
 
-本工程是二代飞控 SilverStar 的 PC 上位机。当前实现以
+本工程的正式应用名称为 **SilverStar_GSHC**，用于连接 SilverStar 飞控与地面站。当前实现以
 [`docs/AIR_PROTOCOL.md`](docs/AIR_PROTOCOL.md) 为唯一 AIR 协议依据，适配：
 
 ```text
@@ -15,6 +15,7 @@ PC 仍通过串口连接地面站，GSP-MIN 只负责透明转发 AIR 帧，wire
 - 自动接收并确认 `CAPABILITY`，不提供人工 Capability ACK 按钮；
 - 完整支持 `PREFLIGHT_STATE`、`PREFLIGHT_STATUS`、`SENSOR_STATUS`、`STATUS`、`ACK` 和 `FLIGHT_STATE`；
 - 按 Capability 动态提供 NONE / ONE_FACE / SIX_FACE 校准流程；
+- SIX_FACE 在 `WAIT_FACE` 和全部完成后的 `READY` 都允许点选任意单面重采，其余五面状态由飞控快照保持；
 - 显示 `CALIBRATION_DIAGNOSTIC` 的当前采集问题，但不把诊断提示误判为校准失败；
 - 支持 Alignment START / STOP / RESET，并以飞控快照为最终判据；Alignment 结束时缓存通用 Sensor Snapshot；
 - 支持 Alignment `STALE`，失效后要求用户显式重新执行初对准；
@@ -24,8 +25,10 @@ PC 仍通过串口连接地面站，GSP-MIN 只负责透明转发 AIR 帧，wire
 - 保持原有火箭模型、坐标轴、标签、颜色、默认相机、视角锁定和鼠标行为；
 - 独立串口、协议、日志和 GUI 刷新路径，避免持续接收造成 Qt 事件积压；
 - 支持简体中文 / English 运行时切换，选择由 QSettings 持久化，不需重启；
+- 支持全局浅色 / 深色主题，普通控件、弹窗、实时曲线和 OpenGL 3D 背景同步切换；
 - 实时速度/位置曲线只保留最近 10 秒，JSONL 保留整个会话；
-- 后处理生成曲线、摘要、manifest、姿态 GIF 和丢包统计；
+- 后处理使用默认全选的多选框导出数据、摘要、图表、3D 姿态/轨迹 GIF 和 manifest；
+- 导出语言可独立选择 Follow UI / 简体中文 / English，文件统一带 `_ZH` / `_EN`，图内文字也使用所选语言；
 - 模拟日志包含完整 Capability、预飞、校准、Alignment 和飞行流程。
 
 ## 2. 开发环境
@@ -58,12 +61,14 @@ protocol/
 services/
   logger.py                         有界 AsyncJsonlLogger
   i18n.py                           集中式中英文翻译与 QSettings 语言配置
+  preferences.py                    主题、导出语言和导出项偏好
   state_model.py                    FlightControllerState、EventHistory、实时窗口
 transport/
   serial_backend.py                 只负责 open/read/write/close
   protocol_worker.py                独立协议线程、有界输入队列和 UI 状态邮箱
 ui/
   main_window.py                    三页面 GUI 与共享 3D 视图
+  theme.py                          全局控件、曲线与 3D 主题配色
 processing/
   flight_log_processor.py           Profile 0 离线处理
   flight_plotter.py                 曲线与姿态 GIF
@@ -137,6 +142,7 @@ param1 = air_profile_id
 - NONE：发送 CAL_START 后等待 `calibration_ready`；
 - ONE_FACE：飞控自动推进，上位机不发送 CAL_FACE；
 - SIX_FACE：用户摆放对应面后发送 CAL_FACE。ACK OK 仅代表 accepted；只有 `CALIBRATION_FACE PASSED` 或快照中的 `completed_face_mask` 才显示完成。
+  六面全部完成进入 `READY` 后，六个面仍可单独点击重采；上位机继续发送既有 `CAL_FACE`，不新增命令，也不会自行清除其他五面的完成标记。
 
 Alignment START 在 Calibration ready 后可用。ACK OK 仅代表 accepted；`PREFLIGHT_STATUS.alignment_ready` 是最终判据，Alignment STATUS event 只提供即时提示，不能在 STALE 后独立恢复 ready。
 
@@ -155,10 +161,10 @@ START 按钮由权威预飞快照驱动，至少要求 Capability、Calibration�
 默认用户数据根目录：
 
 ```text
-C:\Users\<用户名>\Documents\SS1_host_computer_data
+C:\Users\<用户名>\Documents\SilverStar_GSHC
 ```
 
-可通过环境变量 `SS1_HOST_COMPUTER_DATA_ROOT` 或 `config/user_paths.json` 的 `data_root` 修改。
+可通过环境变量 `SILVERSTAR_GSHC_DATA_ROOT` 或 `config/user_paths.json` 的 `data_root` 修改。QSettings 使用 organization=`SilverStar`、application=`SilverStar_GSHC`。
 
 串口连接时创建 provisional session 日志；只有明确的 PC 串口断开/重连才建立新会话。Capability 广播本身不再被推测为“飞控重启”，也不会触发自动日志 rollover。
 
@@ -183,16 +189,18 @@ CAPABILITY_ACK_TX（含 Capability seq、PC cmd seq、attempt、retry）
 
 实时曲线删除 10 秒以前的数据只影响 GUI 内存，不影响 JSONL。
 
-界面语言只影响显示。内部枚举、状态值、命令名和 JSONL 字段始终使用协议定义的规范英文名称；切换语言不会重建串口/协议线程、状态模型或 3D 场景，当前事件历史也会按所选语言重新渲染。
+界面语言只影响显示。内部枚举、状态值、命令名和 JSONL 字段始终使用协议定义的规范英文名称；切换语言不会重建串口/协议线程、状态模型或 3D 场景，当前窗口、弹窗、详情框和事件历史会立即重译。主题同样由 QSettings 保存，并同步普通控件、详情框、实时曲线、3D 背景、网格和标签颜色。
 
 ## 9. 后期处理
 
 ```bat
 python -m processing.fake_log_generator --output logs\fake_flight_log.jsonl --duration 90 --seed 42
-python -m processing.flight_log_processor logs\fake_flight_log.jsonl --output-root data
+python -m processing.flight_log_processor logs\fake_flight_log.jsonl --output-root data --language en_US --theme light
 ```
 
-后处理优先读取 `AIR_PARSED`；仅在缺失时使用 Profile 0 raw fallback。没有 Capability 时不会猜测 IMU 量程。正式飞行窗口由 MISSION_START 或第一帧 FLIGHT_STATE 开始，PREFLIGHT_STATE 不混入飞行曲线。manifest 会保存 Capability、最终预飞状态、任务时长和丢包信息。
+后处理优先读取 `AIR_PARSED`；仅在缺失时使用 Profile 0 raw fallback。没有 Capability 时不会猜测 IMU 量程。正式飞行窗口由 MISSION_START 或第一帧 FLIGHT_STATE 开始，PREFLIGHT_STATE 不混入飞行曲线。manifest 会保存 Capability、最终预飞状态、任务时长、丢包、导出语言、主题、勾选项和部分失败信息。
+
+GUI 的导出项为：处理后数据 TXT、摘要 TXT、图表 PNG、姿态/轨迹 3D GIF、会话 manifest；首次打开默认全部勾选。导出语言默认 Follow UI，也可与界面语言独立选择。中文产物统一使用 `_ZH`，英文产物使用 `_EN`；PNG、GIF 及其 3D 帧同样带语言后缀，图标题、坐标轴、标注和 3D 文字按导出语言渲染。图表与 3D 背景采用当前应用主题，深浅色下均使用相应文字、网格和坐标轴颜色。单项生成失败会记录并继续其他项目。
 
 ## 10. 绿色版打包
 
@@ -200,4 +208,4 @@ python -m processing.flight_log_processor logs\fake_flight_log.jsonl --output-ro
 packaging\build_pyinstaller.bat
 ```
 
-输出为 `dist/SS1GroundStation/`。必须复制整个目录，不能只复制 exe。发布前应在源码版和打包版各验证一次串口、Capability、预飞流程、START 恢复、3D、10 秒曲线和 JSONL 后处理。
+输出为 `dist/SilverStar_GSHC/SilverStar_GSHC.exe`。必须复制整个目录，不能只复制 exe。`SilverStar_GSHC.spec` 和 `packaging/version_info.txt` 固定产物名与 Windows metadata；`installer/SilverStar_GSHC.iss` 生成 `SilverStar_GSHC_Setup_v0.0.3.exe`。发布前应在源码版和打包版各验证一次串口、Capability、预飞流程、START 恢复、主题、3D、10 秒曲线和多语言 JSONL 后处理。

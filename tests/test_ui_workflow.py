@@ -6,8 +6,9 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pyqtgraph as pg
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import QApplication
 
 from protocol.air import AirCapabilityMessage, AirSensorStatusMessage
@@ -21,6 +22,7 @@ from protocol.common import (
     AirStatusId,
 )
 from services.i18n import I18n, Language
+from services.preferences import ExportItem, ExportLanguage, Theme
 from services.state_model import (
     EventHistory,
     FlightControllerState,
@@ -78,12 +80,17 @@ class UiWorkflowTests(unittest.TestCase):
         self.window.calibration_dialog.close()
         self.window.link_details_dialog.close()
         self.window.sensor_details_dialog.close()
+        self.window.export_options_dialog.close()
         self.window.close()
         self.temporary_directory.cleanup()
 
     def test_three_pages_are_always_manually_selectable(self) -> None:
         labels = [self.window.pages.tabText(index) for index in range(self.window.pages.count())]
         self.assertEqual(labels, ["预飞行", "飞行", "后期处理"])
+        self.assertEqual(self.window.pages.objectName(), "pageTabs")
+        self.assertEqual(self.window.pages.tabBar().objectName(), "pageNavigation")
+        self.assertTrue(self.window.pages.tabBar().expanding())
+        self.assertTrue(self.window.pages.documentMode())
         for page in (
             self.window.preflight_page,
             self.window.flight_page,
@@ -91,6 +98,112 @@ class UiWorkflowTests(unittest.TestCase):
         ):
             self.window.pages.setCurrentWidget(page)
             self.assertIs(self.window.pages.currentWidget(), page)
+
+    def test_header_brand_credit_version_and_localized_labels(self) -> None:
+        self.assertEqual(self.window.windowTitle(), "SilverStar_GSHC")
+        self.assertEqual(self.window.header_bar.objectName(), "headerBar")
+        self.assertEqual(self.window.header_title.text(), "SilverStar地面站上位机")
+        self.assertEqual(self.window.lbl_language.text(), "语言")
+        self.assertEqual(self.window.lbl_theme.text(), "主题")
+        self.assertEqual(self.window.header_credit.text(), "辰星引力开发")
+        self.assertEqual(
+            self.window.header_version.text(),
+            "SilverStar_GSHC 0.0.3",
+        )
+        header_layout = self.window.header_identity_layout
+        self.assertLess(
+            header_layout.indexOf(self.window.header_version),
+            header_layout.indexOf(self.window.header_credit),
+        )
+        self.assertLess(
+            header_layout.indexOf(self.window.header_credit),
+            header_layout.indexOf(self.window.lbl_language),
+        )
+        self.assertLess(
+            header_layout.indexOf(self.window.language_combo),
+            header_layout.indexOf(self.window.lbl_theme),
+        )
+
+        english_index = self.window.language_combo.findData(Language.EN_US.value)
+        self.window.language_combo.setCurrentIndex(english_index)
+        self.application.processEvents()
+
+        self.assertEqual(self.window.windowTitle(), "SilverStar_GSHC")
+        self.assertEqual(
+            self.window.header_title.text(),
+            "SilverStar Ground Station Host Computer",
+        )
+        self.assertEqual(self.window.lbl_language.text(), "Language")
+        self.assertEqual(self.window.lbl_theme.text(), "Theme")
+        self.assertEqual(self.window.header_credit.text(), "by CXYL")
+        self.assertEqual(
+            self.window.header_version.text(),
+            "SilverStar_GSHC 0.0.3",
+        )
+
+    def test_post_process_uses_inline_progress_and_cancel_controls(self) -> None:
+        self.assertGreaterEqual(self.window.simulation_progress_bar.minimumHeight(), 36)
+        self.assertGreaterEqual(self.window.processing_progress_bar.minimumHeight(), 36)
+        self.assertFalse(self.window.btn_cancel_sim.isEnabled())
+        self.assertFalse(self.window.btn_cancel_processing.isEnabled())
+        self.assertEqual(
+            self.window.lbl_simulation_progress.text(),
+            "尚未生成模拟日志。",
+        )
+        self.assertEqual(self.window.btn_generate_sim.text(), "生成模拟日志")
+        self.assertEqual(self.window.btn_open_data_dir.text(), "打开结果目录")
+        self.assertEqual(
+            self.window.lbl_processing_progress.text(),
+            "尚未开始数据解算。",
+        )
+
+        self.window.begin_simulation_task()
+        self.window.update_simulation_progress(
+            35,
+            100,
+            "task.simulation.generating",
+        )
+        self.assertEqual(self.window.simulation_progress_bar.value(), 35)
+        self.assertTrue(self.window.btn_cancel_sim.isEnabled())
+        self.assertFalse(self.window.btn_generate_sim.isEnabled())
+        self.window.mark_simulation_cancelling()
+        self.assertFalse(self.window.btn_cancel_sim.isEnabled())
+        self.assertIn("取消并清理", self.window.lbl_simulation_progress.text())
+        self.window.finish_simulation_task(
+            "task.simulation.cancelled",
+            completed=False,
+        )
+        self.assertEqual(self.window.simulation_progress_bar.value(), 0)
+        self.assertIn("已清理", self.window.lbl_simulation_progress.text())
+
+        self.window.begin_processing_task()
+        self.window.update_processing_progress(
+            4,
+            8,
+            "task.processing.running",
+            detail="summary_ZH.txt",
+        )
+        self.assertEqual(self.window.processing_progress_bar.maximum(), 8)
+        self.assertEqual(self.window.processing_progress_bar.value(), 4)
+        self.assertIn("summary_ZH.txt", self.window.lbl_processing_progress.text())
+
+        english_index = self.window.language_combo.findData(Language.EN_US.value)
+        self.window.language_combo.setCurrentIndex(english_index)
+        self.application.processEvents()
+        self.assertEqual(self.window.btn_cancel_processing.text(), "Cancel and Clean Up")
+        self.assertEqual(self.window.btn_generate_sim.text(), "Generate Simulation Log")
+        self.assertEqual(self.window.btn_open_data_dir.text(), "Open Results Folder")
+        self.assertEqual(
+            self.window.lbl_processing_progress.text(),
+            "Processing data: summary_ZH.txt",
+        )
+        self.window.finish_processing_task(
+            "task.processing.completed",
+            completed=True,
+            path="D:/data/result",
+        )
+        self.assertEqual(self.window.processing_progress_bar.value(), 100)
+        self.assertIn("D:/data/result", self.window.lbl_processing_progress.text())
 
     def test_mission_auto_switches_once_and_does_not_steal_manual_selection(self) -> None:
         state = ready_state(generation=10)
@@ -265,6 +378,25 @@ class UiWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(dialog.face_buttons[0].text(), "Recollect X+")
         self.assertIn("click to recollect", dialog.face_buttons[0].toolTip())
+
+    def test_ready_six_face_allows_single_face_recollection(self) -> None:
+        state = ready_state()
+        selected_faces: list[int] = []
+        self.window.calibration_dialog.on_face = selected_faces.append
+        self.window.bind_runtime_model(state, EventHistory())
+        dialog = self.window.calibration_dialog
+        dialog.render(state)
+
+        self.assertEqual(state.calibration.state, int(AirCalibrationState.READY))
+        self.assertEqual(state.calibration.completed_face_mask, 0x3F)
+        self.assertTrue(all(button.isEnabled() for button in dialog.face_buttons))
+        self.assertTrue(
+            all(button.text().startswith("重新采集") for button in dialog.face_buttons)
+        )
+
+        dialog.face_buttons[4].click()
+        self.assertEqual(selected_faces, [4])
+        self.assertEqual(state.calibration.completed_face_mask, 0x3F)
 
     def test_ready_calibration_keeps_restart_entry_and_mode_selection(self) -> None:
         state = ready_state()
@@ -513,8 +645,62 @@ class UiWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.window.body_axis_items), 3)
         self.assertEqual(set(self.window.world_direction_labels), {"E", "W", "N", "S", "U"})
         self.assertEqual(self.window.body_nose_label.text, "NOSE")
+        self.assertIsNone(self.window.mesh_item.opts["shader"])
+        self.assertFalse(self.window.mesh_item.opts["computeNormals"])
+        self.assertGreater(
+            float(self.window.base_colors[:4, :3].mean(axis=1).min()),
+            0.36,
+        )
         self.assertFalse(hasattr(self.window, "accel_fs_combo"))
         self.assertFalse(hasattr(self.window, "gyro_fs_combo"))
+
+    def test_theme_switch_updates_application_plots_and_3d_background(self) -> None:
+        self.assertIs(self.window.theme, Theme.LIGHT)
+        light_3d = self.window.gl_view.opts["bgcolor"]
+        light_plot = next(iter(self.window.plot_widgets.values())).backgroundBrush().color().name()
+        light_faces = self.window.base_colors.tolist()
+
+        dark_index = self.window.theme_combo.findData(Theme.DARK.value)
+        self.window.theme_combo.setCurrentIndex(dark_index)
+        self.application.processEvents()
+
+        self.assertIs(self.window.theme, Theme.DARK)
+        self.assertEqual(self.window.preferences.theme(), Theme.DARK)
+        dark_3d = self.window.gl_view.opts["bgcolor"]
+        dark_plot = next(iter(self.window.plot_widgets.values())).backgroundBrush().color().name()
+        self.assertNotEqual(self.window.base_colors.tolist(), light_faces)
+        self.assertNotEqual(dark_3d, light_3d)
+        self.assertNotEqual(dark_plot, light_plot)
+        self.assertEqual(
+            dark_3d,
+            pg.glColor(QColor(self.window._theme_colors.base)),
+        )
+        self.assertEqual(dark_plot, self.window._theme_colors.base)
+
+    def test_export_options_default_all_checked_and_language_is_independent(self) -> None:
+        dialog = self.window.export_options_dialog
+        dialog.reload_preferences()
+        self.assertEqual(
+            dialog.language_combo.currentData(),
+            ExportLanguage.FOLLOW_UI.value,
+        )
+        self.assertTrue(
+            all(checkbox.isChecked() for checkbox in dialog.item_checkboxes.values())
+        )
+
+        self.window.language_combo.setCurrentIndex(
+            self.window.language_combo.findData(Language.EN_US.value)
+        )
+        dialog.language_combo.setCurrentIndex(
+            dialog.language_combo.findData(ExportLanguage.ZH_CN.value)
+        )
+        dialog.item_checkboxes[ExportItem.ATTITUDE_3D].setChecked(False)
+        options = dialog.resolved_options(self.window.i18n.language, self.window.theme)
+
+        self.assertIs(options.language, Language.ZH_CN)
+        self.assertEqual(options.language_suffix, "ZH")
+        self.assertNotIn(ExportItem.ATTITUDE_3D, options.items)
+        self.assertIn(ExportItem.CHARTS, options.items)
 
 
 if __name__ == "__main__":

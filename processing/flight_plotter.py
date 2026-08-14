@@ -10,8 +10,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
+from matplotlib.text import Text
 import numpy as np
 from PIL import Image
+
+from services.i18n import Language
+from services.preferences import Theme
 
 
 @dataclass
@@ -19,12 +23,144 @@ class PlotterConfig:
     gif_fps: int = 5
     gap_threshold_s: Optional[float] = None
     pos_z_is_height: bool = True
+    language: Language = Language.EN_US
+    theme: Theme = Theme.LIGHT
+    filename_suffix: str = "EN"
+
+
+@dataclass(frozen=True)
+class PlotThemeColors:
+    figure: str
+    axes: str
+    pane: str
+    text: str
+    grid: str
+    spine: str
+    accent: str
+    series: tuple[str, str, str]
+    ground: str
+    mesh_edge: str
+
+
+LIGHT_PLOT_COLORS = PlotThemeColors(
+    figure="#f4f6f8",
+    axes="#ffffff",
+    pane="#eef2f6",
+    text="#1f2933",
+    grid="#8b98a7",
+    spine="#66717f",
+    accent="#1769aa",
+    series=("#1769aa", "#087f46", "#c62828"),
+    ground="#78bce8",
+    mesh_edge="#263238",
+)
+
+
+DARK_PLOT_COLORS = PlotThemeColors(
+    figure="#181b20",
+    axes="#20242b",
+    pane="#252b33",
+    text="#e6e9ef",
+    grid="#6f7a88",
+    spine="#9ca6b3",
+    accent="#65b5ff",
+    series=("#65b5ff", "#4bd58b", "#ff7777"),
+    ground="#397da8",
+    mesh_edge="#f2f5f8",
+)
+
+
+PLOT_TEXT: dict[str, tuple[str, str]] = {
+    "acceleration": ("加速度", "Acceleration"),
+    "angular_rate": ("角速度", "Angular Rate"),
+    "euler_angle": ("四元数解算欧拉角", "Euler Angles from Quaternion"),
+    "velocity": ("速度", "Velocity"),
+    "position": ("位置", "Position"),
+    "roll": ("横滚", "Roll"),
+    "pitch": ("俯仰", "Pitch"),
+    "yaw": ("偏航", "Yaw"),
+    "east": ("东向", "East"),
+    "north": ("北向", "North"),
+    "up": ("天向", "Up"),
+    "time_axis": ("任务时间 / s", "Mission Time / s"),
+    "no_data": ("无数据", "NO DATA"),
+    "parachute": ("开伞", "PARACHUTE"),
+    "link_quality": ("链路质量", "Link Quality"),
+    "packet_loss": ("FLIGHT_STATE 每秒丢包数", "FLIGHT_STATE Packet Loss per Second"),
+    "packet_loss_axis": ("该秒丢包数", "Packets Lost in Second"),
+    "attitude": ("姿态", "Attitude"),
+    "trajectory": ("三维轨迹", "3D Trajectory"),
+    "rising": ("上升段", "Rising"),
+    "falling": ("开伞后", "After Parachute"),
+    "time_value": ("时间 = {time:.2f} s", "Time = {time:.2f} s"),
+    "axis_acceleration": ("加速度 / m/s²", "Acceleration / m/s²"),
+    "axis_angular_rate": ("角速度 / rad/s", "Angular Rate / rad/s"),
+    "axis_angle": ("角度 / rad", "Angle / rad"),
+    "axis_velocity": ("速度 / m/s", "Velocity / m/s"),
+    "axis_position": ("位置 / m", "Position / m"),
+}
 
 
 class FlightPlotter:
     def __init__(self, config: PlotterConfig | None = None) -> None:
         self.config = config or PlotterConfig()
         self.config.gif_fps = max(1, min(30, int(self.config.gif_fps)))
+        self.colors = (
+            DARK_PLOT_COLORS
+            if self.config.theme is Theme.DARK
+            else LIGHT_PLOT_COLORS
+        )
+        self._font = (
+            self._find_cjk_font()
+            if self.config.language is Language.ZH_CN
+            else None
+        )
+
+    def text(self, key: str, **params: object) -> str:
+        values = PLOT_TEXT.get(key)
+        if values is None:
+            return key
+        template = values[0] if self.config.language is Language.ZH_CN else values[1]
+        return template.format(**params)
+
+    def _style_figure(self, fig) -> None:
+        colors = self.colors
+        fig.patch.set_facecolor(colors.figure)
+        for axis in fig.axes:
+            axis.set_facecolor(colors.axes)
+            axis.tick_params(colors=colors.text)
+            axis.xaxis.label.set_color(colors.text)
+            axis.yaxis.label.set_color(colors.text)
+            axis.title.set_color(colors.text)
+            for spine in axis.spines.values():
+                spine.set_color(colors.spine)
+            if hasattr(axis, "zaxis"):
+                axis.zaxis.label.set_color(colors.text)
+                for coordinate_axis in (axis.xaxis, axis.yaxis, axis.zaxis):
+                    coordinate_axis.pane.set_facecolor(colors.pane)
+                    coordinate_axis.pane.set_edgecolor(colors.spine)
+                    coordinate_axis._axinfo["grid"]["color"] = colors.grid
+            legend = axis.get_legend()
+            if legend is not None:
+                legend.get_frame().set_facecolor(colors.axes)
+                legend.get_frame().set_edgecolor(colors.spine)
+                for label in legend.get_texts():
+                    label.set_color(colors.text)
+        for text in fig.findobj(match=Text):
+            text.set_color(colors.text)
+            if self._font is not None:
+                text.set_fontproperties(self._font)
+
+    def _save_figure(self, fig, output_path: Path, *, dpi: int | None = None) -> None:
+        self._style_figure(fig)
+        fig.tight_layout()
+        fig.savefig(
+            output_path,
+            dpi=dpi,
+            facecolor=fig.get_facecolor(),
+            edgecolor="none",
+        )
+        plt.close(fig)
 
     def estimate_gif_frame_count(self, data) -> int:
         frame_times, _mode = self._build_gif_frame_times(data)
@@ -45,13 +181,18 @@ class FlightPlotter:
         if not samples:
             for ax, label in zip(axes, labels):
                 ax.set_title(label)
-                ax.set_xlabel("t / s")
+                ax.set_xlabel(self.text("time_axis"))
                 ax.set_ylabel(ylabel)
-                ax.grid(True)
-                ax.text(0.5, 0.5, "NO DATA", ha="center", va="center", transform=ax.transAxes)
-            fig.tight_layout()
-            fig.savefig(output_path, dpi=160)
-            plt.close(fig)
+                ax.grid(True, color=self.colors.grid, alpha=0.35)
+                ax.text(
+                    0.5,
+                    0.5,
+                    self.text("no_data"),
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+            self._save_figure(fig, output_path, dpi=160)
             return
 
         t = np.array([s.time_s for s in samples], dtype=float)
@@ -59,22 +200,32 @@ class FlightPlotter:
 
         for i, (ax, label) in enumerate(zip(axes, labels)):
             tt, yy = self._insert_nan_gaps(t, y[:, i])
-            ax.plot(tt, yy, linewidth=1.5)
+            ax.plot(tt, yy, linewidth=1.5, color=self.colors.series[i])
             if parachute_time_s is not None:
-                ax.axvline(parachute_time_s, linestyle="--", linewidth=1.0)
-                ax.text(parachute_time_s, 0.98, "CHUTE", transform=ax.get_xaxis_transform(), ha="right", va="top")
+                ax.axvline(
+                    parachute_time_s,
+                    linestyle="--",
+                    linewidth=1.0,
+                    color="#f39c12",
+                )
+                ax.text(
+                    parachute_time_s,
+                    0.98,
+                    self.text("parachute"),
+                    transform=ax.get_xaxis_transform(),
+                    ha="right",
+                    va="top",
+                )
             ax.set_title(label)
-            ax.set_xlabel("t / s")
+            ax.set_xlabel(self.text("time_axis"))
             ax.set_ylabel(ylabel)
-            ax.grid(True)
+            ax.grid(True, color=self.colors.grid, alpha=0.35)
 
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=160)
-        plt.close(fig)
+        self._save_figure(fig, output_path, dpi=160)
 
     def plot_link_quality(self, output_path: Path, link_samples, parachute_time_s: float | None = None) -> None:
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharex=False)
-        fig.suptitle("LINK QUALITY")
+        fig.suptitle(self.text("link_quality"))
 
         if not link_samples:
             for ax, title, ylabel in [
@@ -82,56 +233,68 @@ class FlightPlotter:
                 (axes[1], "SNR", "SNR / dB"),
             ]:
                 ax.set_title(title)
-                ax.set_xlabel("t / s")
+                ax.set_xlabel(self.text("time_axis"))
                 ax.set_ylabel(ylabel)
-                ax.grid(True)
-                ax.text(0.5, 0.5, "NO DATA", ha="center", va="center", transform=ax.transAxes)
-            fig.tight_layout()
-            fig.savefig(output_path, dpi=160)
-            plt.close(fig)
+                ax.grid(True, color=self.colors.grid, alpha=0.35)
+                ax.text(
+                    0.5,
+                    0.5,
+                    self.text("no_data"),
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+            self._save_figure(fig, output_path, dpi=160)
             return
 
         t = np.array([s.time_s for s in link_samples], dtype=float)
         rssi = np.array([s.rssi_dbm for s in link_samples], dtype=float)
         snr = np.array([s.snr_db for s in link_samples], dtype=float)
 
-        for ax, values, title, ylabel in [
+        for index, (ax, values, title, ylabel) in enumerate([
             (axes[0], rssi, "RSSI", "RSSI / dBm"),
             (axes[1], snr, "SNR", "SNR / dB"),
-        ]:
+        ]):
             tt, yy = self._insert_nan_gaps(t, values)
-            ax.plot(tt, yy, linewidth=1.5)
+            ax.plot(tt, yy, linewidth=1.5, color=self.colors.series[index])
             if parachute_time_s is not None:
-                ax.axvline(parachute_time_s, linestyle="--", linewidth=1.0)
-                ax.text(parachute_time_s, 0.98, "CHUTE", transform=ax.get_xaxis_transform(), ha="right", va="top")
+                ax.axvline(
+                    parachute_time_s,
+                    linestyle="--",
+                    linewidth=1.0,
+                    color="#f39c12",
+                )
+                ax.text(
+                    parachute_time_s,
+                    0.98,
+                    self.text("parachute"),
+                    transform=ax.get_xaxis_transform(),
+                    ha="right",
+                    va="top",
+                )
             ax.set_title(title)
-            ax.set_xlabel("t / s")
+            ax.set_xlabel(self.text("time_axis"))
             ax.set_ylabel(ylabel)
-            ax.grid(True)
+            ax.grid(True, color=self.colors.grid, alpha=0.35)
 
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=160)
-        plt.close(fig)
+        self._save_figure(fig, output_path, dpi=160)
 
     def plot_packet_loss_per_second(self, output_path: Path, loss_per_second: list[tuple[int, int]]) -> None:
         fig, ax = plt.subplots(figsize=(10, 4.5))
         seconds = [second for second, _lost in loss_per_second]
         lost_counts = [lost for _second, lost in loss_per_second]
-        cjk_font = self._find_cjk_font()
 
-        ax.bar(seconds, lost_counts, width=0.8)
-        ax.set_title("FLIGHT_STATE Packet Loss per Second")
-        ax.set_xlabel("任务时间 / s", fontproperties=cjk_font)
-        ax.set_ylabel("该秒丢包数", fontproperties=cjk_font)
+        ax.bar(seconds, lost_counts, width=0.8, color=self.colors.accent)
+        ax.set_title(self.text("packet_loss"))
+        ax.set_xlabel(self.text("time_axis"))
+        ax.set_ylabel(self.text("packet_loss_axis"))
         ax.set_ylim(0, 5)
         ax.set_yticks(range(6))
         if seconds:
             ax.set_xlim(min(seconds) - 0.5, max(seconds) + 0.5)
-        ax.grid(True, axis="y", alpha=0.3)
+        ax.grid(True, axis="y", color=self.colors.grid, alpha=0.35)
 
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=160)
-        plt.close(fig)
+        self._save_figure(fig, output_path, dpi=160)
 
     def _find_cjk_font(self) -> font_manager.FontProperties | None:
         for family in ("Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "SimHei", "SimSun"):
@@ -162,7 +325,9 @@ class FlightPlotter:
             last_quat = tuple(float(v) for v in q[:4])
             last_pos = tuple(float(v) for v in p[:3])
 
-            path = frames_dir / f"frame_{idx:04d}.png"
+            path = frames_dir / (
+                f"frame_{idx:04d}_{self.config.filename_suffix}.png"
+            )
             self._draw_gif_frame(path, data, float(t), last_quat, last_pos, motion_limits)
             frame_paths.append(path)
             yield path
@@ -186,7 +351,9 @@ class FlightPlotter:
         extras: list[Path] = []
         start_idx = len(frame_paths)
         for i in range(extra_count):
-            dst = frames_dir / f"frame_{start_idx + i:04d}.png"
+            dst = frames_dir / (
+                f"frame_{start_idx + i:04d}_{self.config.filename_suffix}.png"
+            )
             shutil.copy2(src, dst)
             extras.append(dst)
         return extras
@@ -255,18 +422,28 @@ class FlightPlotter:
         phase = self._phase_text(data, t)
 
         self._draw_rocket_attitude(ax_att, quat)
-        ax_att.set_title(f"Posture - {phase}")
-        ax_att.text2D(0.50, 0.95, f"t = {t:.2f} s", transform=ax_att.transAxes, ha="center", va="top", fontsize=11)
+        ax_att.set_title(f"{self.text('attitude')} - {phase}")
+        ax_att.text2D(
+            0.50,
+            0.95,
+            self.text("time_value", time=t),
+            transform=ax_att.transAxes,
+            ha="center",
+            va="top",
+            fontsize=11,
+        )
 
         self._draw_motion(ax_pos, data, t, pos, motion_limits)
-        ax_pos.set_title(f"Trajectory - {phase}")
+        ax_pos.set_title(f"{self.text('trajectory')} - {phase}")
 
-        fig.tight_layout()
-        fig.savefig(path)
-        plt.close(fig)
+        self._save_figure(fig, path)
 
     def _phase_text(self, data, t: float) -> str:
-        return "FALLING" if data.parachute_time_s is not None and t >= data.parachute_time_s else "RISING"
+        return self.text(
+            "falling"
+            if data.parachute_time_s is not None and t >= data.parachute_time_s
+            else "rising"
+        )
 
     def _draw_rocket_attitude(self, ax, quat: tuple[float, float, float, float]) -> None:
         verts = np.array(
@@ -288,7 +465,13 @@ class FlightPlotter:
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
         polys = [[rotated[i] for i in face] for face in faces]
-        coll = Poly3DCollection(polys, facecolors=face_colors, edgecolors="black", linewidths=0.6, alpha=0.95)
+        coll = Poly3DCollection(
+            polys,
+            facecolors=face_colors,
+            edgecolors=self.colors.mesh_edge,
+            linewidths=0.6,
+            alpha=0.95,
+        )
         ax.add_collection3d(coll)
 
         lim = 2.0
@@ -323,7 +506,12 @@ class FlightPlotter:
             (xlim[1], ylim[1], 0.0),
             (xlim[0], ylim[1], 0.0),
         ]]
-        plane_coll = Poly3DCollection(plane, facecolors="#87cefa", edgecolors="none", alpha=0.20)
+        plane_coll = Poly3DCollection(
+            plane,
+            facecolors=self.colors.ground,
+            edgecolors="none",
+            alpha=0.25,
+        )
         ax.add_collection3d(plane_coll)
 
         if before_points:
@@ -344,14 +532,14 @@ class FlightPlotter:
         if chute_point is not None and parachute_t is not None and t >= parachute_t:
             cx, cy, cz = chute_point
             ax.scatter([cx], [cy], [cz], s=45, color="orange", marker="^")
-            ax.text(cx, cy, cz, " CHUTE", fontsize=9)
+            ax.text(cx, cy, cz, f" {self.text('parachute')}", fontsize=9)
 
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
         ax.set_zlim(*zlim)
-        ax.set_xlabel("X / m")
-        ax.set_ylabel("Y / m")
-        ax.set_zlabel("Z / m")
+        ax.set_xlabel(f"{self.text('east')} / m")
+        ax.set_ylabel(f"{self.text('north')} / m")
+        ax.set_zlabel(f"{self.text('up')} / m")
         ax.view_init(elev=20, azim=35)
 
     def _get_chute_point(self, data):

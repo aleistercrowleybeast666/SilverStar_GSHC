@@ -557,6 +557,34 @@ class PreflightStateTests(unittest.TestCase):
 
 
 class CalibrationPendingRecoveryTests(unittest.TestCase):
+    def test_ready_six_face_sends_existing_cal_face_with_completed_mask_baseline(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+
+        controller.send_cal_face(4)
+
+        pending = controller._find_pending_air_cmd(int(AirCmdId.CAL_FACE))
+        self.assertIsNotNone(pending)
+        assert pending is not None
+        self.assertEqual(pending.param0, 4)
+        self.assertEqual(pending.baseline_completed_face_mask, 0x3F)
+        self.assertEqual(controller.state.calibration.completed_face_mask, 0x3F)
+        self.assertEqual(len(controller.worker.sent), 1)
+
+    def test_cal_face_is_rejected_outside_wait_face_or_ready(self) -> None:
+        controller = make_controller()
+        configure_ready(controller)
+        controller.state.calibration.state = int(AirCalibrationState.COLLECTING)
+
+        controller.send_cal_face(2)
+
+        self.assertIsNone(controller._find_pending_air_cmd(int(AirCmdId.CAL_FACE)))
+        self.assertFalse(controller.worker.sent)
+        self.assertEqual(
+            controller.state.radio_message.key,
+            "radio.calibration_face_unavailable",
+        )
+
     def test_face_event_recovers_lost_ack_without_marking_failure(self) -> None:
         controller = make_controller()
         configure_ready(controller)
