@@ -134,7 +134,18 @@ bit2 = SIX_FACE
 bit3..7 = reserved
 ```
 
-当前为 `0x07`。
+该字段是 build 能力，兼容 FCCG 0.0.10 的动态组合，不表示当前校准模式或校准完成：
+
+| mask | build 能力 | GSHC 用户可启动采样流程 |
+|---|---|---|
+| `0x01` | NONE / identity correction | 无 |
+| `0x03` | NONE + ONE_FACE | ONE_FACE |
+| `0x05` | NONE + SIX_FACE | SIX_FACE |
+| `0x07` | NONE + ONE_FACE + SIX_FACE | ONE_FACE、SIX_FACE |
+
+NONE bit 在 parser/raw/日志中保留。GSHC 不提供或发送 `CAL_START(NONE)`；0x01 工程禁用开始采样入口，仍保留既有 `CAL_RESET`。未知 bit3..7 不导致 Capability 拒绝，只在诊断中显示，已知位正常使用。
+
+成功握手后按最新接受的 mask 重建操作；已握手会话中的迟到 Capability 沿用既有诊断策略，不自动重建会话。切换飞控需 PC 断开/重连。此兼容改动不更改 Profile、帧长度、布局、字节序、CRC、命令 ID 或握手延时，也不增加查询校准模式命令或 `.ssdecoder` 依赖。
 
 ### 5.3 sensor_summary_flags
 
@@ -236,6 +247,8 @@ Alignment：0=`IDLE`、1=`COLLECTING`、2=`CHECKING`、3=`READY`、4=`FAILED`、
 | 5 | `calibration_ready` |
 | 6 | `alignment_ready` |
 | 7 | reserved |
+
+Calibration current mode/state/calibration_ready 来自本帧或现有 Calibration STATUS，不能由 Capability mask 推断。NONE + ready=1 表示有效单位校正（未执行单面/六面采样校准）；NONE + ready=0 仍表示未就绪，上位机不自动发送 CAL_START 或 ALIGN_START。
 
 GNSS 保持独立 dynamic status，因为它可能动态获得/失去定位，是任务中的特殊 navigation measurement。
 
@@ -636,6 +649,8 @@ Alignment sensor snapshot 中的 GNSS 状态只表示 Alignment 完成时的设�
 | `0x0C` | `ALIGN_STOP` | `0x414C4947` | 0 | 0 |
 | `0x0D` | `ALIGN_RESET` | `0x414C4947` | 0 | 0 |
 
+`CAL_START` wire mode 编码保持不变；GSHC 发送前必须在 Controller 校验握手完成、mode 为 ONE_FACE/SIX_FACE 且对应 Capability bit 已置位。通用入口与 retry 同样执行该门禁。`CAPABILITY_ACK` 继续使用最新 Capability seq 与 air_profile_id。`CAL_RESET` 和 `ALIGN_START` 仍使用上表原始字节。
+
 `0x06` undefined。
 
 AIR V0 不定义 SENSOR_STATUS_REQUEST / DEVICE_INFO_REQUEST。
@@ -671,6 +686,8 @@ AIR V0 不定义 SENSOR_STATUS_REQUEST / DEVICE_INFO_REQUEST。
 | `0x16` | `PREPARE_FAILED` |
 
 ---
+
+CAL_START / ALIGN_START 的 ACK OK 只代表命令被接受。Calibration 完成由后续 state/ready 确认；Alignment ready 保持由 PREFLIGHT_STATUS 确认。CAL_START BAD_PARAM 表示 build 不支持或参数错误，不自动回退其他模式；BAD_STATE/BUSY 不意味着链路断开。普通命令 ACK timeout 使用既有有界 retry，结束 pending 后不清除 Capability。
 
 ## 26. START dependency
 

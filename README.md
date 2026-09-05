@@ -14,7 +14,7 @@ PC 仍通过串口连接地面站，GSP-MIN 只负责透明转发 AIR 帧，wire
 
 - 自动接收并确认 `CAPABILITY`，不提供人工 Capability ACK 按钮；
 - 完整支持 `PREFLIGHT_STATE`、`PREFLIGHT_STATUS`、`SENSOR_STATUS`、`STATUS`、`ACK` 和 `FLIGHT_STATE`；
-- 按 Capability 动态提供 NONE / ONE_FACE / SIX_FACE 校准流程；
+- 兼容 FCCG 0.0.10 动态校准能力：按 Capability 提供 ONE_FACE / SIX_FACE 采样流程，NONE 表示单位校正；
 - SIX_FACE 在 `WAIT_FACE` 和全部完成后的 `READY` 都允许点选任意单面重采，其余五面状态由飞控快照保持；
 - 显示 `CALIBRATION_DIAGNOSTIC` 的当前采集问题，但不把诊断提示误判为校准失败；
 - 支持 Alignment START / STOP / RESET，并以飞控快照为最终判据；Alignment 结束时缓存通用 Sensor Snapshot；
@@ -137,12 +137,26 @@ param1 = air_profile_id
 
 ## 7. Calibration / Alignment / START
 
-校准模式列表来自 `calibration_mode_mask`：
+可启动的采样校准列表来自本次握手确认的 `calibration_mode_mask`，不会从 mask 推断当前模式或完成状态：
 
-- NONE：发送 CAL_START 后等待 `calibration_ready`；
+| mask | Start Calibration 可选项 |
+|---|---|
+| `0x01` | 无；显示“本工程不执行采样校准，使用单位校正（NONE）”，禁用开始按钮 |
+| `0x03` | ONE_FACE |
+| `0x05` | SIX_FACE |
+| `0x07` | ONE_FACE、SIX_FACE |
+
+未知高位保留并在链路详情中显示，已知位照常使用。每次断开/重连及成功握手刷新校准控件，包括隐藏的对话框；不复用上一飞控的模式。重置校准在预飞面板与原对话框中均保留，使用既有 `CAL_RESET`。
+
+NONE 不属于用户采样操作，GSHC 永不发送 `CAL_START(NONE)`。当前模式由 `PREFLIGHT_STATUS` / Calibration STATUS 给出；NONE 就绪时显示“单位校正（未执行单面/六面采样校准）”，ready=0 时仍保留飞控的真实 state/ready，不自动推进。
+
 - ONE_FACE：飞控自动推进，上位机不发送 CAL_FACE；
 - SIX_FACE：用户摆放对应面后发送 CAL_FACE。ACK OK 仅代表 accepted；只有 `CALIBRATION_FACE PASSED` 或快照中的 `completed_face_mask` 才显示完成。
   六面全部完成进入 `READY` 后，六个面仍可单独点击重采；上位机继续发送既有 `CAL_FACE`，不新增命令，也不会自行清除其他五面的完成标记。
+
+Controller 在 CAL_START 的公共入口、通用命令入口和每次重试发送前核对：Capability 握手完成、mode 为 ONE_FACE/SIX_FACE、对应 bit 已置位；本地拒绝不生成 TX。`CAL_START ACK OK` 仅表示接受，完成等待后续状态；`BAD_PARAM` 提示 build 不支持或参数错误，不自动尝试其他模式。`BAD_STATE` / `BUSY` 不视为断链；ACK 超时保持现有 800 ms、最多 3 次重试，保留 Capability。
+
+详细操作见 [校准用户说明](docs/CALIBRATION_USER_GUIDE.md)，自动验证与 SS0.5 实机检查见 [验证记录](tests/validation/README.md)。
 
 Alignment START 在 Calibration ready 后可用。ACK OK 仅代表 accepted；`PREFLIGHT_STATUS.alignment_ready` 是最终判据，Alignment STATUS event 只提供即时提示，不能在 STALE 后独立恢复 ready。
 
@@ -183,7 +197,7 @@ FLIGHT_STATE
 CAPABILITY_ACK_TX（含 Capability seq、PC cmd seq、attempt、retry）
 ```
 
-预飞页的“飞控 AIR 链路”只显示未发现飞控、等待握手、握手中、已连接、协议不兼容或链路异常等短状态。“详情”对话框集中显示 Capability RX、PC→GS AIR_TX 请求、串口实际写入、GSP AIR_TX ACK、地面站 TX/RX/CRC、AIR ACK、PREFLIGHT_STATUS 恢复、接收积压和 RSSI/SNR，避免把“PC 已连地面站串口”误认为“飞控已握手”。周期刷新仅在内容变化时改写文本，并保留用户滚动位置和文字选择；用户原本位于底部时继续跟随新底部。
+预飞页的“飞控 AIR 链路”只显示未发现飞控、等待握手、握手中、已连接、协议不兼容或链路异常等短状态。“详情”对话框集中显示 Capability RX、PC→GS AIR_TX 请求、串口实际写入、GSP AIR_TX ACK、地面站 TX/RX/CRC、AIR ACK、PREFLIGHT_STATUS 恢复、接收积压和 RSSI/SNR，避免把“PC 已连地面站串口”误认为“飞控已握手”。同时显示未知校准能力位、Capability/PREFLIGHT_STATUS 接收计数、最近 AIR 命令反馈、AIR 下行和预飞快照距今时间；即使 GS 状态仍在更新，也能看到飞控下行是否停滞。周期刷新仅在内容变化时改写文本，并保留用户滚动位置和文字选择；用户原本位于底部时继续跟随新底部。
 
 完整 Event History 位于预飞页，按时间从旧到新排列并自动滚动到底部；GUI 只保留最近 200 条。飞行页显示 Mission State，只有 MISSION_START、LAUNCH、PARACHUTE_DEPLOY、LANDING 等权威事件才推进对应阶段。首帧 FLIGHT_STATE 最多回退显示 Mission Active，不会凭高度或速度臆造发射、开伞事件。
 

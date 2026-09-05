@@ -12,6 +12,7 @@ from protocol.air import AirCapabilityMessage, AirSensorStatusMessage
 from protocol.common import (
     AirAckResult,
     AirAlignmentState,
+    AirCalibrationMode,
     AirCommandPolicy,
     air_sensor_sort_key,
     enum_name,
@@ -333,6 +334,12 @@ class MissionPresentationSnapshot:
     parachute_deployed: bool = False
 
 
+class CalibrationStartResult(str, Enum):
+    ALLOWED = "ALLOWED"
+    HANDSHAKE_REQUIRED = "HANDSHAKE_REQUIRED"
+    UNSUPPORTED_MODE = "UNSUPPORTED_MODE"
+
+
 class HandshakeState(str, Enum):
     WAITING = "WAITING"
     HANDSHAKING = "HANDSHAKING"
@@ -345,6 +352,10 @@ class HandshakeDiagnostics:
     """Latest values and counters only; never stores an unbounded history."""
 
     handshake_state: HandshakeState = HandshakeState.WAITING
+    capability_rx: int = 0
+    preflight_status_rx: int = 0
+    last_air_rx_monotonic_ns: int | None = None
+    last_preflight_status_rx_monotonic_ns: int | None = None
     last_capability_seq: int | None = None
     accepted_capability_seq: int | None = None
     last_capability_rx_time: float | None = None
@@ -536,6 +547,32 @@ class FlightControllerState:
     def preflight_command_entry_allowed(self) -> bool:
         return bool(self.air_command_link_allowed() and not self.mission_started)
 
+    def sampling_calibration_modes(self) -> tuple[AirCalibrationMode, ...]:
+        """Supported user sampling flows; independent of calibration readiness."""
+        capability = self.capability
+        if (
+            not self.capability_acked
+            or capability is None
+            or not capability.profile_supported
+        ):
+            return ()
+        return tuple(
+            mode
+            for mode in (AirCalibrationMode.ONE_FACE, AirCalibrationMode.SIX_FACE)
+            if capability.calibration_mode_mask & (1 << mode)
+        )
+
+    def check_calibration_start(self, mode: int) -> CalibrationStartResult:
+        if (
+            not self.capability_acked
+            or self.capability is None
+            or not self.capability.profile_supported
+        ):
+            return CalibrationStartResult.HANDSHAKE_REQUIRED
+        if mode not in self.sampling_calibration_modes():
+            return CalibrationStartResult.UNSUPPORTED_MODE
+        return CalibrationStartResult.ALLOWED
+
     def start_transaction_pending(self) -> bool:
         return self.pending_command_name == "START_MISSION"
 
@@ -584,6 +621,7 @@ __all__ = [
     "AlignmentSensorSnapshot",
     "AlignmentSensorSnapshotCache",
     "CalibrationSnapshot",
+    "CalibrationStartResult",
     "EventHistory",
     "FlightControllerState",
     "FlightEvent",

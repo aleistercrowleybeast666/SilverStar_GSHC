@@ -181,7 +181,14 @@ ZH_CN: dict[str, str] = {
     "cal.wait_status": "等待 Capability / PREFLIGHT_STATUS",
     "cal.guidance.one_face": "等待飞控自动采集；上位机不会发送 CAL_FACE。",
     "cal.guidance.six_face": "摆到对应面并保持静止，再点击该面的采集按钮。",
-    "cal.guidance.none": "已选择 NONE；最终完成仍以 calibration_ready 为准。",
+    "cal.guidance.none": "使用单位校正；是否就绪以飞控上报为准。",
+    "cal.identity": "单位校正（未执行单面/六面采样校准）",
+    "cal.identity_only": "本工程不执行采样校准，使用单位校正（NONE）",
+    "cal.no_sampling_modes": "本工程未声明已知的采样校准流程",
+    "cal.wait_capability": "等待 Capability 握手确认可用校准流程",
+    "cal.sampling_modes": "本工程支持的采样校准：{modes}",
+    "radio.calibration_handshake_required": "Capability 握手未完成，未发送 CAL_START",
+    "radio.calibration_bad_param": "CAL_START 被拒绝（BAD_PARAM）：本工程不支持该模式或参数错误；请核对最新 Capability，不会自动尝试其他模式。",
     "cal.guidance.select": "请选择 Capability 声明支持的校准模式。",
     "cal.status": "模式={mode}　状态={state}　当前面={face}　就绪={ready}\n{guidance}",
     "plot.velocity_e": "东向速度（m/s）",
@@ -396,7 +403,14 @@ EN_US: dict[str, str] = {
     "cal.wait_status": "Waiting for Capability / PREFLIGHT_STATUS",
     "cal.guidance.one_face": "Wait for automatic flight-controller collection; the PC will not send CAL_FACE.",
     "cal.guidance.six_face": "Place the unit on the requested face, keep it still, then click that face.",
-    "cal.guidance.none": "NONE is selected; final completion still requires calibration_ready.",
+    "cal.guidance.none": "Identity correction is in use; readiness comes from the flight controller.",
+    "cal.identity": "Identity correction (no one-face/six-face sampling calibration)",
+    "cal.identity_only": "This build performs no sampling calibration; identity correction (NONE) is used",
+    "cal.no_sampling_modes": "This build declares no known sampling calibration flow",
+    "cal.wait_capability": "Waiting for Capability handshake to confirm calibration flows",
+    "cal.sampling_modes": "Sampling calibration supported by this build: {modes}",
+    "radio.calibration_handshake_required": "Capability handshake is incomplete; CAL_START was not sent",
+    "radio.calibration_bad_param": "CAL_START rejected (BAD_PARAM): this build does not support the mode or the parameters are invalid; check the latest Capability. No other mode will be tried automatically.",
     "cal.guidance.select": "Select a calibration mode declared by Capability.",
     "cal.status": "Mode={mode}  State={state}  Current={face}  Ready={ready}\n{guidance}",
     "plot.velocity_e": "Velocity E (m/s)",
@@ -521,8 +535,10 @@ ZH_CN.update(
         "link_details.body": "Capability / AIR 握手\n"
         "Profile / IMU 量程：{profile} / {accel} g / {gyro} dps\n"
         "校准模式掩码 / 传感器汇总标志：{calibration_mask} / {sensor_flags}\n"
+        "未知校准能力位（仅诊断）：{unknown_calibration_bits}\n"
         "命令策略：{policy}\n"
         "握手状态：{handshake_state}\n"
+        "Capability RX：{capability_rx}\n"
         "最新 Capability seq：{cap_seq}\n"
         "已接受 Capability seq：{accepted_cap_seq}\n"
         "Capability ACK CMD seq：{cmd_seq}\n"
@@ -532,6 +548,9 @@ ZH_CN.update(
         "GSP ACK 成功 / 失败：{gsp_ok} / {gsp_fail}\n"
         "最近 GSP ACK：{gsp_result}\n"
         "最近 AIR ACK / 接收数：{air_result} / {air_ack_rx}\n"
+        "最近 AIR 命令反馈：{last_air_command}\n"
+        "距最近 AIR 下行：{air_rx_age}\n"
+        "PREFLIGHT_STATUS RX / 距最近快照：{preflight_status_rx} / {preflight_status_age}\n"
         "PREFLIGHT_STATUS capability_acked: {pstatus}\n"
         "ACK 来源 AIR / PREFLIGHT_STATUS：{by_air_ack} / {by_pstatus}\n"
         "重复或过期 Capability：{duplicates}\n"
@@ -635,8 +654,10 @@ EN_US.update(
         "link_details.body": "Capability / AIR Handshake\n"
         "Profile / IMU scales: {profile} / {accel} g / {gyro} dps\n"
         "Calibration mode mask / sensor summary flags: {calibration_mask} / {sensor_flags}\n"
+        "Unknown calibration capability bits (diagnostic only): {unknown_calibration_bits}\n"
         "Command policy: {policy}\n"
         "Handshake state: {handshake_state}\n"
+        "Capability RX: {capability_rx}\n"
         "Latest Capability seq: {cap_seq}\n"
         "Accepted Capability seq: {accepted_cap_seq}\n"
         "Capability ACK CMD seq: {cmd_seq}\n"
@@ -646,6 +667,9 @@ EN_US.update(
         "GSP ACK OK / FAIL: {gsp_ok} / {gsp_fail}\n"
         "Last GSP ACK: {gsp_result}\n"
         "Last AIR ACK / count: {air_result} / {air_ack_rx}\n"
+        "Last AIR command feedback: {last_air_command}\n"
+        "Last AIR downlink age: {air_rx_age}\n"
+        "PREFLIGHT_STATUS RX / last snapshot age: {preflight_status_rx} / {preflight_status_age}\n"
         "PREFLIGHT_STATUS capability_acked: {pstatus}\n"
         "ACK source AIR / PREFLIGHT_STATUS: {by_air_ack} / {by_pstatus}\n"
         "Duplicate or stale Capability: {duplicates}\n"
@@ -832,7 +856,7 @@ _ENUM_KEYS: dict[str, dict[str, tuple[str, str]]] = {
         "FAILED": ("失败", "Failed"),
     },
     "calibration_mode": {
-        "NONE": ("无需实物校准", "None"),
+        "NONE": ("单位校正（NONE）", "Identity Correction (NONE)"),
         "ONE_FACE": ("单面校准", "One-face"),
         "SIX_FACE": ("六面校准", "Six-face"),
         "NOT_SELECTED": ("未选择", "Not Selected"),

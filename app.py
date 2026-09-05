@@ -63,6 +63,7 @@ from services.i18n import EnumParam, I18n
 from services.logger import AsyncJsonlLogger
 from services.preferences import ResolvedExportOptions
 from services.state_model import (
+    CalibrationStartResult,
     EventHistory,
     FlightControllerState,
     FlightEvent,
@@ -1383,6 +1384,30 @@ class Controller(QObject):
         self.air_seq = (self.air_seq + 1) & 0xFF
         return value
 
+    def _cal_start_allowed(self, mode: int) -> bool:
+        result = self.state.check_calibration_start(mode)
+        if result is CalibrationStartResult.ALLOWED:
+            return True
+        self._set_radio_message(
+            "radio.calibration_handshake_required"
+            if result is CalibrationStartResult.HANDSHAKE_REQUIRED
+            else "radio.calibration_mode_unsupported"
+        )
+        self._log(
+            {
+                "dir": "LOCAL",
+                "layer": "AIR_COMMAND_TRANSACTION",
+                "kind": "CAL_START_LOCAL_REJECTED",
+                "mode": mode,
+                "reason": result.value,
+                "calibration_mode_mask": (
+                    None if self.state.capability is None
+                    else self.state.capability.calibration_mode_mask
+                ),
+            }
+        )
+        return False
+
     def _send_air_cmd(
         self,
         cmd_id: int,
@@ -1390,6 +1415,8 @@ class Controller(QObject):
         param0: int = 0,
         param1: int = 0,
     ) -> bool:
+        if (cmd_id & 0xFF) == int(AirCmdId.CAL_START) and not self._cal_start_allowed(param0):
+            return False
         if self.worker is None or not self.state.connected:
             QMessageBox.warning(
                 self.window,
@@ -1434,6 +1461,9 @@ class Controller(QObject):
         *,
         is_retry: bool,
     ) -> None:
+        if pending.cmd_id == int(AirCmdId.CAL_START) and not self._cal_start_allowed(pending.param0):
+            self._resolve_pending_air_cmd(pending, "LOCAL_REJECTED", detail="CAL_START gate")
+            return
         if self.worker is None:
             return
         self.worker.send_bytes(pending.gsp_frame)
@@ -1761,7 +1791,6 @@ class Controller(QObject):
     def _cal_start_observed(
         mode: int,
         calibration_state: int,
-        calibration_ready: bool,
     ) -> bool:
         if mode == int(AirCalibrationMode.SIX_FACE):
             return calibration_state in {
@@ -1776,8 +1805,6 @@ class Controller(QObject):
                 int(AirCalibrationState.CHECKING),
                 int(AirCalibrationState.READY),
             }
-        if mode == int(AirCalibrationMode.NONE):
-            return bool(calibration_ready)
         return False
 
     def _resolve_calibration_pending_from_snapshot(
@@ -1794,7 +1821,6 @@ class Controller(QObject):
                 and self._cal_start_observed(
                     message.calibration_mode,
                     message.calibration_state,
-                    message.calibration_ready,
                 )
             )
             detail = "CAL_START state/mode observed"
@@ -1850,7 +1876,6 @@ class Controller(QObject):
                 and self._cal_start_observed(
                     message.arg1,
                     message.arg0,
-                    message.arg0 == int(AirCalibrationState.READY),
                 )
             )
         if observed and self._resolve_pending_air_cmd(
@@ -1903,19 +1928,9 @@ class Controller(QObject):
             )
 
     def send_cal_start(self, mode: int) -> None:
-        mode = int(mode)
-        capability = self.state.capability
-        if (
-            mode not in {
-                int(AirCalibrationMode.NONE),
-                int(AirCalibrationMode.ONE_FACE),
-                int(AirCalibrationMode.SIX_FACE),
-            }
-            or capability is None
-            or not (capability.calibration_mode_mask & (1 << mode))
-        ):
-            self._set_radio_message("radio.calibration_mode_unsupported")
+        if not self._cal_start_allowed(mode):
             return
+        mode = int(mode)
         pending_calibration = self._pending_calibration_command()
         if pending_calibration is not None:
             can_supersede = bool(
@@ -1964,6 +1979,9 @@ class Controller(QObject):
         self._send_air_cmd(int(AirCmdId.ALIGN_RESET), TOKEN_ALIGNMENT)
 
     def _handle_air_message(self, message, event: ProtocolEvent | None = None) -> None:
+        self.state.handshake.last_air_rx_monotonic_ns = (
+            event.host_rx_monotonic_ns if event is not None else time.monotonic_ns()
+        )
         if isinstance(message, AirCapabilityMessage):
             self._handle_capability(message, event)
         elif isinstance(message, AirPreflightStatusMessage):
@@ -1985,6 +2003,7 @@ class Controller(QObject):
         event: ProtocolEvent | None = None,
     ) -> None:
         diagnostics = self.state.handshake
+        diagnostics.capability_rx += 1
         diagnostics.last_capability_seq = message.seq
         diagnostics.last_capability_rx_time = time.time()
         if self.state.capability_acked:
@@ -2037,6 +2056,8 @@ class Controller(QObject):
 
     def _handle_preflight_status(self, message: AirPreflightStatusMessage) -> None:
         diagnostics = self.state.handshake
+        diagnostics.preflight_status_rx += 1
+        diagnostics.last_preflight_status_rx_monotonic_ns = time.monotonic_ns()
         diagnostics.preflight_status_capability_acked = bool(message.capability_acked)
         self._resolve_calibration_pending_from_snapshot(message)
         if (
@@ -2296,6 +2317,7 @@ class Controller(QObject):
 
     def _handle_ack_message(self, message: AirAckMessage) -> None:
         self.state.handshake.air_ack_rx += 1
+        self.state.handshake.air_ack_result = message.result
         result_name = enum_name(AirAckResult, message.result)
         command_name = enum_name(AirCmdId, message.ack_cmd_id)
         if message.ack_cmd_id == int(AirCmdId.CAPABILITY_ACK):
@@ -2413,6 +2435,11 @@ class Controller(QObject):
                     "radio.start_failed",
                     result=EnumParam("ack_result", result_name),
                 )
+        elif (
+            message.ack_cmd_id == int(AirCmdId.CAL_START)
+            and message.result == int(AirAckResult.BAD_PARAM)
+        ):
+            self._set_radio_message("radio.calibration_bad_param")
         elif (
             message.result == int(AirAckResult.ALREADY_LOCKED)
             and message.ack_cmd_id == int(AirCmdId.LOCK)

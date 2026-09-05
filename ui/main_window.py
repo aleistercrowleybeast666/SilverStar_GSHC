@@ -67,12 +67,33 @@ from services.preferences import (
     resolve_export_language,
 )
 from services.state_model import (
+    CalibrationStartResult,
     EventHistory,
     FlightControllerState,
     HandshakeState,
     MissionPhase,
 )
 from ui.theme import ThemeColors, apply_application_theme, theme_colors
+
+
+def calibration_mode_text(i18n: I18n, state: FlightControllerState) -> str:
+    if state.calibration.mode == int(AirCalibrationMode.NONE):
+        return i18n.tr("cal.identity")
+    return i18n.enum("calibration_mode", enum_name(AirCalibrationMode, state.calibration.mode))
+
+
+def calibration_capability_text(i18n: I18n, state: FlightControllerState) -> str:
+    if not state.capability_acked or state.capability is None:
+        return i18n.tr("cal.wait_capability")
+    modes = state.sampling_calibration_modes()
+    if modes:
+        return i18n.tr(
+            "cal.sampling_modes",
+            modes=" / ".join(i18n.enum("calibration_mode", mode.name) for mode in modes),
+        )
+    if state.capability.calibration_mode_mask & int(AirCalibrationModeMask.NONE):
+        return i18n.tr("cal.identity_only")
+    return i18n.tr("cal.no_sampling_modes")
 
 
 def calibration_diagnostic_text(i18n: I18n, state: FlightControllerState) -> str:
@@ -135,13 +156,14 @@ class CalibrationDialog(QDialog):
     def __init__(self, i18n: I18n, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.i18n = i18n
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(780)
 
         self.on_start: Callable[[int], None] | None = None
         self.on_face: Callable[[int], None] | None = None
         self.on_stop: Callable[[], None] | None = None
         self.on_reset: Callable[[], None] | None = None
-        self._last_mode_mask: int | None = None
+        self._last_mode_context: tuple[int, bool, int] | None = None
+        self._state: FlightControllerState | None = None
 
         root = QVBoxLayout(self)
         mode_row = QHBoxLayout()
@@ -209,40 +231,47 @@ class CalibrationDialog(QDialog):
         )
         for face, button in enumerate(self.face_buttons):
             button.setText(self.i18n.tr("button.collect_face", face=self.FACE_NAMES[face]))
-        self._last_mode_mask = None
+        self._last_mode_context = None
 
     def _start_selected_mode(self) -> None:
         mode = self.mode_combo.currentData()
-        if mode is not None and self.on_start is not None:
+        if (
+            self.btn_start.isEnabled()
+            and self._state is not None
+            and self._state.preflight_command_entry_allowed()
+            and self._state.check_calibration_start(mode) is CalibrationStartResult.ALLOWED
+            and self.on_start is not None
+        ):
             self.on_start(int(mode))
 
     def render(self, state: FlightControllerState) -> None:
+        self._state = state
         capability = state.capability
         mask = capability.calibration_mode_mask if capability is not None else 0
-        if mask != self._last_mode_mask:
-            selected = self.mode_combo.currentData()
+        context = (state.session_generation, state.capability_acked, mask)
+        if context != self._last_mode_context:
+            selected = (
+                self.mode_combo.currentData()
+                if self._last_mode_context is None
+                or self._last_mode_context[0] == state.session_generation
+                else None
+            )
             self.mode_combo.clear()
-            for mode in (
-                int(AirCalibrationMode.NONE),
-                int(AirCalibrationMode.ONE_FACE),
-                int(AirCalibrationMode.SIX_FACE),
-            ):
-                if mask & (1 << mode):
-                    canonical = enum_name(AirCalibrationMode, mode)
-                    self.mode_combo.addItem(
-                        f"{canonical}（{self.i18n.enum('calibration_mode', canonical)}）",
-                        mode,
-                    )
+            for mode in state.sampling_calibration_modes():
+                canonical = mode.name
+                self.mode_combo.addItem(
+                    f"{canonical}（{self.i18n.enum('calibration_mode', canonical)}）",
+                    int(mode),
+                )
             if selected is not None:
                 index = self.mode_combo.findData(selected)
                 if index >= 0:
                     self.mode_combo.setCurrentIndex(index)
-            self._last_mode_mask = mask
+            self._last_mode_context = context
+        self.mode_combo.setEnabled(bool(state.sampling_calibration_modes()))
 
         calibration = state.calibration
-        mode_name = self.i18n.enum(
-            "calibration_mode", enum_name(AirCalibrationMode, calibration.mode)
-        )
+        mode_name = calibration_mode_text(self.i18n, state)
         state_name = (
             self.i18n.tr("common.wait")
             if calibration.state is None
@@ -255,7 +284,9 @@ class CalibrationDialog(QDialog):
             if calibration.current_face == 0xFF or calibration.current_face >= len(self.FACE_NAMES)
             else self.FACE_NAMES[calibration.current_face]
         )
-        if calibration.mode == int(AirCalibrationMode.ONE_FACE):
+        if not state.sampling_calibration_modes():
+            guidance = calibration_capability_text(self.i18n, state)
+        elif calibration.mode == int(AirCalibrationMode.ONE_FACE):
             guidance = self.i18n.tr("cal.guidance.one_face")
         elif calibration.mode == int(AirCalibrationMode.SIX_FACE):
             guidance = self.i18n.tr("cal.guidance.six_face")
@@ -285,7 +316,7 @@ class CalibrationDialog(QDialog):
         calibration_pending = state.calibration_transaction_pending()
         no_command_pending = not state.pending_command_name
         calibration_idle = bool(
-            calibration.mode == int(AirCalibrationMode.NOT_SELECTED)
+            calibration.mode in (int(AirCalibrationMode.NONE), int(AirCalibrationMode.NOT_SELECTED))
             or calibration.state in (None, int(AirCalibrationState.IDLE))
         )
         self.btn_start.setText(
@@ -428,6 +459,17 @@ class LinkDetailsDialog(QDialog):
         rssi = none if state.rssi_dbm is None else f"{state.rssi_dbm} dBm"
         snr = none if state.snr_db is None else f"{state.snr_db:.2f} dB"
         capability = state.capability
+        known_mask = int(
+            AirCalibrationModeMask.NONE
+            | AirCalibrationModeMask.ONE_FACE
+            | AirCalibrationModeMask.SIX_FACE
+        )
+
+        def age_text(rx_ns: int | None) -> str:
+            if rx_ns is None:
+                return none
+            return f"{max(0.0, (time_monotonic_ns() - rx_ns) / 1_000_000.0):.0f} ms"
+
         new_text = self.i18n.tr(
                 "link_details.body",
                 handshake_state=self.i18n.tr(
@@ -441,6 +483,15 @@ class LinkDetailsDialog(QDialog):
                     if capability is None
                     else f"0x{capability.calibration_mode_mask:02X}"
                 ),
+                unknown_calibration_bits=(
+                    none if capability is None
+                    else f"0x{capability.calibration_mode_mask & ~known_mask:02X}"
+                ),
+                capability_rx=diagnostics.capability_rx,
+                preflight_status_rx=diagnostics.preflight_status_rx,
+                air_rx_age=age_text(diagnostics.last_air_rx_monotonic_ns),
+                preflight_status_age=age_text(diagnostics.last_preflight_status_rx_monotonic_ns),
+                last_air_command=self.i18n.format_message(state.last_air_ack_message),
                 sensor_flags=(
                     none
                     if capability is None
@@ -1501,12 +1552,22 @@ class MainWindow(QMainWindow):
         self.lbl_cal_issue.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
+        self.lbl_cal_mode.setWordWrap(True)
+        self.lbl_cal_mode.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addLayout(grid)
+        self.lbl_cal_capability = QLabel()
+        self.lbl_cal_capability.setWordWrap(True)
+        layout.addWidget(self.lbl_cal_capability)
         actions = QHBoxLayout()
         self.btn_calibration = QPushButton()
         self._bind_text(self.btn_calibration, "button.calibration")
         self.btn_calibration.setStyleSheet(self._cmd_button_style)
         actions.addWidget(self.btn_calibration)
+        self.btn_cal_reset = QPushButton()
+        self._bind_text(self.btn_cal_reset, "button.reset")
+        self.btn_cal_reset.setStyleSheet(self._cmd_button_style)
+        self.btn_cal_reset.clicked.connect(lambda: self.on_cal_reset and self.on_cal_reset())
+        actions.addWidget(self.btn_cal_reset)
         actions.addStretch(1)
         layout.addLayout(actions)
         self.btn_calibration.clicked.connect(self._show_calibration_dialog)
@@ -1876,8 +1937,13 @@ class MainWindow(QMainWindow):
         return name_label
 
     def _show_calibration_dialog(self) -> None:
-        if self._state is not None:
-            self.calibration_dialog.render(self._state)
+        if (
+            self._state is None
+            or not self._state.preflight_command_entry_allowed()
+            or not self._state.sampling_calibration_modes()
+        ):
+            return
+        self.calibration_dialog.render(self._state)
         self.calibration_dialog.show()
         self.calibration_dialog.raise_()
         self.calibration_dialog.activateWindow()
@@ -2207,9 +2273,8 @@ class MainWindow(QMainWindow):
         )
 
         calibration = state.calibration
-        self.lbl_cal_mode.setText(
-            self.i18n.enum("calibration_mode", enum_name(AirCalibrationMode, calibration.mode))
-        )
+        self.lbl_cal_mode.setText(calibration_mode_text(self.i18n, state))
+        self.lbl_cal_capability.setText(calibration_capability_text(self.i18n, state))
         self.lbl_cal_state.setText(
             "—"
             if calibration.state is None
@@ -2351,8 +2416,10 @@ class MainWindow(QMainWindow):
         self._render_events()
         self._render_plots(state)
         self._render_data_tool_buttons()
-        if self.calibration_dialog.isVisible():
-            self.calibration_dialog.render(state)
+        # Refresh hidden controls too: a new handshake must replace the old build's modes.
+        self.calibration_dialog.render(state)
+        if not state.sampling_calibration_modes():
+            self.calibration_dialog.close()
         if self.link_details_dialog.isVisible():
             self.link_details_dialog.render(state)
         if self.sensor_details_dialog.isVisible():
@@ -2503,7 +2570,7 @@ class MainWindow(QMainWindow):
             )
         )
         calibration_idle = bool(
-            state.calibration.mode == int(AirCalibrationMode.NOT_SELECTED)
+            state.calibration.mode in (int(AirCalibrationMode.NONE), int(AirCalibrationMode.NOT_SELECTED))
             or state.calibration.state in (None, int(AirCalibrationState.IDLE))
         )
         self.btn_calibration.setText(
@@ -2515,7 +2582,12 @@ class MainWindow(QMainWindow):
         )
         # Opening the dialog must remain available through READY and through a
         # lost calibration ACK; sending still obeys domain-safe controller rules.
-        self.btn_calibration.setEnabled(state.preflight_command_entry_allowed())
+        self.btn_calibration.setEnabled(
+            state.preflight_command_entry_allowed() and bool(state.sampling_calibration_modes())
+        )
+        self.btn_cal_reset.setEnabled(
+            state.preflight_command_entry_allowed() and not state.pending_command_name
+        )
         self.btn_align_start.setEnabled(preflight_allowed and state.calibration.ready)
         self.btn_align_stop.setEnabled(preflight_allowed)
         self.btn_align_reset.setEnabled(preflight_allowed)

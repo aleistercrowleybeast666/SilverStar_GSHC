@@ -657,7 +657,6 @@ class CalibrationPendingRecoveryTests(unittest.TestCase):
                 AirCalibrationState.COLLECTING,
                 False,
             ),
-            (AirCalibrationMode.NONE, AirCalibrationState.READY, True),
         )
         for mode, state, ready in cases:
             with self.subTest(mode=mode.name):

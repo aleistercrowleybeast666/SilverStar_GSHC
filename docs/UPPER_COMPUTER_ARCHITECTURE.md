@@ -178,7 +178,7 @@ or PREFLIGHT_STATUS.capability_acked == 1
 
 第一条条件还要求 ACK 的 `ack_cmd_id=CAPABILITY_ACK` 且 `ack_seq` 等于当前 PC 待确认命令的 seq；Capability 自己的 seq 只放在命令 param0 中，二者不混用。未握手时，更新的 Capability seq 替换当前 transaction。已握手后迟到或重复的 Capability 只记录 `STALE_OR_DUPLICATE_CAPABILITY_AFTER_ACK` 并增加计数，不重置 Controller、不重发 ACK、不清空 UI、不切换 JSONL。需要新飞控 session 时由操作者断开并重连 PC 串口。
 
-预飞页 AIR Link 的 tooltip 是一条可核对的诊断链：
+预飞页 AIR Link 的“详情”对话框提供可核对的诊断链：
 
 ```text
 Capability RX seq/time
@@ -189,6 +189,10 @@ Capability RX seq/time
   -> GS STATUS TX/RX/CRC
   -> AIR ACK result or PREFLIGHT_STATUS recovery
 ```
+
+校准能力只生成本次握手确认的 ONE_FACE/SIX_FACE 采样操作；NONE bit 和未知高位仍保留原值。可见/隐藏的校准控件随会话和握手刷新，校准 ready 仍来自预飞状态。Controller 在公共入口、通用命令入口、retry 发送前执行 `CalibrationStartResult` 门禁，拒绝时写 `CAL_START_LOCAL_REJECTED`，不发送 AIR。
+
+详情还显示未知校准位、Capability/PREFLIGHT_STATUS 接收计数、最近 AIR 命令反馈、最后 AIR 下行与预飞快照的距今时间。普通校准 ACK 错误和 timeout 不改变握手状态；即使下行停止，GUI timer 继续刷新时间和 PC/GSP 诊断。
 
 `CAPABILITY_ACK_TX` 作为显式 JSONL 记录保存 Capability seq、PC cmd seq、attempt 和 retry；所有诊断只保存最新值或累计计数，不形成第二个无限历史。
 

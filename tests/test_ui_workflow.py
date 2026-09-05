@@ -781,7 +781,7 @@ class UiWorkflowTests(unittest.TestCase):
             self.window.calibration_dialog.mode_combo.itemData(index)
             for index in range(self.window.calibration_dialog.mode_combo.count())
         ]
-        self.assertEqual(modes, [int(AirCalibrationMode.NONE), int(AirCalibrationMode.SIX_FACE)])
+        self.assertEqual(modes, [int(AirCalibrationMode.SIX_FACE)])
 
     def test_3d_model_geometry_camera_and_single_view_are_preserved(self) -> None:
         self.assertEqual(self.window.DEFAULT_CAMERA_DISTANCE, 6.5)
