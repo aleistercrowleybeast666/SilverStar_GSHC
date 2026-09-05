@@ -337,6 +337,7 @@ class MissionPresentationSnapshot:
 class CalibrationStartResult(str, Enum):
     ALLOWED = "ALLOWED"
     HANDSHAKE_REQUIRED = "HANDSHAKE_REQUIRED"
+    AUTOMATIC_NONE = "AUTOMATIC_NONE"
     UNSUPPORTED_MODE = "UNSUPPORTED_MODE"
 
 
@@ -562,6 +563,11 @@ class FlightControllerState:
             if capability.calibration_mode_mask & (1 << mode)
         )
 
+    def calibration_start_modes(self) -> tuple[AirCalibrationMode, ...]:
+        """Explicit transactions offered after handshake; never starts one itself."""
+        sampling_modes = self.sampling_calibration_modes()
+        return (AirCalibrationMode.NONE, *sampling_modes) if sampling_modes else ()
+
     def check_calibration_start(self, mode: int) -> CalibrationStartResult:
         if (
             not self.capability_acked
@@ -569,9 +575,16 @@ class FlightControllerState:
             or not self.capability.profile_supported
         ):
             return CalibrationStartResult.HANDSHAKE_REQUIRED
-        if mode not in self.sampling_calibration_modes():
-            return CalibrationStartResult.UNSUPPORTED_MODE
-        return CalibrationStartResult.ALLOWED
+        if mode in self.calibration_start_modes():
+            return CalibrationStartResult.ALLOWED
+        if (
+            mode == AirCalibrationMode.NONE
+            and self.capability.calibration_mode_mask & (1 << AirCalibrationMode.NONE)
+        ):
+            # Identity-only builds select NONE on the FC, even before its first
+            # READY snapshot arrives. Do not send a redundant transaction.
+            return CalibrationStartResult.AUTOMATIC_NONE
+        return CalibrationStartResult.UNSUPPORTED_MODE
 
     def start_transaction_pending(self) -> bool:
         return self.pending_command_name == "START_MISSION"

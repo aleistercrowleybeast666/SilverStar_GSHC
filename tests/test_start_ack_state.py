@@ -647,6 +647,7 @@ class CalibrationPendingRecoveryTests(unittest.TestCase):
 
     def test_each_cal_start_mode_can_be_recovered_from_snapshot(self) -> None:
         cases = (
+            (AirCalibrationMode.NONE, AirCalibrationState.READY, True),
             (
                 AirCalibrationMode.SIX_FACE,
                 AirCalibrationState.WAIT_FACE,

@@ -8,16 +8,18 @@
 
 已有 Python 模块遵循相邻代码的命名与封装约定；当前新增校准门禁结果类型为 `CalibrationStartResult`。
 
-## 校准与协议不变量
+## 文档与行为约束
 
-- Profile 0、AIR 固定长度/布局/字节序、GSP CRC、命令 ID/Token 和握手延时保持不变。
-- NONE bit 表示单位校正；用户采样模式仅 ONE_FACE/SIX_FACE。Capability mask 是 build 能力，不表示完成状态。
-- CAL_START 的 Controller 公共入口、通用入口和重试发送均检查握手与对应 bit；NONE、未知或不支持的模式本地拒绝，不能 TX。
-- mask 0x01 保留 CAL_RESET；NONE + ready=1 正常显示，ready=0 不自动推进。
-- 新连接/成功握手更新 GUI 的模式列表，未知高位仅诊断。已握手后的迟到 Capability 不自动重置会话。
-- CAL_START/ALIGN_START ACK OK 仅表示接受；BAD_PARAM 不自动换模式，BAD_STATE/BUSY 不判断为断链，普通 timeout 不清除 Capability。
-- 保留分层链路诊断和有界状态缓存。串口、协议线程不操作 Widget。
+- 先阅读[文档索引](docs/README.md)、[AIR wire 规范](docs/AIR_PROTOCOL.md)和[共同 Calibration 契约](docs/AIR_CALIBRATION_CONTRACT.md)。新 docs 是基线，不从历史恢复旧树。
+- AIR M0、GSP、命令与握手时序不因文档对齐发生变更。协议字段由 docs 维护，根文件不复制字段表。
+- `sampling_calibration_modes()` 只描述采样流程；`calibration_start_modes()` 描述可显式发送的事务。含采样流程时允许默认 NONE，无采样流程时由飞控自动 NONE。
+- 公共入口、通用命令入口与重试都执行 Controller 门禁，未知位仅诊断。就绪状态来自飞控，不能由 Capability、选项或 ACK OK 伪造。
+- 新连接/成功握手更新 GUI，包括隐藏对话框；已握手后的迟到 Capability 只诊断，不重置会话。
+- REJECTED/BAD_PARAM/BAD_STATE/BUSY 与普通超时不自动换模式、不清除握手、不判为断链。
+- GSHC 平台文档是参考镜像；完整平台权威在 FCCG。保持共同契约逐字一致，不维护第二套 MCU/Board/Build/Storage 规范。
+- 保留分层诊断和有界缓存；串口、协议线程不操作 Widget。
 
 ## 验证
 
-修改前阅读 README、TARGETS、CHANGELOG、AIR 协议、受影响模块及 tests。完成后运行 compileall、pytest（含 headless GUI 与 Golden）；环境允许时执行打包 smoke。命令及真实 SS0.5 待联调项目见 `tests/validation/README.md`。不要把模拟测试描述为硬件验证。
+修改前阅读根 README/TARGETS/CHANGELOG/VALIDATION 及受影响模块与测试。完成后执行 compileall、pytest、docs link test、headless GUI 和 Golden，环境允许时执行打包 smoke。
+精确结果只写入根 [VALIDATION.md](VALIDATION.md)，能力状态见 [CURRENT_PROGRESS](docs/CURRENT_PROGRESS.md)，复验与硬件清单见 [验证步骤](tests/validation/README.md)。不把模拟测试描述为硬件验证；不创建 Release/Tag，不推送远端。

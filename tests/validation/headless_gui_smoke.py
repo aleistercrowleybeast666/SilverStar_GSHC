@@ -21,7 +21,7 @@ from ui.main_window import MainWindow
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[2] / "build/calibration_validation"
+    root = Path(__file__).resolve().parents[2] / "build/final_alignment_validation"
     root.mkdir(parents=True, exist_ok=True)
     application = QApplication([])
     # Qt offscreen may omit the Windows font registry. Load local fonts only
@@ -51,7 +51,7 @@ def main() -> None:
                 application.processEvents()
                 combo = window.calibration_dialog.mode_combo
                 modes = [combo.itemData(i) for i in range(combo.count())]
-                assert modes == [mode for mode in (1, 2) if mask & (1 << mode)]
+                assert modes == ([] if mask == 1 else [0, *[mode for mode in (1, 2) if mask & (1 << mode)]])
                 assert window.btn_cal_reset.isEnabled()
                 group = window.lbl_cal_mode.parentWidget()
                 path = root / f"calibration_{mask:02x}_{language.value}.png"

@@ -1,31 +1,47 @@
 # 校准操作说明
 
-连接地面站串口后，等待“飞控 AIR 链路”显示已连接。可用的采样流程由本次 Capability 握手确认：
+连接地面站串口后，等待“飞控 AIR 链路”完成 Capability handshake。可用模式来自当前 `calibration_mode_mask`，完整契约见 [`AIR_CALIBRATION_CONTRACT.md`](AIR_CALIBRATION_CONTRACT.md)。
 
-| calibration_mode_mask | 开始校准菜单 |
+## 1. 菜单
+
+| mask | “开始校准”行为 |
 |---|---|
-| 0x01 | 没有采样模式，开始校准禁用 |
-| 0x03 | 单面校准（ONE_FACE） |
-| 0x05 | 六面校准（SIX_FACE） |
-| 0x07 | 单面校准、六面校准 |
+| `0x01` | 无需选择；飞控自动选择 NONE/单位校正，等待真实上报 |
+| `0x03` | 使用默认校正、单面校准 |
+| `0x05` | 使用默认校正、六面校准 |
+| `0x07` | 使用默认校正、单面校准、六面校准 |
 
-0x01 显示“本工程不执行采样校准，使用单位校正（NONE）”。NONE 不出现在开始菜单，也不需要发送 CAL_START。当前模式为 NONE 时显示“单位校正（未执行单面/六面采样校准）”；是否就绪继续读取旁边的 ready 和 state。ready=0 时等待飞控的真实状态，不会自动执行校准或初对准。
+当build提供任何采样流程时，“使用默认校正（不进行采样）”始终存在，并发送现有 `CAL_START(NONE)`。它不是软件层把ready改成true；状态由飞控完成。
 
-ONE_FACE 由飞控自动采集。SIX_FACE 需要放置相应面并保持静止，再点击对应采集按钮；ACK OK 只代表接受，等待状态/完成面掩码后才显示通过。READY 后仍可点击单个已完成面重新采集，其余五面由飞控快照保留。
+当mask仅为`0x01`时，不需要发送NONE，因为飞控启动/Reset已经自动`NONE/Identity/READY`。
 
-预飞“校准”面板的重置按钮和校准对话框中的重置按钮都使用原 CAL_RESET，0x01 同样保留。重置结果以飞控后续状态为准，不据 Capability 推测 ready。校准 ready 后可手动开始初对准；ALIGN_START ACK OK 也不表示完成，等待 alignment state/ready。
+## 2. 默认校正
+1. 选择“使用默认校正”；
+2. GSHC发送`CAL_START(NONE)`；
+3. `ACK OK`只表示accepted；
+4. 等待真实 `PREFLIGHT_STATUS` 的 `mode=NONE, state=READY, calibration_ready=1`；仅有 ACK OK 或缺少 ready 字段的状态事件不会将 NONE 提升为就绪；
+5. 然后可开始初对准。
 
-## 命令反馈与重新连接
+## 3. OneFace
+仅bit1存在时可选。ACK OK后由飞控采集/检查/计算，最终看真实READY。
 
-- BAD_PARAM：该 build 不支持模式或参数错误，核对链路详情中的 Capability。上位机不会自动尝试另一种模式，也不会发送新查询命令。需要重新取得 Capability 时明确断开并重连串口。
-- BAD_STATE / BUSY：飞控状态不允许或暂时忙，链路仍保持握手结果，按最新状态决定后续操作。
-- ACK timeout：沿用 800 ms 超时与最多 3 次 retry（共 4 次 TX）；停止重试后恢复操作入口，保留握手和真实状态。无 ACK 不能推断命令从未执行。
-- 切换不同飞控工程前断开再重连。隐藏的校准菜单也会更新，上一工程的单面/六面模式不会留到新会话。
+## 4. SixFace
+仅bit2存在时可选。进入WAIT_FACE后按面发送现有`CAL_FACE(face)`；已完成面在READY下仍可单独重采。
 
-## 校准/初对准时下行停止
+## 5. Reset
+继续发送现有`CAL_RESET`。无采样build自动恢复NONE/READY；有采样build重新等待用户选择默认NONE或采样procedure。GSHC不本地伪造READY。
 
-打开“飞控 AIR 链路 → 详情”，依次对照 Capability RX、PC GSP AIR_TX 请求、串口实际写入、GSP ACK、GS TX/RX/CRC、AIR ACK 和 PREFLIGHT_STATUS，以及 RSSI/SNR。
+## 6. ACK
+- `OK`：accepted；
+- `BAD_PARAM`：mode编码非法；
+- `REJECTED`：合法OneFace/SixFace但当前build未编入；
+- `BAD_STATE`：当前生命周期不允许；
+- `BUSY`：事务忙。
 
-新增的“距最近 AIR 下行”和“距最近快照”在无新下行时继续增长。若串口仍收到 GS 状态但 AIR 年龄增加，问题不等同于 PC 串口断开。请求增加而串口写入不增加应检查 PC 串口队列/驱动；GSP 成功但 GS TX 不增加应检查地面站发送；GS TX 增加但无 AIR 下行，应结合空口与飞控控制台判断。PC 诊断不能单独证明空口故障或飞控运行故障，真实确认步骤见 [验证说明](../tests/validation/README.md)。
+这些结果都不等于链路断开，不清除 Capability，也不自动尝试其他模式。ACK 超时使用现有有界重试；快照可恢复丢失的 ACK。默认菜单高亮、连接、刷新或切换语言不会代替用户发送。
 
-未知能力位只在详情中显示，不影响已知位或生成未知操作。完整 AIR 布局见 [AIR_PROTOCOL.md](AIR_PROTOCOL.md)。
+## 7. 初对准
+`ALIGN_START`只要求飞控真实`calibration_ready=1`及其他预飞门条件。ACK OK同样只表示accepted，完成看alignment state/ready。
+
+## 8. 链路停止时
+打开“飞控 AIR 链路→详情”，依次检查Capability RX、PC AIR_TX request、serial write、GSP ACK、GS TX/RX/CRC、AIR ACK、PREFLIGHT_STATUS、RSSI/SNR和最近AIR年龄。GS仍发而AIR完全停止时，优先检查飞控HardFault/assert/stack overflow/runtime fault record。

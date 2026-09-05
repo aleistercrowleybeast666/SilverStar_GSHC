@@ -257,10 +257,12 @@ class CalibrationDialog(QDialog):
                 else None
             )
             self.mode_combo.clear()
-            for mode in state.sampling_calibration_modes():
+            for mode in state.calibration_start_modes():
                 canonical = mode.name
                 self.mode_combo.addItem(
-                    f"{canonical}（{self.i18n.enum('calibration_mode', canonical)}）",
+                    self.i18n.tr("cal.default_correction")
+                    if mode == AirCalibrationMode.NONE
+                    else f"{canonical}（{self.i18n.enum('calibration_mode', canonical)}）",
                     int(mode),
                 )
             if selected is not None:
@@ -268,7 +270,7 @@ class CalibrationDialog(QDialog):
                 if index >= 0:
                     self.mode_combo.setCurrentIndex(index)
             self._last_mode_context = context
-        self.mode_combo.setEnabled(bool(state.sampling_calibration_modes()))
+        self.mode_combo.setEnabled(bool(state.calibration_start_modes()))
 
         calibration = state.calibration
         mode_name = calibration_mode_text(self.i18n, state)
@@ -284,7 +286,7 @@ class CalibrationDialog(QDialog):
             if calibration.current_face == 0xFF or calibration.current_face >= len(self.FACE_NAMES)
             else self.FACE_NAMES[calibration.current_face]
         )
-        if not state.sampling_calibration_modes():
+        if not state.calibration_start_modes():
             guidance = calibration_capability_text(self.i18n, state)
         elif calibration.mode == int(AirCalibrationMode.ONE_FACE):
             guidance = self.i18n.tr("cal.guidance.one_face")
@@ -1940,7 +1942,7 @@ class MainWindow(QMainWindow):
         if (
             self._state is None
             or not self._state.preflight_command_entry_allowed()
-            or not self._state.sampling_calibration_modes()
+            or not self._state.calibration_start_modes()
         ):
             return
         self.calibration_dialog.render(self._state)
@@ -2418,7 +2420,7 @@ class MainWindow(QMainWindow):
         self._render_data_tool_buttons()
         # Refresh hidden controls too: a new handshake must replace the old build's modes.
         self.calibration_dialog.render(state)
-        if not state.sampling_calibration_modes():
+        if not state.calibration_start_modes():
             self.calibration_dialog.close()
         if self.link_details_dialog.isVisible():
             self.link_details_dialog.render(state)
@@ -2583,7 +2585,7 @@ class MainWindow(QMainWindow):
         # Opening the dialog must remain available through READY and through a
         # lost calibration ACK; sending still obeys domain-safe controller rules.
         self.btn_calibration.setEnabled(
-            state.preflight_command_entry_allowed() and bool(state.sampling_calibration_modes())
+            state.preflight_command_entry_allowed() and bool(state.calibration_start_modes())
         )
         self.btn_cal_reset.setEnabled(
             state.preflight_command_entry_allowed() and not state.pending_command_name

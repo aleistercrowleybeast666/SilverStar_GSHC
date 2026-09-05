@@ -13,9 +13,9 @@ from PySide6.QtWidgets import QApplication
 
 from app import AIR_CMD_MAX_RETRIES
 from protocol.air import (
-    AirAckMessage, TOKEN_CALIBRATION, parse_air_frame,
+    AirAckMessage, AirStatusMessage, TOKEN_CALIBRATION, parse_air_frame,
 )
-from protocol.common import AirAckResult, AirCalibrationMode, AirCalibrationState, AirCmdId, GspType
+from protocol.common import AirAckResult, AirCalibrationMode, AirCalibrationState, AirCmdId, AirStatusId, GspType
 from protocol.gsp_min import build_gsp_frame
 from protocol.receive_pipeline import ReceivePipeline, protocol_event_log_records
 from services.i18n import I18n, Language
@@ -70,10 +70,13 @@ def test_capability_parser_handshake_and_sampling_modes(mask):
     controller = make_controller()
     controller._handle_capability(message)
     assert not controller.state.sampling_calibration_modes()
+    assert not controller.state.calibration_start_modes()
     assert controller.pending_capability_ack.air_frame == bytes.fromhex("30 00 05 00 00 00 00 2a 00")
     assert controller.worker.sent == [bytes.fromhex("a5 5a 03 0a 09 30 00 05 00 00 00 00 2a 00 dd c2")]
     controller._handle_ack_message(AirAckMessage(3, 0, 5, 0, 100))
     assert controller.state.sampling_calibration_modes() == tuple(mode for mode in (1, 2) if mask & (1 << mode))
+    sampling = tuple(mode for mode in (1, 2) if mask & (1 << mode))
+    assert controller.state.calibration_start_modes() == ((0, *sampling) if sampling else ())
     assert not controller.state.calibration.ready
     assert controller.state.calibration.mode == AirCalibrationMode.NOT_SELECTED
 
@@ -90,16 +93,19 @@ def test_controller_gate_covers_public_generic_and_retry_paths(mask, mode):
             controller._send_air_cmd(int(AirCmdId.CAL_START), TOKEN_CALIBRATION, mode)
         else:
             controller.send_cal_start(mode)
-        supported = mode in (1, 2) and bool(mask & (1 << mode))
+        supported = (mode == 0 and bool(mask & 0x06)) or (mode in (1, 2) and bool(mask & (1 << mode)))
         assert len(controller.worker.sent) == int(supported)
         assert bool(controller.pending_air_cmds) == supported
         if supported:
-            expected = bytes.fromhex("30 00 07 30 4c 41 43 01 00" if mode == 1 else "30 00 07 30 4c 41 43 02 00")
+            expected = bytes.fromhex("30 00 07 30 4c 41 43") + bytes((mode, 0))
             pending = controller._find_pending_air_cmd(7)
             assert pending.air_frame == expected
             assert controller.worker.sent[0] == bytes.fromhex(
-                "a5 5a 03 0a 09 30 00 07 30 4c 41 43 01 00 38 91"
-                if mode == 1 else "a5 5a 03 0a 09 30 00 07 30 4c 41 43 02 00 6b c4"
+                {
+                    0: "a5 5a 03 0a 09 30 00 07 30 4c 41 43 00 00 09 a2",
+                    1: "a5 5a 03 0a 09 30 00 07 30 4c 41 43 01 00 38 91",
+                    2: "a5 5a 03 0a 09 30 00 07 30 4c 41 43 02 00 6b c4",
+                }[mode]
             )
             # A pending retry must recheck the current build, too.
             controller.state.capability = replace(controller.state.capability, calibration_mode_mask=1)
@@ -108,7 +114,10 @@ def test_controller_gate_covers_public_generic_and_retry_paths(mask, mode):
             assert len(controller.worker.sent) == 1
             assert not controller.pending_air_cmds
         else:
-            assert controller.state.check_calibration_start(mode) is CalibrationStartResult.UNSUPPORTED_MODE
+            assert controller.state.check_calibration_start(mode) is (
+                CalibrationStartResult.AUTOMATIC_NONE if mode == 0 and mask & 1
+                else CalibrationStartResult.UNSUPPORTED_MODE
+            )
             assert controller.logger.records[-1]["kind"] == "CAL_START_LOCAL_REJECTED"
 
 
@@ -157,7 +166,7 @@ def test_none_snapshot_keeps_real_readiness_without_any_command(ready):
     assert not controller.state.alignment.ready
 
 
-@pytest.mark.parametrize("mode", (1, 2))
+@pytest.mark.parametrize("mode", (0, 1, 2))
 def test_cal_start_ack_acceptance_progress_and_ready_snapshot(mode):
     controller = make_controller()
     handshake(controller, 7)
@@ -167,15 +176,16 @@ def test_cal_start_ack_acceptance_progress_and_ready_snapshot(mode):
     assert controller.state.radio_message.key == "radio.calibration_accepted"
     assert not controller.state.calibration.ready
     assert not controller.pending_air_cmds
-    controller._handle_preflight_status(preflight_status(capability_acked=True, calibration_mode=mode, calibration_state=2))
-    assert controller.state.calibration.state == AirCalibrationState.COLLECTING
-    assert not controller.state.calibration.ready
+    if mode != 0:
+        controller._handle_preflight_status(preflight_status(capability_acked=True, calibration_mode=mode, calibration_state=2))
+        assert controller.state.calibration.state == AirCalibrationState.COLLECTING
+        assert not controller.state.calibration.ready
     controller._handle_preflight_status(preflight_status(capability_acked=True, calibration_mode=mode, calibration_ready=True))
     assert controller.state.calibration.ready
     assert controller.state.calibration.state == AirCalibrationState.READY
 
 
-@pytest.mark.parametrize("result", (AirAckResult.BAD_PARAM, AirAckResult.BAD_STATE, AirAckResult.BUSY))
+@pytest.mark.parametrize("result", (AirAckResult.BAD_PARAM, AirAckResult.REJECTED, AirAckResult.BAD_STATE, AirAckResult.BUSY))
 def test_rejected_cal_start_keeps_capability_and_never_falls_back(result):
     controller = make_controller()
     handshake(controller, 7)
@@ -194,7 +204,8 @@ def test_rejected_cal_start_keeps_capability_and_never_falls_back(result):
     assert controller.state.handshake.air_ack_result == result
     assert not controller.state.calibration.ready
     assert controller.state.radio_message.key == (
-        "radio.calibration_bad_param" if result is AirAckResult.BAD_PARAM else "radio.ack_failed"
+        {AirAckResult.BAD_PARAM: "radio.calibration_bad_param",
+         AirAckResult.REJECTED: "radio.calibration_rejected"}.get(result, "radio.ack_failed")
     )
 
 
@@ -233,21 +244,27 @@ def test_alignment_and_reset_golden_commands_remain_available_for_identity():
 
 
 @pytest.mark.parametrize("mask", MASKS)
-def test_gui_only_offers_current_build_sampling_modes(window, mask):
+def test_gui_offers_explicit_default_and_current_build_sampling_modes(window, mask):
     controller = make_controller()
     handshake(controller, mask)
     state = controller.state
     window.bind_runtime_model(state, EventHistory())
     dialog = window.calibration_dialog
-    expected = [mode for mode in (1, 2) if mask & (1 << mode)]
+    sampling = [mode for mode in (1, 2) if mask & (1 << mode)]
+    expected = [0, *sampling] if sampling else []
     assert [dialog.mode_combo.itemData(i) for i in range(dialog.mode_combo.count())] == expected
     assert window.btn_calibration.isEnabled() is bool(expected)
     assert dialog.btn_start.isEnabled() is bool(expected)
     assert window.btn_cal_reset.isEnabled()
-    assert dialog.mode_combo.findData(0) == -1
     calls = []
     window.on_cal_start = calls.append
-    dialog.mode_combo.addItem("injected NONE", 0)
+    if expected:
+        assert dialog.mode_combo.currentData() == 0
+        assert dialog.mode_combo.currentText() == "使用默认校正（不进行采样）"
+        dialog.btn_start.click()
+        assert calls == [0]
+        calls.clear()
+    dialog.mode_combo.addItem("injected unsupported", 0 if not expected else 7)
     dialog.mode_combo.setCurrentIndex(dialog.mode_combo.count() - 1)
     dialog._start_selected_mode()
     assert not calls
@@ -268,7 +285,7 @@ def test_none_gui_uses_identity_text_and_real_ready_in_both_languages(window, re
     assert window.btn_calibration.text() == "开始校准"
     assert window.lbl_cal_mode.text() == "单位校正（未执行单面/六面采样校准）"
     assert window.lbl_cal_ready.text() == ("是" if ready else "否")
-    assert window.lbl_cal_capability.text() == "本工程不执行采样校准，使用单位校正（NONE）"
+    assert window.lbl_cal_capability.text() == "本工程无需采样校准，使用单位校正"
     assert window.btn_align_start.isEnabled() is ready
     assert not window.btn_calibration.isEnabled()
     window.i18n.set_language(Language.EN_US)
@@ -294,7 +311,7 @@ def test_reconnect_and_latest_handshake_rebuild_hidden_gui_controls(window):
         controller._handle_ack_message(AirAckMessage(1, pending.command_seq, 5, 0, 100))
         window.render_state()
         dialog = window.calibration_dialog
-        assert [dialog.mode_combo.itemData(i) for i in range(dialog.mode_combo.count())] == [m for m in (1, 2) if mask & (1 << m)]
+        assert [dialog.mode_combo.itemData(i) for i in range(dialog.mode_combo.count())] == ([] if mask == 1 else [0, *[m for m in (1, 2) if mask & (1 << m)]])
         # Stale broadcasts after success stay diagnostic only, per existing session policy.
         accepted = controller.state.capability
         controller._handle_capability(replace(capability(seq=9), calibration_mode_mask=7))
@@ -337,3 +354,78 @@ def test_downlink_pause_does_not_hide_gsp_progress_or_erase_handshake(window):
     assert "GS TX / RX / CRC: 9 / 4 / 0" in details
     assert "RSSI / SNR: -70 dBm / 5.00 dB" in details
     assert "GSP AIR_TX requests: 2" in details
+
+
+@pytest.mark.parametrize("mask", (3, 5, 7, 0x83, 0x85, 0x87))
+@pytest.mark.parametrize("ready", (False, True))
+def test_explicit_none_waits_for_real_snapshot_and_can_align(mask, ready):
+    controller = make_controller()
+    handshake(controller, mask)
+    controller.send_cal_start(0)
+    assert not controller.state.calibration.ready
+    pending = controller._find_pending_air_cmd(7)
+    # A mode/state event cannot supply the missing ready flag for NONE.
+    controller._handle_status_message(AirStatusMessage(5, int(AirStatusId.CALIBRATION), 100, 4, 0), None)
+    assert not controller.state.calibration.ready
+    assert controller._find_pending_air_cmd(7) is pending
+    controller._handle_preflight_status(preflight_status(
+        capability_acked=True, calibration_mode=0, calibration_state=4, calibration_ready=ready,
+    ))
+    assert controller.state.calibration.ready is ready
+    assert bool(controller.pending_air_cmds) is (not ready)
+    before = len(controller.worker.sent)
+    controller.send_align_start()
+    assert len(controller.worker.sent) == before + int(ready)
+    assert not controller.state.alignment.ready
+
+
+@pytest.mark.parametrize("ready", (False, True))
+def test_automatic_none_is_explicit_local_result_and_preserves_state(ready):
+    controller = make_controller()
+    handshake(controller, 1)
+    controller._handle_preflight_status(preflight_status(capability_acked=True, calibration_mode=0, calibration_ready=ready))
+    before = len(controller.worker.sent)
+    controller.send_cal_start(0)
+    assert controller.state.check_calibration_start(0) is CalibrationStartResult.AUTOMATIC_NONE
+    assert controller.state.radio_message.key == "radio.calibration_automatic_none"
+    assert controller.state.calibration.ready is ready
+    assert len(controller.worker.sent) == before
+
+
+@pytest.mark.parametrize("mask", (1, 3, 5, 7, 0x81))
+def test_reset_recovers_from_build_specific_snapshot_without_fabricating_ready(mask):
+    controller = make_controller()
+    handshake(controller, mask)
+    controller.send_cal_reset()
+    assert not controller.state.calibration.ready
+    automatic = not (mask & 6)
+    # Wrong build's post-reset state must not stop retries.
+    controller._handle_preflight_status(preflight_status(
+        capability_acked=True, calibration_mode=255 if automatic else 0,
+        calibration_state=0 if automatic else 4, calibration_ready=not automatic,
+    ))
+    assert controller.pending_air_cmds
+    controller._handle_preflight_status(preflight_status(
+        capability_acked=True, calibration_mode=0 if automatic else 255,
+        calibration_state=4 if automatic else 0, calibration_ready=automatic,
+    ))
+    assert not controller.pending_air_cmds
+    assert controller.state.calibration.ready is automatic
+
+
+def test_gui_default_requires_click_and_dispatches_real_air(window):
+    controller = make_controller()
+    handshake(controller, 3)
+    controller.worker.sent.clear()
+    controller.air_seq = 0
+    window.bind_runtime_model(controller.state, EventHistory())
+    window.on_cal_start = controller.send_cal_start
+    for language in (Language.EN_US, Language.ZH_CN):
+        window.i18n.set_language(language)
+        window.retranslate_ui()
+        assert window.calibration_dialog.mode_combo.currentData() == 0
+        assert window.calibration_dialog.mode_combo.currentText() == window.i18n.tr("cal.default_correction")
+    assert not controller.worker.sent
+    window.calibration_dialog.btn_start.click()
+    assert controller.worker.sent == [bytes.fromhex("a5 5a 03 0a 09 30 00 07 30 4c 41 43 00 00 09 a2")]
+    assert not controller.state.calibration.ready

@@ -4,7 +4,7 @@
 [`docs/AIR_PROTOCOL.md`](docs/AIR_PROTOCOL.md) 为唯一 AIR 协议依据，适配：
 
 ```text
-SilverStar AIR V0
+SilverStar Platform 0.0.10 / AIR M0
 AIR_PROFILE_COMPACT_V0 = 0
 ```
 
@@ -14,7 +14,7 @@ PC 仍通过串口连接地面站，GSP-MIN 只负责透明转发 AIR 帧，wire
 
 - 自动接收并确认 `CAPABILITY`，不提供人工 Capability ACK 按钮；
 - 完整支持 `PREFLIGHT_STATE`、`PREFLIGHT_STATUS`、`SENSOR_STATUS`、`STATUS`、`ACK` 和 `FLIGHT_STATE`；
-- 兼容 FCCG 0.0.10 动态校准能力：按 Capability 提供 ONE_FACE / SIX_FACE 采样流程，NONE 表示单位校正；
+- 兼容 FCCG 0.0.10 动态校准能力：按 Capability 提供默认校正及 ONE_FACE / SIX_FACE 采样流程；
 - SIX_FACE 在 `WAIT_FACE` 和全部完成后的 `READY` 都允许点选任意单面重采，其余五面状态由飞控快照保持；
 - 显示 `CALIBRATION_DIAGNOSTIC` 的当前采集问题，但不把诊断提示误判为校准失败；
 - 支持 Alignment START / STOP / RESET，并以飞控快照为最终判据；Alignment 结束时缓存通用 Sensor Snapshot；
@@ -93,31 +93,13 @@ SerialWorker
 串口字节不再排入 GUI 线程解析。协议线程先把每个成功解析的正式 AIR 帧及 raw 信息写入异步日志队列，再交给状态邮箱。GUI 忙时，状态邮箱只会显式合并中间显示用的遥测/快照；完整数据已经进入 JSONL，不会随显示合并而丢失。详细设计见
 [`docs/UPPER_COMPUTER_ARCHITECTURE.md`](docs/UPPER_COMPUTER_ARCHITECTURE.md)。
 
-## 5. AIR V0 消息
+## 5. 协议与文档入口
 
-```text
-0x10 FLIGHT_STATE       50 B
-0x11 PREFLIGHT_STATE    26 B
-0x12 CAPABILITY          9 B
-0x13 PREFLIGHT_STATUS    9 B
-0x14 SENSOR_STATUS       9 B
-0x20 STATUS              9 B
-0x30 CMD                 9 B
-0x40 ACK                 9 B
-```
+[文档索引](docs/README.md)汇总 AIR、GSP、应用架构、校准操作及平台参考。
+AIR M0 的字段、枚举、编码、帧长度和完整性边界仅由 [AIR_PROTOCOL](docs/AIR_PROTOCOL.md) 定义；跨组件 Calibration 行为由 [共同契约](docs/AIR_CALIBRATION_CONTRACT.md) 定义。
+GSHC 的 `docs/platform/` 是必要语义的只读参考镜像，完整平台规范由 FCCG `docs/platform/` 维护。
 
-AIR 无应用层 CRC；GSP-MIN 和 LoRa Transport 继续承担各自的完整性保护。
-
-物理量换算只能使用当前兼容 Capability 中的：
-
-```text
-accel_full_scale_g
-gyro_full_scale_dps
-```
-
-收到 Capability 前仍记录原始 `int16`，但 GUI 显示“等待 Capability”，不会猜测 16 g / 2000 dps。收到未知 profile 时显示 `AIR PROFILE UNSUPPORTED`，保留 raw 帧且不猜测解析、不自动 ACK。
-
-`CAPABILITY.byte5` 是 `sensor_summary_flags`，只概括 IMU、GNSS、辅助传感器和快照支持能力；保留位不参与判断。`PREFLIGHT_STATUS.byte6` 仅使用低四位的 Alignment state，高四位保留且忽略。上位机不再解释旧的 Alignment source mask，也不从该字节推导固定 Attitude/GNSS/Baro source 状态。
+物理量换算只使用兼容 Capability 声明的量程；收到前保留原始值并显示等待，不猜测量程。未知 profile 保留 raw 并显示不兼容，不自动 ACK。通用 Sensor Snapshot 保留未知 sensor/detail，不推导固定的 Alignment source bits。
 
 ## 6. Capability 与命令策略
 
@@ -137,26 +119,26 @@ param1 = air_profile_id
 
 ## 7. Calibration / Alignment / START
 
-可启动的采样校准列表来自本次握手确认的 `calibration_mode_mask`，不会从 mask 推断当前模式或完成状态：
+可启动的校准事务列表来自本次握手确认的 `calibration_mode_mask`，不会从 mask 推断当前模式或完成状态：
 
 | mask | Start Calibration 可选项 |
 |---|---|
-| `0x01` | 无；显示“本工程不执行采样校准，使用单位校正（NONE）”，禁用开始按钮 |
-| `0x03` | ONE_FACE |
-| `0x05` | SIX_FACE |
-| `0x07` | ONE_FACE、SIX_FACE |
+| `0x01` | 无需选择；飞控自动单位校正，等待真实就绪 |
+| `0x03` | 使用默认校正（不进行采样）、ONE_FACE |
+| `0x05` | 使用默认校正（不进行采样）、SIX_FACE |
+| `0x07` | 使用默认校正（不进行采样）、ONE_FACE、SIX_FACE |
 
 未知高位保留并在链路详情中显示，已知位照常使用。每次断开/重连及成功握手刷新校准控件，包括隐藏的对话框；不复用上一飞控的模式。重置校准在预飞面板与原对话框中均保留，使用既有 `CAL_RESET`。
 
-NONE 不属于用户采样操作，GSHC 永不发送 `CAL_START(NONE)`。当前模式由 `PREFLIGHT_STATUS` / Calibration STATUS 给出；NONE 就绪时显示“单位校正（未执行单面/六面采样校准）”，ready=0 时仍保留飞控的真实 state/ready，不自动推进。
+NONE 表示单位校正，不属于采样流程。有采样流程的 build 可显式选择它并发送既有 `CAL_START(NONE)`；无采样流程的 build 由飞控自动 NONE，GSHC 不重复发送。高亮默认选项和刷新界面都不会自动发命令。当前模式由 `PREFLIGHT_STATUS` / Calibration STATUS 给出；NONE 就绪时显示“单位校正（未执行单面/六面采样校准）”，ready=0 时仍保留飞控的真实 state/ready，不自动推进。
 
 - ONE_FACE：飞控自动推进，上位机不发送 CAL_FACE；
 - SIX_FACE：用户摆放对应面后发送 CAL_FACE。ACK OK 仅代表 accepted；只有 `CALIBRATION_FACE PASSED` 或快照中的 `completed_face_mask` 才显示完成。
   六面全部完成进入 `READY` 后，六个面仍可单独点击重采；上位机继续发送既有 `CAL_FACE`，不新增命令，也不会自行清除其他五面的完成标记。
 
-Controller 在 CAL_START 的公共入口、通用命令入口和每次重试发送前核对：Capability 握手完成、mode 为 ONE_FACE/SIX_FACE、对应 bit 已置位；本地拒绝不生成 TX。`CAL_START ACK OK` 仅表示接受，完成等待后续状态；`BAD_PARAM` 提示 build 不支持或参数错误，不自动尝试其他模式。`BAD_STATE` / `BUSY` 不视为断链；ACK 超时保持现有 800 ms、最多 3 次重试，保留 Capability。
+Controller 在 CAL_START 的公共入口、通用命令入口和每次重试发送前核对：Capability 握手完成、事务属于当前 `calibration_start_modes()`；采样模式需对应 bit，NONE 需当前 build 有采样流程；本地拒绝不生成 TX。`CAL_START ACK OK` 仅表示接受，完成等待后续状态；`BAD_PARAM` 提示 mode 编码非法，`REJECTED` 提示合法采样模式未编入 build，不自动尝试其他模式。`BAD_STATE` / `BUSY` 不视为断链；ACK 超时保持现有 800 ms、最多 3 次重试，保留 Capability。
 
-详细操作见 [校准用户说明](docs/CALIBRATION_USER_GUIDE.md)，自动验证与 SS0.5 实机检查见 [验证记录](tests/validation/README.md)。
+详细操作见 [校准用户说明](docs/CALIBRATION_USER_GUIDE.md)，自动验证与 SS0.5 实机检查见 [验收快照](VALIDATION.md)和[复验步骤](tests/validation/README.md)。
 
 Alignment START 在 Calibration ready 后可用。ACK OK 仅代表 accepted；`PREFLIGHT_STATUS.alignment_ready` 是最终判据，Alignment STATUS event 只提供即时提示，不能在 STALE 后独立恢复 ready。
 

@@ -1,221 +1,52 @@
 # SilverStar_GSHC 接收与显示架构
 
-本文描述 SilverStar AIR V0 / Profile 0 上位机的实时接收、状态、日志和 GUI 边界。AIR 字段以 [AIR_PROTOCOL.md](AIR_PROTOCOL.md) 为准，GSP wire format 以 [GSP_MIN_PROTOCOL.md](GSP_MIN_PROTOCOL.md) 为准。
+AIR字段以 [`AIR_PROTOCOL.md`](AIR_PROTOCOL.md) 为准，GSP以 [`GSP_MIN_PROTOCOL.md`](GSP_MIN_PROTOCOL.md) 为准。
 
-## 1. 卡顿根因
-
-旧链路为：
-
+## 1. 数据流
 ```text
-SerialWorker 每个 chunk 发 queued Qt signal
-  -> GUI 线程解析 GSP
-  -> GUI 线程解析 AIR
-  -> GUI 线程 json.dumps / file.write / 每条 flush
-  -> GUI 线程更新 QLabel / OpenGL
-  -> 每次 vector push 重绘全部六张曲线
-```
-
-一帧 FLIGHT_STATE 分别 push velocity 和 position，因此会重复全量绘图两次。持续输入时，生产速度高于 GUI 消费速度，Qt 事件队列逐渐增长；停止发送后队列被慢慢处理完，界面恢复。这与实机“持续接收后变卡，停发后恢复”的表现一致。
-
-## 2. 当前数据流
-
-```text
-SerialWorker (QThread)
-  open / read / write / close
-          |
-          | DirectConnection：仅做有界 enqueue，不进入 GUI event queue
-          v
-ProtocolWorker (QThread)
-  bounded raw-chunk queue
-  -> ReceivePipeline
-     -> GSP parser
-     -> AIR Profile 0 parser
-     -> immutable ProtocolEvent
-  -> AsyncJsonlLogger queue（先持久化）
-  -> bounded UI mailbox
-          |
-          | GUI 20 ms timer pull，最多 512 events/tick
-          v
+SerialWorker(QThread): open/read/write/close
+  ↓ bounded direct enqueue
+ProtocolWorker(QThread)
+  → GSP parser
+  → AIR parser
+  → immutable ProtocolEvent
+  → Async JSONL queue (先持久化)
+  → bounded UI mailbox
+  ↓ GUI timer pull
 Controller
-  -> FlightControllerState
-  -> EventHistory(maxlen=200)
-  -> command / handshake transactions
-          |
-          | GUI 100 ms render timer
-          v
-MainWindow
-  labels / latest 3D attitude / six plots
+  → FlightControllerState
+  → EventHistory
+  → command/handshake transactions
+  ↓ render timer
+MainWindow / plots / one OpenGL view
 ```
+SerialWorker不访问Widget/协议；ProtocolWorker不访问Widget；MainWindow不解析wire。
 
-SerialWorker 不访问 Widget，不解析协议，不写文件。ProtocolWorker 不访问 Widget。MainWindow 不解析 wire data，也不承担持久化。
+## 2. 有界队列
+所有实时容器有明确上限。正式数据在UI合并前进入JSONL；GUI忙时只允许合并中间显示用PREFLIGHT/FLIGHT状态，不能静默丢持久化数据。
 
-握手、命令事务和 session 的唯一状态所有者是 Controller。ReceivePipeline / ProtocolWorker 不保存 `capability_acked`，不根据 Capability 推测重启，也不触发状态清理或 logger rollover。
+## 3. Session/Handshake
+Controller是Capability/command/session唯一状态所有者。第一次兼容Capability绑定会话；更新seq在未握手时替换pending Capability ACK。握手成功后迟到Capability只做诊断，不自动清空状态或rollover日志。新飞控会话通过明确断开/重连建立。
 
-## 3. 有界队列与背压
+握手完成：匹配`ACK(CAPABILITY_ACK,OK)`或`PREFLIGHT_STATUS.capability_acked=1`恢复。Capability自身seq与PC命令seq严格区分。
 
-实时路径中的容器都有明确上限：
+## 4. Calibration / Alignment
+Capability决定build支持的流程；当前状态由PREFLIGHT_STATUS决定。最终NONE/OneFace/SixFace规则见 [`AIR_CALIBRATION_CONTRACT.md`](AIR_CALIBRATION_CONTRACT.md)。当build含采样procedure时，GSHC可发送`CAL_START(NONE)`选择默认校正；仅0x01时飞控自动NONE。
 
-| 容器 | 上限 | 饱和行为 |
-|---|---:|---|
-| Serial TX queue | 128 frames | 显式发送错误，不无限增长 |
-| Protocol raw input queue | 1024 chunks | 告警并对串口线程施加有界背压，不静默丢 RX |
-| Async JSONL queue | 20000 records | 告警并等待 writer，不静默丢日志 |
-| UI state mailbox | 4096 events + 少量 latest slots | 正式数据已写日志；合并中间显示帧并计数告警 |
-| EventHistory | 200 events | GUI 删除最旧项；JSONL 保留全部 |
-| Live plot buffer | 10 s、最多 2000 points | 按时间裁剪，另有防御性点数上限 |
-| Pending AIR command | 1 ordinary + 1 special handshake | 新人工命令被拒绝，Capability ACK 优先 |
+`FlightControllerState.sampling_calibration_modes()` 只返回采样流程；`calibration_start_modes()` 返回当前可启动事务。Controller 在公共入口、通用入口及每次重试发送前使用 `check_calibration_start()`；无采样 build 的 NONE 返回 `AUTOMATIC_NONE`，不发重复命令。
 
-UI mailbox 不使用“每帧一个 queued Qt signal”。当 GUI 暂时忙碌时，FLIGHT_STATE、PREFLIGHT_STATE 和 PREFLIGHT_STATUS 的中间显示副本可被合并为最新副本；对应 raw/parsed JSONL 在合并前已经完整排入 writer。因此这是 UI coalescing，不是正式数据丢失。
+NONE 必须由真实 `PREFLIGHT_STATUS` 的 mode/state/ready 确认；Calibration 状态事件继续显示状态，但不补造其 ready 标志。CAL_RESET 的丢 ACK 恢复也区分自动 NONE/READY 和等待选择的 NOT_SELECTED/IDLE。两个分支都由快照驱动。
 
-## 4. Receive Pipeline 诊断
+ALIGN_START ACK只表示accepted；最终看alignment state/ready。普通ACK错误/timeout不改变握手状态。
 
-状态页的 `PC处理状态` 显示 NORMAL / BACKLOG，tooltip 包含：
+## 5. 诊断
+AIR Link Details集中显示Capability RX、PC→GS request、serial writes、GSP ACK、GS TX/RX/CRC、AIR ACK/PREFLIGHT恢复、队列积压、RSSI/SNR、最后AIR/快照年龄。用于区分PC/GSP/空口/飞控运行故障。
 
-```text
-serial_rx_bytes
-serial_rx_chunks
-gsp_frames
-gsp_parse_errors
-gsp_crc_errors
-gsp_resyncs
-parser_buffer_size
-air_frames
-air_parse_errors
-protocol_queue_depth / capacity
-ui_mailbox_depth / capacity
-ui_coalesced_events
-logger_queue_depth / capacity
-last_rx_age_ms
-max_processing_lag_ms
-warning
-```
+## 6. GUI
+预飞/飞行/后处理三页可手动切换。左侧OpenGL context只创建一次。飞行首次由START ACK、MISSION_START或FLIGHT_STATE确认时自动切页一次；之后不抢焦点。
 
-GSP parser 在无完整 SOF 时保留末尾单个 `0xA5`，避免帧头恰好在 A5/5A 之间分片时丢帧。CRC 错误、重同步和丢弃字节均可诊断。
+## 7. Persistent vs live
+JSONL记录整个会话；EventHistory和实时曲线是有界GUI缓存。实时窗口裁剪不影响持久化。
 
-## 5. 异步 JSONL
-
-`AsyncJsonlLogger` 使用：
-
-```text
-thread-safe bounded queue
-  -> one writer thread
-  -> ordered JSON serialization
-  -> max 64 records or 200 ms batch flush
-```
-
-正常接收路径不执行 file flush。session close 会按顺序 drain、flush、fsync 边界并关闭文件。文件异常保存在显式 error 状态，不会伪装为正常。新 JSONL 由明确的串口会话边界建立，不由重复 Capability 自动切换。
-
-每条记录自动带：
-
-```text
-ts                  host wall time
-host_monotonic_ns   enqueue monotonic time
-```
-
-RX pipeline 另带：
-
-```text
-host_rx_monotonic_ns
-host_processed_monotonic_ns
-processing_lag_ms
-```
-
-## 6. Persistent Recording 与 Live Display
-
-两个生命周期严格分离：
-
-```text
-Persistent Recording
-  全部 GSP raw、AIR raw、CAPABILITY、PREFLIGHT_STATUS、
-  PREFLIGHT_STATE、SENSOR_STATUS、STATUS、ACK、FLIGHT_STATE
-  -> 整个飞控会话
-
-Live Display
-  latest sensor / latest quaternion
-  EventHistory <= 200
-  velocity/position latest 10 s and <= 2000 points
-```
-
-实时曲线的 cutoff 为：
-
-```text
-sample_time >= latest_time - 10.0 s
-```
-
-采样率从 5 Hz 改变后仍保持 10 秒窗口，而不是固定 400 点。一次 FLIGHT_STATE 同时 append velocity 和 position，只增加一个 plot revision；100 ms timer 一次更新六条曲线。
-
-3D 只读取 `SensorSnapshot` 中最新有效四元数。旧姿态不在 GUI 内存中形成历史，完整姿态仍在 JSONL。
-
-## 7. State 与 Event
-
-`FlightControllerState` 保存当前权威状态：
-
-- SessionCapability 与 command policy；
-- lifecycle；
-- Calibration mode/state/faces/ready；
-- Alignment state/overall ready，以及最新的 Alignment 终止 Sensor Snapshot；
-- system/selftest/GNSS/UNLOCK/start block；
-- 最新传感器、链路、丢包和任务时间；
-- ReceiveHealth。
-- HandshakeDiagnostics（最新序号/时间、尝试次数和有界计数器）。
-
-`EventHistory` 独立保存 STATUS 边沿事件。PREFLIGHT_STATUS 是“现在是什么状态”，STATUS 是“刚才发生了什么”，两者不会相互替代。快照可以纠正丢失的 Calibration face、LOCK 或 Alignment 边沿事件。
-
-`AlignmentSensorSnapshotCache` 按 `snapshot_id` 保存少量有界 accumulator，以 `index/total` 合并乱序帧。重复 index 采用 latest-wins 并累计诊断；total 不一致的帧不混入既有快照。只有 Alignment READY / FAILED STATUS 才终止对应快照并判定完整性。STALE `arg1=0xFF` 不建立新快照，详情继续展示上一次终止快照。建立新的串口会话会构造新的 `FlightControllerState`，因此 accumulator 和旧终止快照不会跨会话泄漏。
-
-Sensor registry 只包含 AIR V0 的 canonical ID；未知 ID 仍是合法数据。详情视图从缓存按 IMU、GNSS、其余 sensor ID、instance 排序，并显示通用状态 flags、detail 和 raw flags。详情按钮没有 Controller 命令回调，不会产生 AIR 请求。
-
-## 8. Capability 与 session
-
-串口连接创建 provisional JSONL。第一次兼容 Capability 绑定当前会话。未完成握手时，新的 Capability seq 替换旧 CAPABILITY_ACK transaction；普通人工命令不能抢占握手。
-
-握手完成条件：
-
-```text
-matching ACK(CAPABILITY_ACK, OK)
-or PREFLIGHT_STATUS.capability_acked == 1
-```
-
-第一条条件还要求 ACK 的 `ack_cmd_id=CAPABILITY_ACK` 且 `ack_seq` 等于当前 PC 待确认命令的 seq；Capability 自己的 seq 只放在命令 param0 中，二者不混用。未握手时，更新的 Capability seq 替换当前 transaction。已握手后迟到或重复的 Capability 只记录 `STALE_OR_DUPLICATE_CAPABILITY_AFTER_ACK` 并增加计数，不重置 Controller、不重发 ACK、不清空 UI、不切换 JSONL。需要新飞控 session 时由操作者断开并重连 PC 串口。
-
-预飞页 AIR Link 的“详情”对话框提供可核对的诊断链：
-
-```text
-Capability RX seq/time
-  -> CAPABILITY_ACK PC cmd seq / attempts
-  -> PC→GS AIR_TX requests
-  -> serial writes / bytes
-  -> GSP AIR_TX ACK OK/FAIL
-  -> GS STATUS TX/RX/CRC
-  -> AIR ACK result or PREFLIGHT_STATUS recovery
-```
-
-校准能力只生成本次握手确认的 ONE_FACE/SIX_FACE 采样操作；NONE bit 和未知高位仍保留原值。可见/隐藏的校准控件随会话和握手刷新，校准 ready 仍来自预飞状态。Controller 在公共入口、通用命令入口、retry 发送前执行 `CalibrationStartResult` 门禁，拒绝时写 `CAL_START_LOCAL_REJECTED`，不发送 AIR。
-
-详情还显示未知校准位、Capability/PREFLIGHT_STATUS 接收计数、最近 AIR 命令反馈、最后 AIR 下行与预飞快照的距今时间。普通校准 ACK 错误和 timeout 不改变握手状态；即使下行停止，GUI timer 继续刷新时间和 PC/GSP 诊断。
-
-`CAPABILITY_ACK_TX` 作为显式 JSONL 记录保存 Capability seq、PC cmd seq、attempt 和 retry；所有诊断只保存最新值或累计计数，不形成第二个无限历史。
-
-## 9. GUI 渲染
-
-右侧为三个始终可点击的 QTabWidget 页面：
-
-```text
-预飞行：System / Calibration / Alignment / GNSS / Inertial-Attitude / commands / EventHistory
-飞行：重要状态 / 当前数据 / Mission State / 6 plots
-后期处理：模拟数据 / 处理数据 / 打开 logs / 打开 data
-```
-
-左侧只创建一个 OpenGL 3D widget，页面切换不重建 context。原 mesh、faces、colors、world/body axes、E/W/N/S/U、NOSE、相机参数、锁定/解锁、重置和鼠标行为保持不变。
-
-任务第一次由 START ACK、MISSION_START 或 FLIGHT_STATE 确认时，GUI 自动切到飞行页一次。记录 `session_generation` 后不再抢焦点；用户可手动返回预飞或后期处理。只有全新飞控 session 才允许下一次自动切换。
-
-界面文字统一由 `services/i18n.py` 的翻译 key 渲染，支持 `zh_CN` / `en_US` 无重启切换，语言通过 QSettings 保存。状态模型和 EventHistory 只保存规范枚举/原始参数；切换语言时重译当前标签、按钮、tooltip、事件历史、校准对话框和曲线标题，不重建 worker、协议状态或 OpenGL 场景。E/W/N/S/U、NOSE 和 body axis 技术标识保持不翻译。JSONL 的 kind、enum name 和字段值始终是规范英文，不受界面语言影响。
-
-Alignment 主面板只显示总体 state/ready、快照完整性和详情入口，不写死 Attitude/GNSS origin/Baro origin 三个 source。GNSS 动态 usable 状态仍在独立主面板显示；Barometer 等硬件 inventory 仅在实际 Sensor Snapshot 中出现。AIR Link Details 仅在内容变化时更新文本，更新前后保存滚动位置和 selection；原本位于底部时跟随新底部，否则保持用户阅读位置。
-
-## 10. 后处理边界
-
-后处理在独立 ProcessingWorker QThread 运行。飞行中禁用模拟生成和正式处理按钮，但页面与日志/data 文件夹仍可查看。
-
-处理器优先消费 AIR_PARSED，raw fallback 仅实现 Profile 0。没有 Capability 时只保留 raw，绝不猜测量程。飞行图从 MISSION_START 或第一帧 FLIGHT_STATE 开始；预飞样本不混入 velocity/position 曲线。manifest 保存 Capability、最终预飞状态、任务持续时间和 packet loss。
+## 8. Thread safety
+长后处理/模拟/数据迁移在独立worker thread；UI线程只更新状态。所有退出/取消有界，不能遗留运行QThread对象。

@@ -1388,11 +1388,11 @@ class Controller(QObject):
         result = self.state.check_calibration_start(mode)
         if result is CalibrationStartResult.ALLOWED:
             return True
-        self._set_radio_message(
-            "radio.calibration_handshake_required"
-            if result is CalibrationStartResult.HANDSHAKE_REQUIRED
-            else "radio.calibration_mode_unsupported"
-        )
+        message_key = {
+            CalibrationStartResult.HANDSHAKE_REQUIRED: "radio.calibration_handshake_required",
+            CalibrationStartResult.AUTOMATIC_NONE: "radio.calibration_automatic_none",
+        }.get(result, "radio.calibration_mode_unsupported")
+        self._set_radio_message(message_key)
         self._log(
             {
                 "dir": "LOCAL",
@@ -1791,7 +1791,10 @@ class Controller(QObject):
     def _cal_start_observed(
         mode: int,
         calibration_state: int,
+        calibration_ready: bool | None = None,
     ) -> bool:
+        if mode == int(AirCalibrationMode.NONE):
+            return calibration_state == int(AirCalibrationState.READY) and calibration_ready is True
         if mode == int(AirCalibrationMode.SIX_FACE):
             return calibration_state in {
                 int(AirCalibrationState.WAIT_FACE),
@@ -1821,6 +1824,7 @@ class Controller(QObject):
                 and self._cal_start_observed(
                     message.calibration_mode,
                     message.calibration_state,
+                    message.calibration_ready,
                 )
             )
             detail = "CAL_START state/mode observed"
@@ -1845,7 +1849,18 @@ class Controller(QObject):
                 and not message.calibration_ready
                 and message.completed_face_mask == 0
             )
-            detail = "CAL_RESET idle snapshot observed"
+            if (
+                self.state.capability is not None
+                and self.state.capability.calibration_mode_mask & (1 << AirCalibrationMode.NONE)
+                and not self.state.sampling_calibration_modes()
+            ):
+                observed = bool(
+                    message.calibration_mode == int(AirCalibrationMode.NONE)
+                    and message.calibration_state == int(AirCalibrationState.READY)
+                    and message.calibration_ready
+                    and message.completed_face_mask == 0
+                )
+            detail = "CAL_RESET build-appropriate snapshot observed"
         # AIR_PROTOCOL does not define a unique CAL_STOP snapshot state.
         # CAL_STOP therefore remains ACK/timeout based.
         if observed and self._resolve_pending_air_cmd(
@@ -2300,9 +2315,17 @@ class Controller(QObject):
             if message.arg0 == int(AirAlignmentState.STALE):
                 self._set_radio_message("radio.alignment_stale")
         elif status_id == int(AirStatusId.CALIBRATION):
+            previous_ready = bool(
+                self.state.calibration.ready and self.state.calibration.mode == message.arg1
+            )
             self.state.calibration.state = message.arg0
             self.state.calibration.mode = message.arg1
-            self.state.calibration.ready = message.arg0 == int(AirCalibrationState.READY)
+            # NONE has no sampling progress. Its event lacks the ready flag;
+            # wait for the authoritative NONE/READY/ready=1 snapshot.
+            self.state.calibration.ready = bool(
+                message.arg0 == int(AirCalibrationState.READY)
+                and (message.arg1 != int(AirCalibrationMode.NONE) or previous_ready)
+            )
         elif status_id == int(AirStatusId.CALIBRATION_FACE):
             if 0 <= message.arg0 <= 5 and message.arg1 == 1:
                 self.state.calibration.completed_face_mask |= 1 << message.arg0
@@ -2440,6 +2463,11 @@ class Controller(QObject):
             and message.result == int(AirAckResult.BAD_PARAM)
         ):
             self._set_radio_message("radio.calibration_bad_param")
+        elif (
+            message.ack_cmd_id == int(AirCmdId.CAL_START)
+            and message.result == int(AirAckResult.REJECTED)
+        ):
+            self._set_radio_message("radio.calibration_rejected")
         elif (
             message.result == int(AirAckResult.ALREADY_LOCKED)
             and message.ack_cmd_id == int(AirCmdId.LOCK)
