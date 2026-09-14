@@ -1,5 +1,91 @@
 # GSHC 验收快照
 
+## 2026-09-14 — GUI field-usability closeout
+
+Scope: GUI/helper, corresponding tests and documentation only. Initial working tree was clean.
+No protocol, transport, Controller/state-machine, telemetry, export numerical logic, version,
+commit or push changed. The three user-authorized repositories remain independent.
+
+<!-- touch-git-snapshot -->
+### Modified files and Git snapshot
+
+- `VALIDATION.md`
+- `docs/GUI_STYLE_GUIDE.md`
+- `tests/test_port_gui.py`
+- `tests/test_touch_scroll.py`
+- `ui/main_window.py`
+- `ui/port_combo.py`
+- `ui/theme.py`
+- `ui/touch_scroll.py`
+
+`git diff --stat` (tracked files only; new files are listed above):
+
+```text
+ VALIDATION.md           | 86 +++++++++++++++++++++++++++++++++++++++++++++++++
+ docs/GUI_STYLE_GUIDE.md | 16 +++++++++
+ ui/main_window.py       | 27 ++++++++++++----
+ ui/theme.py             |  4 ++-
+ 4 files changed, 126 insertions(+), 7 deletions(-)
+```
+
+`git status --short`:
+
+```text
+ M VALIDATION.md
+ M docs/GUI_STYLE_GUIDE.md
+ M ui/main_window.py
+ M ui/theme.py
+?? tests/test_port_gui.py
+?? tests/test_touch_scroll.py
+?? ui/port_combo.py
+?? ui/touch_scroll.py
+```
+<!-- /touch-git-snapshot -->
+
+### Cause and repair
+
+The complete serial string chain was audited and tested: list_serial_port_names -> set_ports ->
+port_combo -> current_port -> actual Controller.connect -> SerialConfig -> SerialWorker._open_serial
+-> mocked serial.Serial. COM1, COM9, COM10, COM99 and COM100 remain byte-for-byte complete. No actual
+string truncation was found. The old combo relied on its default first-show sizing and compressible
+layout policy. PortComboBox now uses AdjustToContents, a font/style-derived minimumSizeHint, Minimum
+horizontal size policy and a contents-sized popup, with the full name also in a tooltip.
+The original COM10-to-COM1 visual symptom was not reproduced on this machine; this is a GUI sizing
+repair, not evidence that the transport string was ever truncated.
+
+Native TouchGesture coverage: preflight and post-processing forms; calibration and export option
+forms; event history list; link/sensor detail text; calibration, directory policy, export language,
+header language/theme and serial popup lists. Flight plots and AttitudeGLViewWidget remain outside
+page scroll areas; no plot, GL, slider, button, combo body, spinbox or header is registered.
+QSS effective header heights with Windows fonts at 1280x800: refresh 36 px, port 34 px, baud 37 px.
+Existing larger action controls remain available. No fake mouse drags or inertia tuning added.
+
+### Executed checks
+
+- `python -B -m pytest tests/test_ui_workflow.py -q --basetemp=tests/.pytest-work-touch-focused -o cache_dir=tests/.pytest-cache-touch`: **26 passed**.
+- `python -B -m pytest tests/test_port_gui.py tests/test_touch_scroll.py -q --basetemp=tests/.pytest-work-touch-new2 -o cache_dir=tests/.pytest-cache-touch`: **28 passed**.
+- Full `pytest.main(['-q', '--basetemp=tests/.pytest_cache/touch-validation/full', '-o', 'cache_dir=tests/.pytest_cache/touch-validation/cache'])`: **376 passed, 3 subtests passed**, 242.47 s; includes AIR/GSP Golden, protocol, state-machine, docs and UI tests.
+- Final GUI after conservative height adjustment: `python -B -m pytest tests/test_ui_workflow.py tests/test_port_gui.py tests/test_touch_scroll.py -q --basetemp=tests/.pytest_cache/touch-validation/final-gui -o cache_dir=tests/.pytest_cache/touch-validation/cache`: **54 passed**, 134.22 s.
+- Windows fonts and `QT_SCALE_FACTOR=2`: `python -B -m pytest tests/test_port_gui.py -q --basetemp=tests/.pytest_cache/touch-validation/dpi2 -o cache_dir=tests/.pytest_cache/touch-validation/cache`: **10 passed**. Includes ports arriving after first show, larger fonts, popup/edit-field geometry and refresh selection retention.
+- `python -m compileall -q main.py app.py config.py protocol services transport ui processing tests/test_port_gui.py tests/test_touch_scroll.py`: **passed**, with PYTHONPYCACHEPREFIX below the test output root.
+- `python -B -m pytest tests/test_docs.py -q --basetemp=tests/.pytest_cache/touch-validation/docs-final -o cache_dir=tests/.pytest_cache/touch-validation/cache`: **30 passed**.
+- Existing `tests/validation/headless_gui_smoke.py`, executed in memory with only its output root redirected to this task's tests directory: **8 mask/language cases, dialog and event loop passed**.
+- Existing `tests/validation/packaging_smoke.ps1`, executed in memory with project/output roots fixed to this repository/tests directory: **final PyInstaller build and 8-second EXE startup passed**, stderr 0 bytes; only the spawned smoke process was stopped.
+- `git diff --check`, static scrolling inventory and unchanged protocol/transport source audit: **passed**.
+
+The full-run wrapper used `QT_QPA_PLATFORM=offscreen`, process-local TEMP/TMP/MPLCONFIGDIR and
+QSettings IniFormat paths below `tests/.pytest_cache/touch-validation`. Build/cache/runtime-data
+outputs also stay there. Evidence: `full.log`, `final-gui.log`, `headless.log`, `headless/`,
+`header-final.png`, `packaging-smoke/build.log` and `packaging-smoke/startup.json` under that root.
+
+### Remaining validation limits
+
+No connected serial hardware or CF-33 physical touchscreen/stylus was available. Synthetic Qt
+finger swipes actually moved page/list/table/text scrollbars; mouse selection and graphics
+exclusion tests passed. Physical driver behavior and the original field-only visual symptom
+still require a field check. No failing executed regression remains.
+
+
 日期：2026-09-05。本文件是精确测试数量、hash 和构建验收数据的唯一快照权威；能力状态见 [CURRENT_PROGRESS](docs/CURRENT_PROGRESS.md)，复验命令和实机步骤见[验证步骤](tests/validation/README.md)。
 
 ## 范围与基线

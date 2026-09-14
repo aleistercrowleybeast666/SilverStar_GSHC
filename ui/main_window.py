@@ -73,6 +73,8 @@ from services.state_model import (
     HandshakeState,
     MissionPhase,
 )
+from ui.port_combo import PortComboBox
+from ui.touch_scroll import TouchScroll_Enable, TouchScroll_Wrap
 from ui.theme import ThemeColors, apply_application_theme, theme_colors
 
 
@@ -165,9 +167,13 @@ class CalibrationDialog(QDialog):
         self._last_mode_context: tuple[int, bool, int] | None = None
         self._state: FlightControllerState | None = None
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        content = QWidget()
+        root = QVBoxLayout(content)
+        outer.addWidget(TouchScroll_Wrap(content))
         mode_row = QHBoxLayout()
         self.mode_combo = QComboBox()
+        TouchScroll_Enable(self.mode_combo.view())
         self.btn_start = QPushButton()
         self.lbl_supported_modes = QLabel()
         mode_row.addWidget(self.lbl_supported_modes)
@@ -397,6 +403,7 @@ class LinkDetailsDialog(QDialog):
         self.setMinimumSize(620, 560)
         layout = QVBoxLayout(self)
         self.details_text = QPlainTextEdit()
+        TouchScroll_Enable(self.details_text)
         self.details_text.setFont(QFont("Consolas"))
         self.details_text.setReadOnly(True)
         layout.addWidget(self.details_text, 1)
@@ -544,6 +551,7 @@ class SensorDetailsDialog(QDialog):
         self.setMinimumSize(620, 560)
         layout = QVBoxLayout(self)
         self.details_text = QPlainTextEdit()
+        TouchScroll_Enable(self.details_text)
         self.details_text.setFont(QFont("Consolas"))
         self.details_text.setReadOnly(True)
         layout.addWidget(self.details_text, 1)
@@ -672,6 +680,7 @@ class DataDirectoryDialog(QDialog):
         conflict_row = QHBoxLayout()
         self.lbl_conflict_policy = QLabel()
         self.conflict_policy_combo = QComboBox()
+        TouchScroll_Enable(self.conflict_policy_combo.view())
         self.conflict_policy_combo.setMinimumWidth(280)
         conflict_row.addWidget(self.lbl_conflict_policy)
         conflict_row.addWidget(self.conflict_policy_combo, 1)
@@ -1012,10 +1021,14 @@ class ExportOptionsDialog(QDialog):
         self.preferences = preferences
         self.setMinimumWidth(520)
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        content = QWidget()
+        root = QVBoxLayout(content)
+        outer.addWidget(TouchScroll_Wrap(content))
         language_row = QHBoxLayout()
         self.lbl_language = QLabel()
         self.language_combo = QComboBox()
+        TouchScroll_Enable(self.language_combo.view())
         language_row.addWidget(self.lbl_language)
         language_row.addWidget(self.language_combo, 1)
         root.addLayout(language_row)
@@ -1412,8 +1425,7 @@ class MainWindow(QMainWindow):
         self._bind_text(self.header_connection, "group.connection")
         connection_layout.addWidget(self.header_connection)
 
-        self.port_combo = QComboBox()
-        self.port_combo.setMinimumContentsLength(8)
+        self.port_combo = PortComboBox()
         self.btn_refresh = QPushButton()
         self._bind_text(self.btn_refresh, "button.refresh_ports")
         self.baud_spin = QSpinBox()
@@ -1455,6 +1467,7 @@ class MainWindow(QMainWindow):
         self.lbl_language = QLabel()
         self._bind_text(self.lbl_language, "language.label")
         self.language_combo = QComboBox()
+        TouchScroll_Enable(self.language_combo.view())
         self.language_combo.addItem("简体中文", Language.ZH_CN.value)
         self.language_combo.addItem("English", Language.EN_US.value)
         self.language_combo.setMinimumWidth(88)
@@ -1464,6 +1477,7 @@ class MainWindow(QMainWindow):
         self.lbl_theme = QLabel()
         self._bind_text(self.lbl_theme, "theme.label")
         self.theme_combo = QComboBox()
+        TouchScroll_Enable(self.theme_combo.view())
         self.theme_combo.addItem("", Theme.LIGHT.value)
         self.theme_combo.addItem("", Theme.DARK.value)
         self.theme_combo.setMinimumWidth(70)
@@ -1498,7 +1512,7 @@ class MainWindow(QMainWindow):
         root.addLayout(detail_row)
         root.addWidget(self._build_preflight_command_panel())
         root.addWidget(self._build_event_panel(), 1)
-        return page
+        return TouchScroll_Wrap(page)
 
     def _build_preflight_system_panel(self) -> QWidget:
         box = QGroupBox()
@@ -1769,6 +1783,7 @@ class MainWindow(QMainWindow):
         self._bind_text(box, "group.event_history")
         layout = QVBoxLayout(box)
         self.event_list = QListWidget()
+        TouchScroll_Enable(self.event_list)
         self.event_list.setFont(self._compact_value_font)
         layout.addWidget(self.event_list)
         return box
@@ -1893,7 +1908,7 @@ class MainWindow(QMainWindow):
         self.btn_open_data_dir.clicked.connect(
             lambda: self.on_open_data_dir and self.on_open_data_dir()
         )
-        return page
+        return TouchScroll_Wrap(page)
 
     def _configure_dynamic_label(
         self,

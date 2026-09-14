@@ -189,6 +189,8 @@ def apply_application_theme(application: QApplication, theme: Theme) -> ThemeCol
             selection-background-color: {colors.highlight};
             selection-color: {colors.highlighted_text};
         }}
+        QPushButton {{ min-height: 24px; }}
+        QComboBox, QSpinBox {{ min-height: 32px; }}
         QComboBox QAbstractItemView {{
             background-color: {colors.base};
             color: {colors.text};
@@ -234,7 +236,7 @@ def apply_application_theme(application: QApplication, theme: Theme) -> ThemeCol
             color: {colors.header_control_text};
             border: 1px solid {colors.header_control_border};
             border-radius: 3px;
-            min-height: 24px;
+            min-height: 30px;
             padding: 1px 5px;
             selection-background-color: {colors.header_selected};
             selection-color: #ffffff;
