@@ -1,5 +1,99 @@
 # GSHC 验收快照
 
+## 2026-09-16 — CF-33 port/connection clipping closeout
+
+Baseline: clean source worktree at `3159680`. The new attachment explicitly authorized this
+independent repository. No reset, checkout, commit or push. GSHC version 0.0.3, AIR/GSP wire,
+Controller, serial worker, state machine, telemetry and previous touch-scroll implementation are unchanged.
+
+### Root cause and measured evidence
+
+The old combo used only AdjustToContents/minimumSizeHint, with no guaranteed edit-field width.
+The connected status additionally inherited `QSizePolicy.Ignored`, minimum width 110 and
+wordWrap=False, and shared the crowded first row with connection controls.
+
+The committed HEAD was loaded into a separate Qt process (no checkout or source replacement).
+At 1280×800, QT_SCALE_FACTOR=1.5 and Segoe UI 16 pt, the old connected label had 110 logical
+pixels available, while `COM10@230400` required 155 and `COM100@230400` required 166.
+This reproduces **connection-status clipping**. In that same run the combo edit field was 98
+pixels and popup viewport 126 pixels, both sufficient for COM100 (80 pixels). Combo/popup
+clipping on the actual CF-33 has therefore **not** been independently reproduced here.
+The fix protects all three surfaces. This is not a physical-device acceptance claim.
+
+### Changes and new checks
+
+- `ui/port_combo.py`: use QStyleOptionComboBox, font advance/ink bounds, CT_ComboBox and
+  SC_ComboBoxEditField to set minimumWidth explicitly. Recompute on model, font, style,
+  polish, show and DPI changes; popup reserves text, frame and scrollbar space.
+- `ui/main_window.py`: move connection label/status to the second row; use word wrapping and
+  MinimumExpanding sizing. Preserve full status/tooltip. Remove the baud spinbox's fixed
+  88-pixel width after screenshot review exposed a clipped baud digit with large fonts.
+- `tests/test_port_gui.py`: existing end-to-end five-port checks plus six subprocess geometry cases.
+  Enumeration → set_ports → current_port → Controller.connect → SerialConfig → serial.Serial
+  retains COM1/COM9/COM10/COM99/COM100 byte-for-byte; only I/O/threads are mocked.
+- `tests/validation/port_geometry_probe.py`: active style edit rect, popup, baud edit field,
+  status text rectangle/height and screenshots, with an optional committed-HEAD comparison.
+- `docs/GUI_STYLE_GUIDE.md`, this report: persistent header requirements and evidence.
+
+All six combinations of 1280×800 / 1920×1080 logical window size and 1.0 / 1.5 / 2.0 scale,
+with Microsoft YaHei / Segoe UI 16 pt, passed actual text-vs-geometry checks. The 1.5× repaired
+status has 179 pixels available, exceeding the 166-pixel COM100@230400 text. COM selectors,
+popup and connected statuses are complete in all combinations. Viewports are measured;
+this does not just compare sizeHint. Qt offscreen rendering is used; physical CF-33 driver,
+Windows font substitution, monitor transitions, serial hardware and touch remain field checks.
+
+### Commands, results and artifacts
+
+Process-local QT_QPA_PLATFORM=offscreen and PYTHONDONTWRITEBYTECODE=1; TEMP/TMP,
+MPLCONFIGDIR, PyInstaller cache and test outputs are below `tests/.pytest_cache/`.
+
+```powershell
+python -m pytest tests/test_port_gui.py -q --basetemp=tests/.pytest_cache/port_revision_matrix_final0916 -o cache_dir=tests/.pytest_cache/portcache0916
+python -m pytest -q --basetemp=tests/.pytest_cache/full0916-final -o cache_dir=tests/.pytest_cache/full0916-cache
+python tests/validation/port_geometry_probe.py tests/.pytest_cache/port_baseline_0916 1280 800 --baseline
+```
+
+Focused: **16 passed**. Full final result: **382 passed, 3 subtests passed in 323.28 s**.
+The earlier full run before the final baud sizing adjustment passed 382 tests and 3 subtests.
+`tests/validation/packaging_smoke.ps1` is executed in memory with only projectRoot fixed to
+this repository and packageRoot redirected to `tests/.pytest_cache/package0916`; it changes
+PATH only for its child process environment. Final package result: **passed; packaged process remained alive for 8 s, stderr 0 bytes; 2026-09-16T08:44:48.4172889+08:00**.
+
+- Full log: `tests/.pytest_cache/full0916-final.log`.
+- Packaged executable: `tests/.pytest_cache/package0916/dist/SilverStar_GSHC/SilverStar_GSHC.exe`.
+- Packaged startup evidence: `tests/.pytest_cache/package0916/startup.json`.
+- Six sets of geometry.json, window.png and popup.png:
+  `tests/.pytest_cache/port_revision_matrix_final0916/test_port_and_connected_status0` through `5`.
+- Old layout geometry/screenshot: `tests/.pytest_cache/port_baseline_0916/`.
+
+No protocol/schema/version changes. No source edits beyond the listed GUI/test/doc files.
+`git diff --check` passes. Generated artifacts remain ignored and are not product source.
+
+<!-- closeout-git-begin -->
+### Final Git snapshot
+
+Tracked diff (new files are listed separately by status):
+
+```text
+ VALIDATION.md           | 94 +++++++++++++++++++++++++++++++++++++++++++++++++
+ docs/GUI_STYLE_GUIDE.md | 14 ++++++++
+ tests/test_port_gui.py  | 16 +++++++++
+ ui/main_window.py       |  8 +++--
+ ui/port_combo.py        | 64 +++++++++++++++++++++++++++++----
+ 5 files changed, 186 insertions(+), 10 deletions(-)
+```
+
+```text
+ M VALIDATION.md
+ M docs/GUI_STYLE_GUIDE.md
+ M tests/test_port_gui.py
+ M ui/main_window.py
+ M ui/port_combo.py
+?? tests/validation/port_geometry_probe.py
+```
+<!-- closeout-git-end -->
+
+
 ## 2026-09-14 — GUI field-usability closeout
 
 Scope: GUI/helper, corresponding tests and documentation only. Initial working tree was clean.

@@ -80,3 +80,19 @@ def test_port_text_fits_and_reaches_serial_unchanged(tmp_path, port, font_size):
         window.close()
         window.deleteLater()
         application.processEvents()
+
+
+@pytest.mark.parametrize("scale", ["1.0", "1.5", "2.0"])
+@pytest.mark.parametrize("resolution", [(1280, 800), (1920, 1080)])
+def test_port_and_connected_status_dpi_geometry(tmp_path, scale, resolution):
+    import subprocess
+    import sys
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ, QT_SCALE_FACTOR=scale, QT_QPA_PLATFORM="offscreen",
+                       PYTHONDONTWRITEBYTECODE="1", TEMP=str(tmp_path), TMP=str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, str(root / "tests/validation/port_geometry_probe.py"),
+         str(tmp_path), *(str(value) for value in resolution)],
+        cwd=root, env=environment, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

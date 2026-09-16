@@ -46,3 +46,17 @@ Before field use, check finger swipes and taps on a CF-33: page scroll, nested t
 scroll and selection, popup selection, button taps, spinboxes, mouse wheel/scrollbars,
 stylus, plot pan/zoom, camera lock/rotation and replay time slider. Automated synthetic
 Qt touch tests do not certify the physical Windows touch driver.
+
+
+## Port and connection identity
+
+Port selectors must reserve an explicit minimum width from the active QStyle,
+QStyleOptionComboBox edit subcontrol and actual font metrics, with frame/padding/arrow
+and device-pixel rounding margin. Refresh, font, style and DPI changes recalculate this
+minimum. The popup viewport must also fit the full port identifier.
+
+The connection status is a readable, wrapping, minimum-expanding field on the header's
+second row. Do not apply the generic Ignored/non-wrapping dynamic-value policy to it.
+The first row reserves space for port selection, baud rate and connection controls;
+spinbox width follows its actual range and style instead of a fixed pixel count.
+Never substring or elide the port passed to the serial transport.
