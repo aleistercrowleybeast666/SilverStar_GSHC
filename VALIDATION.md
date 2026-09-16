@@ -1,5 +1,51 @@
 # GSHC 验收快照
 
+## 2026-09-17 — FCCG/FLP 第二轮修改的地面站兼容验证
+
+初始 HEAD：`92184a80acd48b5f56de6bb06857919d64de6aeb`；
+初始 `git status --short` 为空。
+本轮 **零产品源代码 diff**，只更新本验收报告；不为制造 diff 新增功能。
+无 reset/checkout/clean、Release、Tag 或 push；报告独立中文本地提交。
+
+### 兼容边界
+
+AIR/GSP wire、能力握手、状态解析、Controller/serial worker、telemetry、触屏处理均未修改。
+FCCG 新增参数只进入已有生成常量和 decoder actual values，不新增遥测字段；
+GSHC 不依赖 FCCG/FLP 代码或 .ssdecoder。版本仍为 0.0.3。
+COM10/COM100 宽度与高 DPI 连接状态修复保留，既有 touch support 未回退。
+通过的是 Host/Qt 自动化验证，不是实际串口、CF-33、无线链路或飞行硬件验收。
+
+### 命令和结果
+
+- `python -m pytest tests -q --basetemp=tests/.pytest-full-0917 --ignore-glob='tests/.pytest-*' -o cache_dir=tests/.pytest-cache/0917`：
+  **382 passed, 3 subtests passed, 242.32 s**。
+  日志 `tests/.pytest-cache/0917-full.log`。包含 protocol/Golden、握手与状态模型、
+  GUI、COM、高 DPI、touch 和 docs 链接。无跳过项。
+- `python -m compileall -q app.py main.py config.py protocol services transport ui processing`：
+  通过；进程 `PYTHONPYCACHEPREFIX=tests/.pytest-compile-0917`。
+- 运行原 `tests/validation/headless_gui_smoke.py` 内容，仅在测试进程内将输出根替换为
+  `tests/.pytest-gui-0917`，并把 TEMP/TMP 放在 `tests/.pytest-temp-0917`：
+  **8 mask/language cases、dialog、event loop 通过**。没有修改原 smoke 源文件。
+- 运行原 `tests/validation/packaging_smoke.ps1` 内容，固定当前 repository root，
+  仅把输出根替换为 `tests/.pytest-packaging-0917`：
+  **PyInstaller 构建与 EXE offscreen 启动通过**。
+  八秒后进程存活，没有异常标题、Traceback/ImportError/DLL load failed；
+  仅结束该 smoke 自己启动的子进程。
+  报告 `tests/.pytest-packaging-0917/startup.json`，日志同目录 `build.log`。
+  包必须整目录使用；本次不是新 Release。
+- 上述运行仅调整测试进程环境，不修改系统 PATH、注册表或用户全局设置。
+- `python -m pytest tests/test_docs.py -q --basetemp=tests/.pytest-doc-final-0917 -o cache_dir=tests/.pytest-cache/0917`：最终文档检查 **30 passed, 0.23 s**。
+- `git diff --check`：通过。
+  无真实硬件测试：没有连接目标硬件及指定实测日志，不声明硬件通过。
+
+### Git 快照
+
+产品源文件清单为空。唯一提交文件为 `VALIDATION.md`。
+添加本报告前 `git diff --stat` 和 `git status --short` 均为空。
+本仓库仅本地 `.git/info/exclude` 忽略 tests/.pytest-* 验证输出；未修改 .gitignore，
+未删除验证产物。最终提交后的状态在交付消息核验。
+
+
 ## 2026-09-16 — CF-33 port/connection clipping closeout
 
 Baseline: clean source worktree at `3159680`. The new attachment explicitly authorized this
