@@ -36,6 +36,14 @@ class ResolvedExportOptions:
     theme: Theme = Theme.LIGHT
     items: frozenset[ExportItem] = frozenset(ALL_EXPORT_ITEMS)
 
+    page_duration_s: float | None = 30.0
+    gif_source_duration_s: float | None = 30.0
+
+    def __post_init__(self) -> None:
+        from processing.time_ranges import Duration_Validate
+        Duration_Validate(self.page_duration_s)
+        Duration_Validate(self.gif_source_duration_s)
+
     @property
     def language_suffix(self) -> str:
         return "ZH" if self.language is Language.ZH_CN else "EN"

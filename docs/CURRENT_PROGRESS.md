@@ -6,3 +6,5 @@
 - 新文档树作为基线；平台内容仅为必要参考，完整权威位于 FCCG。
 - 自动化验证、共同契约比对、打包及硬件限制见根 [VALIDATION](../VALIDATION.md)。这里不重复测试数量、hash 或构建资源数据。
 - SS0.5 真机的采样、默认 NONE、Reset、Alignment、串口空口与 GPU 仍需联调，按[验证步骤](../tests/validation/README.md)执行。
+
+- 长时输出已实现分类分页、源范围选择、恒速 GIF、末尾停留和逐帧取消；见[时间输出](TIME_EXPORT.md)。

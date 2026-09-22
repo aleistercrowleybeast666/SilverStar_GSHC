@@ -284,7 +284,7 @@ class PostProcessingTests(unittest.TestCase):
             self.assertEqual(manifest["capability"]["air_profile_id"], 0)
             self.assertEqual(manifest["preflight"]["calibration_final_state"], 4)
             self.assertEqual(manifest["packet_loss"]["lost_packets"], 1)
-            self.assertGreater((output_dir / "velocity_EN.png").stat().st_size, 0)
+            self.assertGreater((output_dir / "Velocity/velocity_000000.000-000000.600_EN.png").stat().st_size, 0)
             self.assertEqual(manifest["export"]["language"], "en_US")
             self.assertEqual(manifest["export"]["filename_language_suffix"], "EN")
 

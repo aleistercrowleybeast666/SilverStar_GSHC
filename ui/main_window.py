@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -1033,6 +1034,33 @@ class ExportOptionsDialog(QDialog):
         language_row.addWidget(self.language_combo, 1)
         root.addLayout(language_row)
 
+        self.range_labels: dict[str, QLabel] = {}
+        self.range_combos: dict[str, QComboBox] = {}
+        self.range_custom: dict[str, QDoubleSpinBox] = {}
+        ranges = QGridLayout()
+        for row, kind in enumerate(("page", "gif")):
+            label = QLabel()
+            combo = QComboBox()
+            TouchScroll_Enable(combo.view())
+            spin = QDoubleSpinBox()
+            spin.setDecimals(3)
+            spin.setRange(0.001, 1_000_000_000)
+            spin.setValue(30)
+            spin.setSuffix(" s")
+            spin.setMinimumHeight(36)
+            combo.setMinimumHeight(36)
+            self.range_labels[kind] = label
+            self.range_combos[kind] = combo
+            self.range_custom[kind] = spin
+            ranges.addWidget(label, row, 0)
+            ranges.addWidget(combo, row, 1)
+            ranges.addWidget(spin, row, 2)
+            combo.currentIndexChanged.connect(lambda _index, k=kind: self._Range_Update(k))
+        root.addLayout(ranges)
+        self.lbl_gif_timing = QLabel()
+        self.lbl_gif_timing.setWordWrap(True)
+        root.addWidget(self.lbl_gif_timing)
+
         self.items_group = QGroupBox()
         items_layout = QVBoxLayout(self.items_group)
         self.item_checkboxes: dict[ExportItem, QCheckBox] = {}
@@ -1089,6 +1117,18 @@ class ExportOptionsDialog(QDialog):
             index = self.language_combo.findData(selected_language)
             if index >= 0:
                 self.language_combo.setCurrentIndex(index)
+        for kind, combo in self.range_combos.items():
+            selected = combo.currentData() or "30"
+            combo.blockSignals(True)
+            combo.clear()
+            for value in ("5", "10", "30", "60", "120", "custom", "full"):
+                text = f"{value} s" if value.isdigit() else self.i18n.tr(f"export.range.{value}")
+                combo.addItem(text, value)
+            combo.setCurrentIndex(max(0, combo.findData(selected)))
+            combo.blockSignals(False)
+            self.range_labels[kind].setText(self.i18n.tr(f"export.range.{kind}"))
+            self._Range_Update(kind)
+        self.lbl_gif_timing.setText(self.i18n.tr("export.range.timing"))
         self.items_group.setTitle(self.i18n.tr("export.items.title"))
         for item, checkbox in self.item_checkboxes.items():
             checkbox.setText(self.i18n.tr(f"export.item.{item.value}"))
@@ -1122,6 +1162,15 @@ class ExportOptionsDialog(QDialog):
         self.btn_accept.setEnabled(has_selection)
         self.lbl_required.setVisible(not has_selection)
 
+    def _Range_Update(self, kind: str) -> None:
+        self.range_custom[kind].setVisible(self.range_combos[kind].currentData() == "custom")
+
+    def _Range_Value(self, kind: str) -> float | None:
+        value = self.range_combos[kind].currentData()
+        if value == "full":
+            return None
+        return self.range_custom[kind].value() if value == "custom" else float(value)
+
     def resolved_options(
         self,
         ui_language: Language,
@@ -1139,6 +1188,8 @@ class ExportOptionsDialog(QDialog):
             language=resolve_export_language(export_language, ui_language),
             theme=theme,
             items=items,
+            page_duration_s=self._Range_Value("page"),
+            gif_source_duration_s=self._Range_Value("gif"),
         )
 
 

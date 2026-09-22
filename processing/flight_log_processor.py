@@ -36,6 +36,7 @@ from services.preferences import (
 )
 
 from .flight_plotter import FlightPlotter, PlotterConfig
+from .time_ranges import GifPlan_Build, PageName_Build, Pages_Build
 
 GSP_TYPE_AIR_RX = 0x02
 
@@ -427,13 +428,13 @@ class FlightLogProcessor:
     def __init__(
         self,
         output_root: Path | str = "data",
-        gif_fps: int = 5,
+        gif_fps: int = 30,
         gap_threshold_s: Optional[float] = None,
         pos_z_is_height: bool = True,
         export_options: ResolvedExportOptions | None = None,
     ) -> None:
         self.output_root = Path(output_root)
-        self.gif_fps = max(1, min(30, int(gif_fps)))
+        self.gif_fps = 30
         self.gap_threshold_s = gap_threshold_s
         self.pos_z_is_height = pos_z_is_height
         self.export_options = export_options or ResolvedExportOptions(
@@ -508,9 +509,11 @@ class FlightLogProcessor:
                 language=options.language,
                 theme=options.theme,
                 filename_suffix=options.language_suffix,
+                gif_source_duration_s=options.gif_source_duration_s,
             )
         )
 
+        pages = tuple(Pages_Build(data.duration_s, options.page_duration_s))
         frame_count = (
             plotter.estimate_gif_frame_count(data)
             if ExportItem.ATTITUDE_3D in options.items
@@ -519,8 +522,8 @@ class FlightLogProcessor:
         total_steps = 0
         total_steps += int(ExportItem.PROCESSED_DATA in options.items)
         total_steps += int(ExportItem.SUMMARY in options.items)
-        total_steps += 7 if ExportItem.CHARTS in options.items else 0
-        total_steps += frame_count + 1 if ExportItem.ATTITUDE_3D in options.items else 0
+        total_steps += 7 * len(pages) if ExportItem.CHARTS in options.items else 0
+        total_steps += 2 * frame_count + 1 if ExportItem.ATTITUDE_3D in options.items else 0
         total_steps += int(ExportItem.SESSION_INFO in options.items)
         done = 0
         self.last_export_errors = {}
@@ -639,19 +642,32 @@ class FlightLogProcessor:
                     ),
                 ),
             )
-            for stem, chart_action in chart_jobs:
-                name = options.output_name(stem, "png")
-                run_export(
-                    name,
-                    lambda path=output_dir / name, action=chart_action: action(path),
-                )
+            categories = {
+                "accel": "Sensors", "gyro": "Sensors", "euler": "Attitude",
+                "velocity": "Velocity", "position": "Position",
+                "link_quality": "Diagnostics", "packet_loss_per_second": "Diagnostics",
+            }
+            for page in pages:
+                plotter.page_range = page
+                for stem, chart_action in chart_jobs:
+                    check_cancel()
+                    directory = output_dir / categories[stem]
+                    directory.mkdir(exist_ok=True)
+                    name = PageName_Build(stem, options.language_suffix, page)
+                    relative = f"{categories[stem]}/{name}"
+                    run_export(relative, lambda path=directory / name, action=chart_action: action(path))
+            plotter.page_range = None
 
         if ExportItem.ATTITUDE_3D in options.items:
             check_cancel()
-            frames_dir = output_dir / f"gif_frames_{options.language_suffix}"
+            gif_dir = output_dir / "GIF"
+            gif_dir.mkdir(exist_ok=True)
+            frames_dir = gif_dir / f"frames_{options.language_suffix}"
+            plotter.cancel_check = check_cancel
+            plotter.encoding_progress = lambda: step("GIF encode")
             frames_dir.mkdir(exist_ok=True)
             gif_name = options.output_name("attitude_motion", "gif")
-            gif_path = output_dir / gif_name
+            gif_path = gif_dir / gif_name
             try:
                 for frame_path in plotter.generate_attitude_motion_gif(
                     data,
@@ -1359,6 +1375,9 @@ class FlightLogProcessor:
                     item.value for item in ALL_EXPORT_ITEMS if item in options.items
                 ],
                 "partial_failures": dict(export_errors or {}),
+                "page_duration_s": options.page_duration_s,
+                "pages_s": list(Pages_Build(data.duration_s, options.page_duration_s)),
+                "gif": GifPlan_Build(data.duration_s, options.gif_source_duration_s).Metadata_Get(),
             },
             "warnings": data.warnings,
         }
@@ -1371,7 +1390,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Process current AIR/GSP-MIN flight JSONL log.")
     parser.add_argument("log", type=Path, help="Path to flight JSONL log")
     parser.add_argument("--output-root", type=Path, default=Path("data"))
-    parser.add_argument("--gif-fps", type=int, default=5, help="Target GIF fps when interpolation is needed. Default 5.")
+    parser.add_argument("--gif-fps", type=int, default=30, choices=[30], help="Fixed GIF frame rate: 30.")
+    parser.add_argument("--page-seconds", type=float, default=30, help="PNG page duration; 0 means Full.")
+    parser.add_argument("--gif-source-seconds", type=float, default=30, help="GIF source duration; 0 means Full.")
     parser.add_argument(
         "--language",
         choices=[language.value for language in Language],
@@ -1401,6 +1422,8 @@ def main() -> None:
             language=language,
             theme=Theme(args.theme),
             items=frozenset(ExportItem(item) for item in args.export_items),
+            page_duration_s=args.page_seconds or None,
+            gif_source_duration_s=args.gif_source_seconds or None,
         ),
     )
 

@@ -18,3 +18,5 @@
 完整平台规范由 SilverStar_FCCG `docs/platform/` 维护；这里不建立 MCU/Board/Build/Storage 的第二套规范。文中的固件源码路径是 FCCG 生成工程路径文字，不代表 GSHC 本地文件。
 
 相关格式版本为 Serial Maintenance 0.0、SSLOG 0.0、`.ssdecoder` package/project-semantics 1.1；本轮不新增这些格式的 GSHC 解析器。
+
+- [时间分页与 GIF 输出](TIME_EXPORT.md)

@@ -111,9 +111,9 @@ class ExportProcessingTests(unittest.TestCase):
                 output_dir = processor.process_file(data.source_log)
 
             self.assertTrue((output_dir / "summary_ZH.txt").is_file())
-            self.assertTrue((output_dir / "velocity_ZH.png").is_file())
-            self.assertFalse((output_dir / "accel_ZH.png").exists())
-            self.assertIn("accel_ZH.png", processor.last_export_errors)
+            self.assertTrue((output_dir / "Velocity/velocity_000000.000-000001.000_ZH.png").is_file())
+            self.assertFalse((output_dir / "Sensors/accel_000000.000-000001.000_ZH.png").exists())
+            self.assertIn("Sensors/accel_000000.000-000001.000_ZH.png", processor.last_export_errors)
             self.assertFalse(any(output_dir.glob("*_EN.*")))
             self.assertTrue(
                 (output_dir / "summary_ZH.txt")
@@ -128,7 +128,7 @@ class ExportProcessingTests(unittest.TestCase):
             self.assertEqual(manifest["export"]["theme"], "dark")
             self.assertEqual(manifest["export"]["filename_language_suffix"], "ZH")
             self.assertIn(
-                "accel_ZH.png",
+                "Sensors/accel_000000.000-000001.000_ZH.png",
                 manifest["export"]["partial_failures"],
             )
 
@@ -149,7 +149,6 @@ class ExportProcessingTests(unittest.TestCase):
 
             with (
                 patch.object(plotter, "_draw_gif_frame", side_effect=draw_frame),
-                patch.object(plotter, "_append_final_hold_frames", return_value=[]),
                 patch.object(plotter, "_save_gif_with_real_timing"),
             ):
                 frame_paths = list(
@@ -160,7 +159,7 @@ class ExportProcessingTests(unittest.TestCase):
                     )
                 )
 
-            self.assertEqual(len(frame_paths), 1)
+            self.assertEqual(len(frame_paths), 60)
             self.assertTrue(frame_paths[0].name.endswith("_EN.png"))
 
 

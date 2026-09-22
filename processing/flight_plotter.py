@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import shutil
 from dataclasses import dataclass
@@ -12,7 +13,9 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 from matplotlib.text import Text
 import numpy as np
-from PIL import Image
+from PIL import GifImagePlugin, Image
+
+from .time_ranges import GifPlan_Build
 
 from services.i18n import Language
 from services.preferences import Theme
@@ -20,12 +23,13 @@ from services.preferences import Theme
 
 @dataclass
 class PlotterConfig:
-    gif_fps: int = 5
+    gif_fps: int = 30
     gap_threshold_s: Optional[float] = None
     pos_z_is_height: bool = True
     language: Language = Language.EN_US
     theme: Theme = Theme.LIGHT
     filename_suffix: str = "EN"
+    gif_source_duration_s: float | None = 30.0
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,10 @@ PLOT_TEXT: dict[str, tuple[str, str]] = {
 class FlightPlotter:
     def __init__(self, config: PlotterConfig | None = None) -> None:
         self.config = config or PlotterConfig()
-        self.config.gif_fps = max(1, min(30, int(self.config.gif_fps)))
+        self.config.gif_fps = 30
+        self.page_range: tuple[float, float] | None = None
+        self.cancel_check = lambda: None
+        self.encoding_progress = lambda: None
         self.colors = (
             DARK_PLOT_COLORS
             if self.config.theme is Theme.DARK
@@ -152,6 +159,12 @@ class FlightPlotter:
                 text.set_fontproperties(self._font)
 
     def _save_figure(self, fig, output_path: Path, *, dpi: int | None = None) -> None:
+        if self.page_range is not None:
+            start, end = self.page_range
+            for axis in fig.axes:
+                if not hasattr(axis, "zaxis"):
+                    axis.set_xlim(start, end if end > start else start + 0.001)
+            fig.suptitle(f"{fig._suptitle.get_text() if fig._suptitle else ''} [{start:g}–{end:g} s]")
         self._style_figure(fig)
         fig.tight_layout()
         fig.savefig(
@@ -175,6 +188,10 @@ class FlightPlotter:
         ylabel: str,
         parachute_time_s: float | None = None,
     ) -> None:
+        if self.page_range is not None:
+            samples = [s for s in samples if self.page_range[0] <= s.time_s <= self.page_range[1]]
+            if parachute_time_s is not None and not self.page_range[0] <= parachute_time_s <= self.page_range[1]:
+                parachute_time_s = None
         fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharex=False)
         fig.suptitle(title)
 
@@ -224,6 +241,10 @@ class FlightPlotter:
         self._save_figure(fig, output_path, dpi=160)
 
     def plot_link_quality(self, output_path: Path, link_samples, parachute_time_s: float | None = None) -> None:
+        if self.page_range is not None:
+            link_samples = [s for s in link_samples if self.page_range[0] <= s.time_s <= self.page_range[1]]
+            if parachute_time_s is not None and not self.page_range[0] <= parachute_time_s <= self.page_range[1]:
+                parachute_time_s = None
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharex=False)
         fig.suptitle(self.text("link_quality"))
 
@@ -280,6 +301,8 @@ class FlightPlotter:
         self._save_figure(fig, output_path, dpi=160)
 
     def plot_packet_loss_per_second(self, output_path: Path, loss_per_second: list[tuple[int, int]]) -> None:
+        if self.page_range is not None:
+            loss_per_second = [(t, n) for t, n in loss_per_second if self.page_range[0] <= t <= self.page_range[1]]
         fig, ax = plt.subplots(figsize=(10, 4.5))
         seconds = [second for second, _lost in loss_per_second]
         lost_counts = [lost for _second, lost in loss_per_second]
@@ -307,111 +330,60 @@ class FlightPlotter:
 
     def generate_attitude_motion_gif(self, data, gif_path: Path, frames_dir: Path) -> Generator[Path, None, None]:
         frames_dir.mkdir(parents=True, exist_ok=True)
-        frame_times, mode = self._build_gif_frame_times(data)
-
+        plan = GifPlan_Build(data.duration_s, self.config.gif_source_duration_s)
+        frame_times = np.asarray(plan.Times_Get())
         frame_paths: list[Path] = []
-        last_quat = (1.0, 0.0, 0.0, 0.0)
-        last_pos = (0.0, 0.0, 0.0)
         motion_limits = self._trajectory_limits(data)
-
-        for idx, t in enumerate(frame_times):
-            if mode == "interpolate":
-                q = self._sample_interpolated(data.quat, float(t), last_quat, is_quat=True)
-                p = self._sample_interpolated(data.pos, float(t), last_pos, is_quat=False)
-            else:
-                q = self._sample_nearest(data.quat, float(t), last_quat)
-                p = self._sample_nearest(data.pos, float(t), last_pos)
-
-            last_quat = tuple(float(v) for v in q[:4])
-            last_pos = tuple(float(v) for v in p[:3])
-
-            path = frames_dir / (
-                f"frame_{idx:04d}_{self.config.filename_suffix}.png"
-            )
-            self._draw_gif_frame(path, data, float(t), last_quat, last_pos, motion_limits)
+        self.page_range = None
+        # The final source sample has its own frame, then 29 byte-identical copies.
+        for idx, t in enumerate([*frame_times, plan.source_end_s]):
+            self.cancel_check()
+            q = self._sample_interpolated(data.quat, float(t), (1, 0, 0, 0), is_quat=True)
+            p = self._sample_interpolated(data.pos, float(t), (0, 0, 0), is_quat=False)
+            path = frames_dir / f"frame_{idx:04d}_{self.config.filename_suffix}.png"
+            self._draw_gif_frame(path, data, float(t), tuple(q[:4]), tuple(p[:3]), motion_limits)
             frame_paths.append(path)
             yield path
-
-        if frame_paths:
-            extra = self._append_final_hold_frames(frame_paths, frames_dir)
-            for extra_path in extra:
-                yield extra_path
-            self._save_gif_with_real_timing(gif_path, frame_paths + extra, frame_times)
+        for _ in range(plan.hold_frames - 1):
+            self.cancel_check()
+            path = frames_dir / f"frame_{len(frame_paths):04d}_{self.config.filename_suffix}.png"
+            shutil.copy2(frame_paths[-1], path)
+            frame_paths.append(path)
+            yield path
+        self._save_gif_with_real_timing(gif_path, frame_paths, frame_times)
+        self.cancel_check()
+        gif_path.with_suffix(".json").write_text(
+            json.dumps(plan.Metadata_Get(), indent=2), encoding="utf-8")
 
     def _final_hold_extra_frames(self) -> int:
-        # Hold about 1 s at the end; at 5 fps this gives 5 extra frames,
-        # so the final state is shown for about 1 additional second.
-        return max(1, int(round(self.config.gif_fps * 1.0)))
-
-    def _append_final_hold_frames(self, frame_paths: list[Path], frames_dir: Path) -> list[Path]:
-        if not frame_paths:
-            return []
-        extra_count = self._final_hold_extra_frames()
-        src = frame_paths[-1]
-        extras: list[Path] = []
-        start_idx = len(frame_paths)
-        for i in range(extra_count):
-            dst = frames_dir / (
-                f"frame_{start_idx + i:04d}_{self.config.filename_suffix}.png"
-            )
-            shutil.copy2(src, dst)
-            extras.append(dst)
-        return extras
+        return 30
 
     def _build_gif_frame_times(self, data) -> tuple[np.ndarray, str]:
-        if data.quat and data.pos:
-            times = sorted({round(float(s.time_s), 6) for s in data.quat} | {round(float(s.time_s), 6) for s in data.pos})
-        elif data.pos:
-            times = sorted({round(float(s.time_s), 6) for s in data.pos})
-        elif data.quat:
-            times = sorted({round(float(s.time_s), 6) for s in data.quat})
-        else:
-            return np.array([0.0]), "original"
-
-        times = [t for t in times if 0.0 <= t <= data.duration_s]
-        if len(times) <= 1:
-            return np.array(times or [0.0]), "original"
-
-        positive_dt = np.diff(np.array(times, dtype=float))
-        positive_dt = positive_dt[positive_dt > 1e-9]
-        if len(positive_dt) == 0:
-            return np.array(times, dtype=float), "original"
-
-        median_dt = float(np.median(positive_dt))
-        target_dt = 1.0 / float(self.config.gif_fps)
-        if median_dt > target_dt * 1.5:
-            count = max(2, int(math.ceil(data.duration_s * self.config.gif_fps)) + 1)
-            return np.linspace(0.0, data.duration_s, count), "interpolate"
-
-        return np.array(times, dtype=float), "original"
+        plan = GifPlan_Build(data.duration_s, self.config.gif_source_duration_s)
+        return np.asarray(plan.Times_Get()), "interpolate"
 
     def _save_gif_with_real_timing(self, gif_path: Path, frame_paths: list[Path], frame_times: np.ndarray) -> None:
-        if not frame_paths:
-            return
-
-        base_dt_ms = max(20, int(round(1000.0 / float(self.config.gif_fps))))
-        durations: list[int] = []
-        original_count = len(frame_times)
-        for i in range(len(frame_paths)):
-            if i < original_count - 1:
-                dt = float(frame_times[i + 1] - frame_times[i])
-                durations.append(max(20, int(round(dt * 1000.0))))
-            elif i == original_count - 1:
-                durations.append(base_dt_ms)
-            else:
-                durations.append(base_dt_ms)
-
-        images = [Image.open(path).convert("P", palette=Image.Palette.ADAPTIVE) for path in frame_paths]
-        images[0].save(
-            gif_path,
-            save_all=True,
-            append_images=images[1:],
-            duration=durations,
-            loop=0,
-            optimize=False,
-        )
-        for img in images:
-            img.close()
+        # Stream one palette frame at a time. getdata emits every physical frame,
+        # including identical hold frames, without Pillow's duplicate-frame merge.
+        with gif_path.open("wb") as output:
+            for index, path in enumerate(frame_paths):
+                self.cancel_check()
+                with Image.open(path) as source:
+                    frame = source.convert("RGB").quantize(colors=256)
+                try:
+                    if index == 0:
+                        blocks, _ = GifImagePlugin.getheader(frame, info={"loop": 0})
+                        for block in blocks:
+                            output.write(block)
+                    duration = (round((index + 1) * 100 / 30) - round(index * 100 / 30)) * 10
+                    for block in GifImagePlugin.getdata(
+                        frame, duration=duration, disposal=1, include_color_table=True
+                    ):
+                        output.write(block)
+                finally:
+                    frame.close()
+                self.encoding_progress()
+            output.write(b";")
 
     def _draw_gif_frame(self, path: Path, data, t: float, quat: tuple[float, float, float, float], pos: tuple[float, float, float], motion_limits) -> None:
         fig = plt.figure(figsize=(10, 5), dpi=120)

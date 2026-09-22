@@ -1,5 +1,54 @@
 # GSHC 验收快照
 
+## 2026-09-22 — 联合长时导出
+
+起始与最终 HEAD `62656da1fa035bff344165c8857a932e644ddbae`，main，初始工作区干净。
+没有 commit/push/tag/Release。当前完整文件清单和三仓库状态见 FCCG
+`docs/JOINT_FIELD_REWORK.md`；历史段落仅适用于其日期。
+
+### 改动
+
+- `processing/time_ranges.py`：分页与恒定时间映射；PNG 默认 30 s，5/10/30/60/120/Custom/Full。
+- `flight_plotter.py` / `flight_log_processor.py`：裁剪绘图输入、绝对时间命名、分类目录，
+  保留完整解析数据与 TXT；GIF 源默认前 30 s，可 Full/自定义，30 fps，最多 30 s motion
+  加 30 physical hold frames / 1 s。源终点单独渲染，没有事件慢放。
+- GIF 编码逐幅处理，每帧进度/取消，不一次加载全部大图；厘秒量化采用 30/40 ms，
+  每 30 帧严格 1 s。JSON 与 manifest 保存范围、速度、帧数；取消只删除本次独立新输出。
+- `services/preferences.py` / `services/i18n.py` / `ui/main_window.py`：导出时长与双语说明；
+  继续使用既有可触摸滚动对话框、主题和三页。`app.py` 仅把 worker GIF fps 改为 30。
+- **AIR/GSP、telemetry、命令/ACK、serial、Controller 状态机未改**；没有新 frame/decoder 依赖。
+  既有实时窗口 10 s 与 bounded point limits 不变，输出默认值不是任务最大时长。
+
+### 实际检查
+
+所有临时文件在 `D:/python_software/SilverStar_FCCG/tests/artifacts/joint`，下表使用该根的相对名。
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| 完整 pytest | **395 passed, 3 subtests passed in 375.65s**，无 skip | `gshc-full3.log` |
+| 分页、物理 GIF、取消、双语 GUI 专项 | 16 passed，22.05 s | `gshc-focused2.log` |
+| 原 packet/Golden/解析导出专项 | 12 passed，2.85 s | `gshc-packet3.log` |
+| 200% DPI、中英/Light/Dark/1000×700、Custom 控件 | 4 passed，8 deselected，7.15 s | `gshc-dpi2.log` + screenshots |
+| compileall | 39 个产品/测试 Python 文件通过 | `gshc-compile.log` |
+| 原 headless smoke | 8 mask/language cases、dialog/event loop 通过 | `gshc-headless.log` + `gshc-headless/headless_gui.json` |
+| 原 spec 打包/启动 | PyInstaller 构建通过，EXE 8 s 后存活，stderr 0 bytes | `gshc-package2/startup.json` |
+
+完整 suite 包括既有 protocol/Golden、telemetry、command、ACK、serial、GUI、touch、
+高 DPI、docs 链接。测试使用 FLP venv 的 pytest-qt，追加系统 site-packages 读取已有 pyserial；
+不安装/修改全局依赖。先前失败为旧 `velocity_EN.png` 根目录断言，已改为实际分页类别路径。
+新增 10/30/31/60/300 s 检查分别验证 300/900/900/900/900 motion + 30 hold physical frames，
+速度 1/1/31÷30/2/10；逐帧解码证实末尾一致。61 s 真 PNG 得到 21 图，7 类输出项各 3 页，
+分属 5 类目录；TXT 仍含末尾 61 s。取消编码保留预先存在的输出目录。
+
+首次沙箱打包因子进程 PATH 被执行环境重写，误收 Poppler ICU / FreeCAD runtime，
+导致 QtCore DLL load failed。进程 PATH probe 已复现；获批非沙箱进程保留 Python/Windows
+临时 PATH 后，使用**未修改的原 spec** 完整重建通过。没有修改系统/user PATH 或生产 spec。
+独立 smoke 只结束它自己启动的 EXE；这不是用户应用发布，也不是硬件验证。
+
+EXE SHA256：`d7a4b71d0e3570eb1b8a5de06247d9423e617fdaa8d53df1f0470bc13a71c1c8`；完整包必须整目录使用。自动化没有实际串口/无线/GPU/CF-33 触屏验证。
+原始含历史缓存目录的 compileall 会提示不可遍历旧产物，最终按 Git 产品/测试文件清单逐一
+compileall，未删除或改写旧测试目录。新的输出行为见 [TIME_EXPORT](docs/TIME_EXPORT.md)。
+
 ## 2026-09-17 — FCCG/FLP 第二轮修改的地面站兼容验证
 
 初始 HEAD：`92184a80acd48b5f56de6bb06857919d64de6aeb`；

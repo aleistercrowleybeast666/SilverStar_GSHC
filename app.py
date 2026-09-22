@@ -347,7 +347,7 @@ class ProcessingWorker(QObject):
         try:
             processor = FlightLogProcessor(
                 output_root=self.output_root,
-                gif_fps=5,
+                gif_fps=30,
                 export_options=self.export_options,
             )
 
