@@ -63,9 +63,11 @@ from services.preferences import (
     AppPreferences,
     ExportItem,
     ExportLanguage,
+    ExportTheme,
     ResolvedExportOptions,
     Theme,
     resolve_export_language,
+    resolve_export_theme,
 )
 from services.state_model import (
     CalibrationStartResult,
@@ -1033,6 +1035,13 @@ class ExportOptionsDialog(QDialog):
         language_row.addWidget(self.lbl_language)
         language_row.addWidget(self.language_combo, 1)
         root.addLayout(language_row)
+        theme_row = QHBoxLayout()
+        self.lbl_export_theme = QLabel()
+        self.export_theme_combo = QComboBox()
+        TouchScroll_Enable(self.export_theme_combo.view())
+        theme_row.addWidget(self.lbl_export_theme)
+        theme_row.addWidget(self.export_theme_combo, 1)
+        root.addLayout(theme_row)
 
         self.range_labels: dict[str, QLabel] = {}
         self.range_combos: dict[str, QComboBox] = {}
@@ -1117,8 +1126,19 @@ class ExportOptionsDialog(QDialog):
             index = self.language_combo.findData(selected_language)
             if index >= 0:
                 self.language_combo.setCurrentIndex(index)
+        selected_theme = self.export_theme_combo.currentData()
+        self.lbl_export_theme.setText(self.i18n.tr("export.theme.label"))
+        self.export_theme_combo.clear()
+        for mode in ExportTheme:
+            self.export_theme_combo.addItem(
+                self.i18n.tr(f"export.theme.{mode.value}"), mode.value
+            )
+        if selected_theme is not None:
+            self.export_theme_combo.setCurrentIndex(
+                max(0, self.export_theme_combo.findData(selected_theme))
+            )
         for kind, combo in self.range_combos.items():
-            selected = combo.currentData() or "30"
+            selected = combo.currentData() or ("full" if kind == "gif" else "30")
             combo.blockSignals(True)
             combo.clear()
             for value in ("5", "10", "30", "60", "120", "custom", "full"):
@@ -1145,6 +1165,10 @@ class ExportOptionsDialog(QDialog):
         index = self.language_combo.findData(language.value)
         if index >= 0:
             self.language_combo.setCurrentIndex(index)
+        theme = self.preferences.export_theme()
+        self.export_theme_combo.setCurrentIndex(
+            max(0, self.export_theme_combo.findData(theme.value))
+        )
         selected = self.preferences.export_items()
         for item, checkbox in self.item_checkboxes.items():
             checkbox.setChecked(item in selected)
@@ -1182,11 +1206,14 @@ class ExportOptionsDialog(QDialog):
             for item, checkbox in self.item_checkboxes.items()
             if checkbox.isChecked()
         )
+        theme_mode = ExportTheme(str(self.export_theme_combo.currentData()))
         self.preferences.set_export_language(export_language)
+        self.preferences.set_export_theme(theme_mode)
         self.preferences.set_export_items(items)
         return ResolvedExportOptions(
             language=resolve_export_language(export_language, ui_language),
-            theme=theme,
+            theme=resolve_export_theme(theme_mode, theme),
+            theme_mode=theme_mode,
             items=items,
             page_duration_s=self._Range_Value("page"),
             gif_source_duration_s=self._Range_Value("gif"),

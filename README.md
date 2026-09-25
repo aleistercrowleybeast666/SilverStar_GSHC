@@ -206,4 +206,4 @@ packaging\build_pyinstaller.bat
 
 输出为 `dist/SilverStar_GSHC/SilverStar_GSHC.exe`。必须复制整个目录，不能只复制 exe。`SilverStar_GSHC.spec` 和 `packaging/version_info.txt` 固定产物名与 Windows metadata；`installer/SilverStar_GSHC.iss` 生成 `SilverStar_GSHC_Setup_v0.0.3.exe`。发布前应在源码版和打包版各验证一次串口、Capability、预飞流程、START 恢复、主题、3D、10 秒曲线和多语言 JSONL 后处理。
 
-时间型输出默认 30 s，支持 Full/自定义、分类分页和恒速 GIF，详见[时间输出](docs/TIME_EXPORT.md)。
+时间型输出支持 PNG 默认 30 s 分类分页、GIF 默认覆盖完整任务并按需要压缩到 30 s；均支持 Full/自定义，详见[时间输出](docs/TIME_EXPORT.md)。

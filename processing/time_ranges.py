@@ -61,7 +61,7 @@ class GifPlan:
         }
 
 
-def GifPlan_Build(duration_s: float, source_s: float | None = 30.0) -> GifPlan:
+def GifPlan_Build(duration_s: float, source_s: float | None = None) -> GifPlan:
     Duration_Validate(source_s)
     if not math.isfinite(duration_s) or duration_s < 0:
         raise ValueError("Invalid source duration")

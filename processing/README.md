@@ -41,13 +41,14 @@ data/yyyy-mm-dd-n/
 ├─ link_quality_ZH.png
 ├─ packet_loss_per_second_ZH.png
 ├─ attitude_motion_ZH.gif
-├─ gif_frames_ZH/
 └─ manifest_ZH.json
 ```
 
-GUI 使用默认全选的勾选框决定输出内容；命令行使用 `--export-items`。导出语言可选 `zh_CN` / `en_US`，所有文件及 3D 帧统一使用 `_ZH` / `_EN`，图片内标题、坐标轴、图例和注释使用相同语言。`--theme light|dark` 同时控制 2D/3D 图背景、网格、标签和文字颜色；单个导出失败不会阻断其他已选项目。
+GUI 使用默认全选的勾选框决定输出内容；命令行使用 `--export-items`。导出语言可选 `zh_CN` / `en_US`，所有文件及 GIF 统一使用 `_ZH` / `_EN`，图片内标题、坐标轴、图例和注释使用相同语言。`--theme light|dark` 同时控制 2D/3D 图背景、网格、标签和文字颜色；GUI 默认 Follow UI，也可显式选择 Light/Dark；manifest 记录 theme_mode 和 resolved_theme。单个导出失败不会阻断其他已选项目。
 
 ## 姿态 GIF
+
+默认覆盖完整任务：超过 30 s 时全程匀速压缩为 30 s，较短则原速播放；画面时间显示实际任务时间。
 
 - 原始采样约 5 Hz 或更快时使用原时间戳；
 - 明显低于目标帧率时插值；

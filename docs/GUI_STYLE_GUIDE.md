@@ -61,4 +61,4 @@ The first row reserves space for port selection, baud rate and connection contro
 spinbox width follows its actual range and style instead of a fixed pixel count.
 Never substring or elide the port passed to the serial transport.
 
-导出对话框提供 PNG 分页长度和 GIF 源时长，默认 30 s；保留触屏滚动、双语主题和自定义数值输入。具体语义见[时间输出](TIME_EXPORT.md)。
+导出对话框提供 PNG 分页长度（默认 30 s）和 GIF 源时长（默认 Full）；保留触屏滚动、双语主题和自定义数值输入。具体语义见[时间输出](TIME_EXPORT.md)。

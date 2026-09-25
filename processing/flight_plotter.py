@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator, Optional
@@ -29,7 +28,7 @@ class PlotterConfig:
     language: Language = Language.EN_US
     theme: Theme = Theme.LIGHT
     filename_suffix: str = "EN"
-    gif_source_duration_s: float | None = 30.0
+    gif_source_duration_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -328,32 +327,44 @@ class FlightPlotter:
             return font_manager.FontProperties(fname=path)
         return None
 
-    def generate_attitude_motion_gif(self, data, gif_path: Path, frames_dir: Path) -> Generator[Path, None, None]:
-        frames_dir.mkdir(parents=True, exist_ok=True)
+    def generate_attitude_motion_gif(
+        self, data, gif_path: Path, frames_dir: Path | None = None
+    ) -> Generator[Path, None, None]:
+        """Render and encode one palette frame at a time; frames_dir is obsolete."""
         plan = GifPlan_Build(data.duration_s, self.config.gif_source_duration_s)
         frame_times = np.asarray(plan.Times_Get())
-        frame_paths: list[Path] = []
-        motion_limits = self._trajectory_limits(data)
         self.page_range = None
-        # The final source sample has its own frame, then 29 byte-identical copies.
-        for idx, t in enumerate([*frame_times, plan.source_end_s]):
-            self.cancel_check()
-            q = self._sample_interpolated(data.quat, float(t), (1, 0, 0, 0), is_quat=True)
-            p = self._sample_interpolated(data.pos, float(t), (0, 0, 0), is_quat=False)
-            path = frames_dir / f"frame_{idx:04d}_{self.config.filename_suffix}.png"
-            self._draw_gif_frame(path, data, float(t), tuple(q[:4]), tuple(p[:3]), motion_limits)
-            frame_paths.append(path)
-            yield path
-        for _ in range(plan.hold_frames - 1):
-            self.cancel_check()
-            path = frames_dir / f"frame_{len(frame_paths):04d}_{self.config.filename_suffix}.png"
-            shutil.copy2(frame_paths[-1], path)
-            frame_paths.append(path)
-            yield path
-        self._save_gif_with_real_timing(gif_path, frame_paths, frame_times)
+        renderer = self._GifRenderer_Create(data)
+        last_frame = None
+        try:
+            with gif_path.open("wb") as output:
+                for index, t in enumerate([*frame_times, plan.source_end_s]):
+                    self.cancel_check()
+                    frame = self._GifFrame_Render(renderer, data, float(t))
+                    try:
+                        self._GifFrame_Write(output, frame, index)
+                        if index == len(frame_times):
+                            last_frame = frame.copy()
+                    finally:
+                        frame.close()
+                    self.encoding_progress()
+                    yield gif_path
+                assert last_frame is not None
+                try:
+                    for index in range(len(frame_times) + 1, len(frame_times) + plan.hold_frames):
+                        self.cancel_check()
+                        self._GifFrame_Write(output, last_frame, index)
+                        self.encoding_progress()
+                        yield gif_path
+                finally:
+                    last_frame.close()
+                output.write(b";")
+        finally:
+            plt.close(renderer["figure"])
         self.cancel_check()
         gif_path.with_suffix(".json").write_text(
-            json.dumps(plan.Metadata_Get(), indent=2), encoding="utf-8")
+            json.dumps(plan.Metadata_Get(), indent=2), encoding="utf-8"
+        )
 
     def _final_hold_extra_frames(self) -> int:
         return 30
@@ -362,28 +373,141 @@ class FlightPlotter:
         plan = GifPlan_Build(data.duration_s, self.config.gif_source_duration_s)
         return np.asarray(plan.Times_Get()), "interpolate"
 
-    def _save_gif_with_real_timing(self, gif_path: Path, frame_paths: list[Path], frame_times: np.ndarray) -> None:
-        # Stream one palette frame at a time. getdata emits every physical frame,
-        # including identical hold frames, without Pillow's duplicate-frame merge.
-        with gif_path.open("wb") as output:
-            for index, path in enumerate(frame_paths):
-                self.cancel_check()
-                with Image.open(path) as source:
-                    frame = source.convert("RGB").quantize(colors=256)
-                try:
-                    if index == 0:
-                        blocks, _ = GifImagePlugin.getheader(frame, info={"loop": 0})
-                        for block in blocks:
-                            output.write(block)
-                    duration = (round((index + 1) * 100 / 30) - round(index * 100 / 30)) * 10
-                    for block in GifImagePlugin.getdata(
-                        frame, duration=duration, disposal=1, include_color_table=True
-                    ):
-                        output.write(block)
-                finally:
-                    frame.close()
-                self.encoding_progress()
-            output.write(b";")
+    def _GifRenderer_Create(self, data) -> dict:
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+        figure = plt.figure(figsize=(10, 5), dpi=120)
+        attitude = figure.add_subplot(1, 2, 1, projection="3d")
+        trajectory = figure.add_subplot(1, 2, 2, projection="3d")
+        vertices = np.array(
+            [[-0.35, -0.35, 0.0], [0.35, -0.35, 0.0],
+             [0.35, 0.35, 0.0], [-0.35, 0.35, 0.0], [0.0, 0.0, 2.2]],
+            dtype=float,
+        )
+        faces = ((0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4),
+                 (0, 1, 2), (0, 2, 3))
+        rocket = Poly3DCollection(
+            [[vertices[i] for i in face] for face in faces],
+            facecolors=["#ff4040", "#33cc59", "#338cff", "#ffd633", "#777777", "#555555"],
+            edgecolors=self.colors.mesh_edge,
+            linewidths=0.6,
+            alpha=0.95,
+        )
+        attitude.add_collection3d(rocket)
+        attitude.set(xlim=(-2, 2), ylim=(-2, 2), zlim=(-0.5, 2.8),
+                     xlabel="X", ylabel="Y", zlabel="Z")
+        attitude.view_init(elev=18, azim=35)
+        clock = attitude.text2D(
+            0.50, 0.95, "", transform=attitude.transAxes,
+            ha="center", va="top", fontsize=11,
+        )
+        limits = self._trajectory_limits(data)
+        xlim, ylim, zlim = limits
+        ground = Poly3DCollection(
+            [[(xlim[0], ylim[0], 0.0), (xlim[1], ylim[0], 0.0),
+              (xlim[1], ylim[1], 0.0), (xlim[0], ylim[1], 0.0)]],
+            facecolors=self.colors.ground, edgecolors="none", alpha=0.25,
+        )
+        trajectory.add_collection3d(ground)
+        before, = trajectory.plot([], [], [], linewidth=1.5, color="red")
+        after, = trajectory.plot([], [], [], linewidth=1.5, color="blue")
+        current, = trajectory.plot([], [], [], marker="o", markersize=5, color="red")
+        chute_point = self._get_chute_point(data)
+        chute = None
+        chute_label = None
+        if chute_point is not None:
+            chute, = trajectory.plot(
+                [chute_point[0]], [chute_point[1]], [chute_point[2]],
+                marker="^", linestyle="", markersize=7, color="orange",
+            )
+            chute_label = trajectory.text(
+                *chute_point, f" {self.text('parachute')}", fontsize=9,
+            )
+            chute.set_visible(False)
+            chute_label.set_visible(False)
+        trajectory.set(xlim=xlim, ylim=ylim, zlim=zlim,
+                       xlabel=f"{self.text('east')} / m",
+                       ylabel=f"{self.text('north')} / m",
+                       zlabel=f"{self.text('up')} / m")
+        trajectory.view_init(elev=20, azim=35)
+        self._style_figure(figure)
+        figure.tight_layout()
+        times = np.asarray([sample.time_s for sample in data.pos], dtype=float)
+        points = np.asarray([sample.values[:3] for sample in data.pos], dtype=float).reshape(-1, 3)
+        return dict(
+            figure=figure, attitude=attitude, trajectory=trajectory,
+            vertices=vertices, faces=faces, rocket=rocket, clock=clock,
+            before=before, after=after, current=current,
+            chute=chute, chute_label=chute_label,
+            times=times, points=points,
+        )
+
+    @staticmethod
+    def _GifLine_Set(line, points: np.ndarray) -> None:
+        if points.size:
+            line.set_data(points[:, 0], points[:, 1])
+            line.set_3d_properties(points[:, 2])
+        else:
+            line.set_data([], [])
+            line.set_3d_properties([])
+
+    def _GifFrame_Render(self, renderer: dict, data, t: float) -> Image.Image:
+        quaternion = self._sample_interpolated(
+            data.quat, t, (1, 0, 0, 0), is_quat=True
+        )
+        position = np.asarray(self._sample_interpolated(
+            data.pos, t, (0, 0, 0), is_quat=False
+        )[:3], dtype=float)
+        vertices = renderer["vertices"] @ self._quat_to_rot(tuple(quaternion[:4])).T
+        renderer["rocket"].set_verts(
+            [[vertices[i] for i in face] for face in renderer["faces"]]
+        )
+        phase = self._phase_text(data, t)
+        renderer["attitude"].set_title(f"{self.text('attitude')} - {phase}")
+        renderer["trajectory"].set_title(f"{self.text('trajectory')} - {phase}")
+        renderer["clock"].set_text(self.text("time_value", time=t))
+        times = renderer["times"]
+        points = renderer["points"]
+        end = int(np.searchsorted(times, t, side="right"))
+        history = points[:end]
+        if end == 0 or times[end - 1] < t:
+            history = np.vstack((history, position))
+            history_times = np.append(times[:end], t)
+        else:
+            history_times = times[:end]
+        deploy = data.parachute_time_s
+        if deploy is None:
+            before_points = history
+            after_points = np.empty((0, 3))
+        else:
+            split = int(np.searchsorted(history_times, deploy, side="left"))
+            before_points = history[:split]
+            after_points = history[max(0, split - 1):] if split < len(history) else np.empty((0, 3))
+            if split >= len(history):
+                after_points = np.empty((0, 3))
+        self._GifLine_Set(renderer["before"], before_points)
+        self._GifLine_Set(renderer["after"], after_points)
+        self._GifLine_Set(renderer["current"], position.reshape(1, 3))
+        after_deploy = deploy is not None and t >= deploy
+        renderer["current"].set_color("blue" if after_deploy else "red")
+        if renderer["chute"] is not None:
+            renderer["chute"].set_visible(after_deploy)
+            renderer["chute_label"].set_visible(after_deploy)
+        renderer["figure"].canvas.draw()
+        rgba = renderer["figure"].canvas.buffer_rgba()
+        width, height = renderer["figure"].canvas.get_width_height()
+        return Image.frombytes("RGBA", (width, height), bytes(rgba)).convert("RGB").quantize(colors=256)
+
+    def _GifFrame_Write(self, output, frame: Image.Image, index: int) -> None:
+        if index == 0:
+            blocks, _ = GifImagePlugin.getheader(frame, info={"loop": 0})
+            for block in blocks:
+                output.write(block)
+        duration = (round((index + 1) * 100 / 30) - round(index * 100 / 30)) * 10
+        for block in GifImagePlugin.getdata(
+            frame, duration=duration, disposal=1, include_color_table=True
+        ):
+            output.write(block)
 
     def _draw_gif_frame(self, path: Path, data, t: float, quat: tuple[float, float, float, float], pos: tuple[float, float, float], motion_limits) -> None:
         fig = plt.figure(figsize=(10, 5), dpi=120)

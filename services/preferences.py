@@ -13,6 +13,12 @@ class Theme(str, Enum):
     DARK = "dark"
 
 
+class ExportTheme(str, Enum):
+    FOLLOW_UI = "follow_ui"
+    LIGHT = "light"
+    DARK = "dark"
+
+
 class ExportLanguage(str, Enum):
     FOLLOW_UI = "follow_ui"
     ZH_CN = Language.ZH_CN.value
@@ -34,10 +40,11 @@ ALL_EXPORT_ITEMS = tuple(ExportItem)
 class ResolvedExportOptions:
     language: Language = Language.EN_US
     theme: Theme = Theme.LIGHT
+    theme_mode: ExportTheme = ExportTheme.FOLLOW_UI
     items: frozenset[ExportItem] = frozenset(ALL_EXPORT_ITEMS)
 
     page_duration_s: float | None = 30.0
-    gif_source_duration_s: float | None = 30.0
+    gif_source_duration_s: float | None = None
 
     def __post_init__(self) -> None:
         from processing.time_ranges import Duration_Validate
@@ -65,6 +72,7 @@ def resolve_export_language(
 class AppPreferences:
     SETTINGS_THEME_KEY = "appearance/theme"
     SETTINGS_EXPORT_LANGUAGE_KEY = "export/language"
+    SETTINGS_EXPORT_THEME_KEY = "export/theme_mode"
     SETTINGS_EXPORT_ITEMS_KEY = "export/items"
 
     def __init__(self, settings: QSettings) -> None:
@@ -103,6 +111,18 @@ class AppPreferences:
         self.settings.setValue(self.SETTINGS_EXPORT_LANGUAGE_KEY, selected.value)
         self.settings.sync()
 
+    def export_theme(self) -> ExportTheme:
+        raw = str(self.settings.value(self.SETTINGS_EXPORT_THEME_KEY, ExportTheme.FOLLOW_UI.value))
+        try:
+            return ExportTheme(raw)
+        except ValueError:
+            return ExportTheme.FOLLOW_UI
+
+    def set_export_theme(self, theme: ExportTheme | str) -> None:
+        selected = theme if isinstance(theme, ExportTheme) else ExportTheme(str(theme))
+        self.settings.setValue(self.SETTINGS_EXPORT_THEME_KEY, selected.value)
+        self.settings.sync()
+
     def export_items(self) -> frozenset[ExportItem]:
         raw = self.settings.value(self.SETTINGS_EXPORT_ITEMS_KEY, None)
         if raw is None:
@@ -127,7 +147,13 @@ __all__ = [
     "AppPreferences",
     "ExportItem",
     "ExportLanguage",
+    "ExportTheme",
     "ResolvedExportOptions",
     "Theme",
     "resolve_export_language",
+    "resolve_export_theme",
 ]
+
+
+def resolve_export_theme(mode: ExportTheme, ui_theme: Theme) -> Theme:
+    return ui_theme if mode is ExportTheme.FOLLOW_UI else Theme(mode.value)

@@ -31,6 +31,7 @@ from services.i18n import Language
 from services.preferences import (
     ALL_EXPORT_ITEMS,
     ExportItem,
+    ExportTheme,
     ResolvedExportOptions,
     Theme,
 )
@@ -662,19 +663,13 @@ class FlightLogProcessor:
             check_cancel()
             gif_dir = output_dir / "GIF"
             gif_dir.mkdir(exist_ok=True)
-            frames_dir = gif_dir / f"frames_{options.language_suffix}"
             plotter.cancel_check = check_cancel
             plotter.encoding_progress = lambda: step("GIF encode")
-            frames_dir.mkdir(exist_ok=True)
             gif_name = options.output_name("attitude_motion", "gif")
             gif_path = gif_dir / gif_name
             try:
-                for frame_path in plotter.generate_attitude_motion_gif(
-                    data,
-                    gif_path,
-                    frames_dir,
-                ):
-                    step(frame_path.name)
+                for _frame in plotter.generate_attitude_motion_gif(data, gif_path):
+                    step("GIF render")
             except ProcessingCancelledError:
                 raise
             except Exception as exc:
@@ -1370,6 +1365,8 @@ class FlightLogProcessor:
             "export": {
                 "language": options.language.value,
                 "theme": options.theme.value,
+                "theme_mode": options.theme_mode.value,
+                "resolved_theme": options.theme.value,
                 "filename_language_suffix": options.language_suffix,
                 "items": [
                     item.value for item in ALL_EXPORT_ITEMS if item in options.items
@@ -1392,7 +1389,7 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=Path("data"))
     parser.add_argument("--gif-fps", type=int, default=30, choices=[30], help="Fixed GIF frame rate: 30.")
     parser.add_argument("--page-seconds", type=float, default=30, help="PNG page duration; 0 means Full.")
-    parser.add_argument("--gif-source-seconds", type=float, default=30, help="GIF source duration; 0 means Full.")
+    parser.add_argument("--gif-source-seconds", type=float, default=0, help="GIF source duration; default 0 means Full.")
     parser.add_argument(
         "--language",
         choices=[language.value for language in Language],
@@ -1421,6 +1418,7 @@ def main() -> None:
         export_options=ResolvedExportOptions(
             language=language,
             theme=Theme(args.theme),
+            theme_mode=ExportTheme(args.theme),
             items=frozenset(ExportItem(item) for item in args.export_items),
             page_duration_s=args.page_seconds or None,
             gif_source_duration_s=args.gif_source_seconds or None,

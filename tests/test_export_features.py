@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_hex
+from PIL import Image
 
 from processing.flight_log_processor import (
     FlightData,
@@ -132,35 +133,25 @@ class ExportProcessingTests(unittest.TestCase):
                 manifest["export"]["partial_failures"],
             )
 
-    def test_3d_frame_names_include_export_language_suffix(self) -> None:
-        plotter = FlightPlotter(
-            PlotterConfig(
-                language=Language.EN_US,
-                theme=Theme.LIGHT,
-                filename_suffix="EN",
-            )
-        )
+    def test_gif_stream_has_no_intermediate_png(self) -> None:
+        plotter = FlightPlotter(PlotterConfig(language=Language.EN_US))
         data = minimal_flight_data()
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-
-            def draw_frame(path: Path, *_args, **_kwargs) -> None:
-                path.write_bytes(b"frame")
-
-            with (
-                patch.object(plotter, "_draw_gif_frame", side_effect=draw_frame),
-                patch.object(plotter, "_save_gif_with_real_timing"),
+            target = root / "attitude_motion_EN.gif"
+            with patch.object(
+                plotter, "_GifFrame_Render",
+                side_effect=lambda _renderer, _data, t: Image.new(
+                    "P", (8, 8), color=int(t * 10) % 255
+                ),
             ):
-                frame_paths = list(
-                    plotter.generate_attitude_motion_gif(
-                        data,
-                        root / "attitude_motion_EN.gif",
-                        root / "gif_frames_EN",
-                    )
-                )
-
-            self.assertEqual(len(frame_paths), 60)
-            self.assertTrue(frame_paths[0].name.endswith("_EN.png"))
+                frames = list(plotter.generate_attitude_motion_gif(
+                    data, target, root / "frames_EN"
+                ))
+            self.assertEqual(len(frames), 60)
+            self.assertTrue(target.is_file())
+            self.assertEqual(list(root.rglob("*.png")), [])
+            self.assertFalse((root / "frames_EN").exists())
 
 
 class ExportedFigureTests(unittest.TestCase):

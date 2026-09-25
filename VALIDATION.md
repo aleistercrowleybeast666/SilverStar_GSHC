@@ -332,3 +332,46 @@ Headless 渲染在测试进程加载字体并隐藏不支持的 OpenGL 视口，
 按[SS0.5 清单](tests/validation/README.md)验证四种 build 的最新握手与菜单、自动/显式 NONE、active IMU 锁定、旧 Alignment 失效、采样/重采与 Reset、错误/超时、Alignment READY/STALE、START、空口停滞诊断，以及源码/打包版的串口和 GPU。
 
 本轮未创建提交、Release、Tag，未推送远端。工作区保留代码、文档与测试变更，供审阅。
+
+## 2026-09-25 — Export theme and streaming GIF follow-up
+
+The export dialog persists the requested theme mode (`follow_ui`, `light`, or `dark`);
+the manifest records both `theme_mode` and `resolved_theme`. The GIF renderer reuses one
+Matplotlib figure with two 3D axes, updates artists on each frame, converts the RGBA canvas
+to one palette frame at a time, and writes GIF blocks directly. Normal export leaves no
+intermediate PNG frame directory. The existing 30 fps, at most 30 s motion and 30-frame
+final hold timing rules are unchanged. Static PNG generation was not parallelized because
+profiling showed the GIF path was the dominant cost and the rewrite removed that bottleneck.
+
+Synthetic 30 s / 930-physical-frame benchmark on this host (Python `tracemalloc` peak;
+benchmark helper in `tests/benchmark_gif.py`):
+
+| GIF path | Render | Encode | Total | Temporary PNG | Peak traced Python memory |
+|---|---:|---:|---:|---:|---:|
+| Previous per-frame figure + PNG | 469.373 s | 59.600 s | 529.328 s | 930 / 199,293,158 B | 166,855,087 B |
+| Persistent figure + streaming GIF | 191.963 s | 4.003 s | 196.247 s | 0 / 0 B | 9,678,940 B |
+
+Observed total time improved about 2.70× on this host; this is a benchmark, not a
+portable time threshold. Verification: full pytest **399 passed, 3 subtests passed** in
+258.73 s (including existing AIR/GSP Golden, packet, telemetry, command/ACK, serial,
+GUI, touch, and offline processing regressions). Tracked Python source and test files
+compiled; docs link tests **31 passed**; headless GUI smoke passed 8 mask/language
+cases and dialog/event loop; PyInstaller package build and 8-second offscreen EXE
+startup passed. No firmware or wire protocol source changed.
+
+## 2026-09-25 -- GIF full-mission default
+
+The GIF source range now defaults to the complete parsed mission in the plan, plotter,
+resolved export options, GUI (Full), and CLI (0). A source longer than 30 s is sampled
+uniformly into 30 s of motion; a source of at most 30 s plays at source speed. The
+on-frame clock displays source mission time, including the actual endpoint. The 1 s
+final hold, 30 fps encoding, explicit source-range choices, and PNG 30 s page default
+remain as before.
+
+Verification: focused export tests **21 passed** in 16.40 s, followed by four new/default
+time and CLI tests **4 passed** in 1.73 s; complete pytest **402 passed, 3 subtests
+passed** in 240.23 s. `compileall` passed. Docs-link and AIR/GSP fixed-vector Golden
+tests **45 passed**. Headless GUI smoke passed **8 mask/language cases**. Existing
+PyInstaller packaging and offscreen startup smoke passed: packaged EXE alive after
+8 s, stderr **0 bytes**. `git diff --check` passed. No C, firmware, or wire protocol
+source changed in this follow-up; GSHC has no firmware Power of Ten gate.
