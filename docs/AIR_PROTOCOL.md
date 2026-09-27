@@ -100,6 +100,9 @@ Ground Station 遇到尚未认识的 sensor ID 时应显示 `Unknown Sensor 0xNN
 | `0x12` | `CAPABILITY` | 9 | START 前且未 ACK，立即一次 + 1 Hz |
 | `0x13` | `PREFLIGHT_STATUS` | 9 | Capability ACK 后至 START |
 | `0x14` | `SENSOR_STATUS` | 9 | Alignment 事务结束时组成一次 snapshot |
+| `0x15` | `NAV_CAPABILITY` | 9 | 协商后的导航 schema / session / generation |
+| `0x16` | `NAV_PREPARATION` | 9 | 原子导航准备 required / ready / reason |
+| `0x17` | `NAV_HEALTH` | 9 | 独立限时的组级导航健康字段 |
 | `0x20` | `STATUS` | 9 | 边沿事件 |
 | `0x30` | `CMD` | 9 | GS→FC |
 | `0x40` | `ACK` | 9 | FC→GS command response |
@@ -721,7 +724,9 @@ Alignment `READY → STALE` 后重新阻止 START，必须显式重新 `ALIGN_ST
 
 AIR START 额外要求 Capability ACKED 与 interlock UNLOCKED。
 
-GNSS 是 Optional；无预飞 GNSS origin 不阻止 START，本任务可关闭 GNSS fusion。
+旧固件曾允许无预飞 GNSS origin 启动。导航 schema 1 的任务策略由 required mask 声明；
+要求 GNSS 的任务必须完成本次 generation 的 GNSS origin 和 navigation ready。
+GSHC 在无法确认新鲜导航准备状态时阻止普通 START，不自动选择无 GNSS 降级启动。
 
 ---
 
@@ -961,3 +966,84 @@ AIR M0 wire在0.0.10当前契约内冻结；普通物理设备或能力实例扩
 正式发布后，普通硬件扩展不得要求修改 wire format。
 
 只有 application framing、fragmentation、encryption/authentication framing、多节点寻址、重大 telemetry encoding redesign 等级别变化，才考虑未来新的 Profile。
+
+## 41. 导航准备 / 健康扩展 schema 1
+
+新增独立 type，不改变旧固定帧、旧保留位、基础 Capability ACK、AIR profile、MTU、
+GSP 封装或任何 CRC。三个新增状态帧都只有 **9 bytes**，每帧可独立解释，无分片重组。
+本节明确修订旧 START 可缺 GNSS origin 的规则，仅对协商后的 schema 1 生效。
+
+基线 Capability 握手成功后，GSHC 每连接发送一次 `NAV_SUBSCRIBE`：
+
+| ID | 命令 | token | param0 | param1 |
+|---|---|---|---|---|
+| `0x0E` | `NAV_SUBSCRIBE` | `0x4E560000 OR nonce16` | schema=1 | 0 |
+
+nonce 是非零 u16；重连产生新的 nonce。请求使用旧 9-byte CMD，ACK OK 只表示受理。
+只有相同 nonce 的 `NAV_CAPABILITY` 声明 schema 1 才确认扩展。BAD_CMD 或未知 schema
+显示 UNSUPPORTED，不损坏基础握手，不自动重试该能力探测，不伪造准备完成。
+
+所有新状态：byte0 type；byte1 AIR seq；byte2..3 session nonce LE16；
+byte4..5 preparation generation LE16。余下三字节：
+
+| type | byte6 | byte7 | byte8 |
+|---|---|---|---|
+| NAV_CAPABILITY | schema=1 | algorithm ID | group mask |
+| NAV_PREPARATION | required mask | ready mask | block reason |
+| NAV_HEALTH | selector | value LE16 low | value LE16 high |
+
+Algorithm ID：0=Pure INS / estimator none，1=KF_6，2=ESKF_15；未知值保留原值，
+不得当成 KF_6。Group mask bits0..4 对应 Pos EN、Pos U、Vel EN、Vel U、Baro U。
+
+准备 bit0 devices/config readback，bit1 calibration，bit2 attitude alignment，
+bit3 GNSS solution，bit4 GNSS origin，bit5 barometer reference，bit6 estimator initialized；
+bit7 未定义，不能确认 READY。reason 沿用 AIR ACK block reason，0 表示该快照未阻止。
+实际所需条件由 required mask 决定，未要求 GNSS 的项目不等待 GNSS。完成步骤数仅由
+`popcount(required & ready)` 得到，界面不按时间模拟进度。
+
+现 ALIGN_START/STOP/RESET 编码不变；产品操作称“导航准备”。校准、重新准备、来源或
+配置变化使 generation 递增并撤销旧 READY。generation 回绕需要重新订阅，不比较为新代次。
+START 使用旧命令，固件在真正开始时再次执行本次 generation 的前置检查。
+
+NAV_PREPARATION 每秒发送，TTL=2秒。先按同一会话的 NAV 消息流展开 seq 的 u8 半域
+顺序，再用逻辑序号为各健康字段拒绝重复/乱序，避免低频字段跨越多个 seq 回绕而失效。
+重复数据不延长 TTL。PC接收会话隔离，旧nonce数据不恢复准备状态。
+状态过期显示未知/过期，不显示上次绿色。所有年龄基于最早 host_rx_monotonic_ns，
+不以 GUI 渲染或处理时间刷新。
+
+NAV_HEALTH selector bits0..2 为 group 0..4；bits3..7 为 metric：
+
+| metric | value | 未提供 / 单位 |
+|---|---|---|
+| 0 | result bits0..3，quality bits4..7，reason bits8..15 | 枚举如下 |
+| 1 | 距最近真实成功融合时间 | 100ms，65535=未知 |
+| 2 | R 方差倍率 | Q8.8，无量纲，65535=未知，65534=最大有效值 |
+| 3 | NIS | Q8.8，无量纲，65535=未知，65534=最大有效值 |
+| 4 / 5 / 6 / 7 | 最近接收 / 物理有效 / 尝试更新 / 恢复年龄 | 100ms，65535=未知 |
+| 8 | 恢复次数 | 65534饱和，65535=未知 |
+
+result：0 unavailable，1 accepted，2 soft weighted，3 rejected，4 recovering，
+5 dead reckoning/degraded，6 invalid。quality：0 unknown，1 nominal，2 degraded，3 invalid。
+未知 selector / 枚举只作诊断，不推断健康。主状态与成功年龄各自TTL=3秒；metric2..8详情TTL=10秒，彼此不能刷新有效期；
+没有组成“同一时刻完整快照”的承诺。状态与年龄每250ms一帧循环10项，最迟2.5秒更新。
+详情独立每100ms一帧，共52项轮转，过期显示不可用，不能影响主状态/成功年龄预算。
+
+新增 group=7 为全局详情（group5/6仍保留），共17个metric；所有值65535=未知、65534=有效饱和值：
+
+| metric | 来源与单位 |
+|---|---|
+| 0 | GNSS 卫星数，必须有对应supported/valid字段 |
+| 1 / 2 / 3 | hAcc/vAcc/sAcc，cm/cm/cm/s，必须有对应supported/valid字段 |
+| 4 | GNSS 接收年龄，100ms |
+| 5 | fix_type bits0..7，online bit8，fixOK bit9，position_usable bit10，quality_degraded bit11 |
+| 6 | IMU quality flags：近量程bit0、削顶bit1、时间不确定bit2、历史重置bit3、时间不连续bit4、量程未核验bit5、样本对不同步bit6 |
+| 7 / 8 | IMU 接收年龄100ms / 真实配置代次，未知不得写零 |
+| 9 / 16 | IMU有效量程，gyro deg/s / accel centig，由EffectiveConfigGet读回 |
+| 10 / 11 / 12 | Logger队列溢出次数 / 普通队列HWM / 估计器队列HWM |
+| 13 / 14 / 15 | Logger引导抑制次数 / 状态拒绝次数 / 容量拒绝次数，不能混称溢出 |
+
+global指标同为10秒独立TTL；GNSS精度/卫星数据在生产端样本超过3秒时发未知，IMU质量超过1秒发未知，接收年龄继续如实增长。logging未编入、getter不可用、字段无效均发未知。计数饱和在GUI显示≥65534，不截断回零。所有年龄在接收值上增加PC经过时间。
+
+不用旧 alignment sensor snapshot 冒充实时状态。端到端硬件无线链路未验证：
+GSP-MIN文档与Python解析器透明转发，但本仓库没有地面接收板固件，必须实机验证新type
+不会被网关白名单丢弃。旧Golden帧逐字节保持。

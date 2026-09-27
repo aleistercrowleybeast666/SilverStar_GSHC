@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Navigation preparation and health
+
+- 保持 AIR M0/GSP 的 9-byte 外封装，增加独立协商的导航准备和健康消息；旧固件显示 UNSUPPORTED。
+- 导航准备分步骤显示，READY 来自当前会话、准备代次及新鲜机载快照；重启、断线、重准备及过期清除就绪。
+- START 公共入口、通用入口和重试均检查导航准备；ACK 不生成 READY。
+- 飞行页支持五组融合质量、成功/接收/有效/尝试/恢复年龄、R/NIS，以及真实 GNSS 精度、IMU 质量和 logger 队列详情，保留双语与主题。
+
 ## Unreleased — 2026-09-05
 
 - 对齐 SilverStar Platform 0.0.10 / AIR M0 [共同 Calibration 契约](docs/AIR_CALIBRATION_CONTRACT.md)。

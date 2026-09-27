@@ -1,0 +1,368 @@
+{
+  "scope": "GSHC navigation layout validation; offscreen software only",
+  "full_suite": {
+    "passed": 425,
+    "subtests_passed": 3,
+    "seconds": 658.11,
+    "exit_code": 0
+  },
+  "focused": {
+    "passed": 48,
+    "seconds": 159.86,
+    "exit_code": 0
+  },
+  "hidpi": {
+    "passed": 4,
+    "seconds": 12.74,
+    "exit_code": 0
+  },
+  "limitations": [
+    "OpenGL viewport hidden in offscreen GUI screenshots; no physical GPU/touch/serial validation.",
+    "At 1000x700 the six plots retain their own gesture area; ordinary flight status requires vertical scrolling.",
+    "Older gui-hidpi/flight_window_en_US_dark.png was 2000x1778 and is not a 1000x700 geometry pass."
+  ],
+  "files": [
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/preflight_window_en_US_dark.png",
+      "bytes": 66687,
+      "sha256": "fb91c7b242b79c5938832523890d97c2567574d2eb01c2d6543c6b320478bad1",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/preflight_window_en_US_light.png",
+      "bytes": 66271,
+      "sha256": "d735184329eea515128b092e47d57e7be1e46f188e5b7204646f1c728f8f1f09",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/preflight_window_zh_CN_dark.png",
+      "bytes": 76467,
+      "sha256": "2720fe88e54e106974e27bbac5cbafe9154bb1b97f1a40beb2893b9d5e4ffb65",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/preflight_window_zh_CN_light.png",
+      "bytes": 76521,
+      "sha256": "0ac69893f5f017c63b9cea2cf7826a984eb33677309c3f8e1c97f94145e1e26f",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/flight_window_en_US_dark.png",
+      "bytes": 58530,
+      "sha256": "b8cff3f9849eed9354c260b6a8f649864298a342090172bf612c6d4f37da0810",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/flight_window_en_US_light.png",
+      "bytes": 57901,
+      "sha256": "8eaf45d8dc7b728c07ad9b2a22354d51ad6b9235b84bf665e7ea1c7f2ebfa025",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/flight_window_zh_CN_dark.png",
+      "bytes": 64988,
+      "sha256": "c0842c07b6ba8f8bee0f426c4a0fd79bb8f674b27226691838f572a34f4bb7a1",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/flight_window_zh_CN_light.png",
+      "bytes": 64215,
+      "sha256": "b8a569a1d9d33a9b763ca7d81d2065b26868c0764754e3b1f14423ffd110dcc5",
+      "pixel_size": [
+        1000,
+        700
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/geometry_en_US_dark.json",
+      "bytes": 417,
+      "sha256": "267feea46a8fff8b53a985543e3a9fce1a694ca7a5277ae757f34e7bfc4ed3df"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/geometry_en_US_light.json",
+      "bytes": 419,
+      "sha256": "6ac0b678ecc8abba3d6ecb53218093a6cfd0b6d06177a7d14e980ad58fd7f1c4"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/geometry_zh_CN_dark.json",
+      "bytes": 417,
+      "sha256": "240614b4b9581f1a5a0ae507521abbbf257f98ad3ac4fc0d6b20f899bac18d86"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit/geometry_zh_CN_light.json",
+      "bytes": 419,
+      "sha256": "9a843337abc32079d97172eba6d86d0311917411b1fcfa8ff5b8368f6c3d7a5b"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_en_US_dark.png",
+      "bytes": 183451,
+      "sha256": "37318c321400ff399fa4ac833ca8c28fce9dd23874d260b0b1c4008c1f3ea417",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_en_US_light.png",
+      "bytes": 182391,
+      "sha256": "5cc2e15339a923eed8237903f9519bc38e0bded164ddd710efa1b0763f3aaf03",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_zh_CN_dark.png",
+      "bytes": 202159,
+      "sha256": "4ef77ec4c5c41d9fa5ebd47c5f288ec30bc3b891c2b8be18019ec2b5f4b6dd82",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_zh_CN_light.png",
+      "bytes": 202557,
+      "sha256": "0e971b688324559aa48318efe84129638870a9d0cc224a680e0ec604ad4fb357",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_en_US_dark.png",
+      "bytes": 148346,
+      "sha256": "bed5e7145895ec789dedb9f6765cf7254d10e0ecaed4563b9382b1beb93a5a56",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_en_US_light.png",
+      "bytes": 147054,
+      "sha256": "a08826890e27a0dbe40c922aa196bbaa43d3b8e523086ca19c512a8dfeb0c8e3",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_zh_CN_dark.png",
+      "bytes": 163077,
+      "sha256": "81575bbe90c0d1a1e8bdebc79f5fa90dfaad23b5e0abf0c67e0fc5708f125604",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_zh_CN_light.png",
+      "bytes": 162328,
+      "sha256": "d414e320f4731fa973889286b2269bb943069d324a86331ed7ed455276959d33",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/geometry_en_US_dark.json",
+      "bytes": 419,
+      "sha256": "301c51a5b1fd5b2c0b7db19f2c9979bd5edb6c95880f41f8d956f22cf450cc57"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/geometry_en_US_light.json",
+      "bytes": 421,
+      "sha256": "955ad55aa9f860fb3e6461c34ea6603d5ef4c61348a60675dab7cfc43a05b508"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/geometry_zh_CN_dark.json",
+      "bytes": 419,
+      "sha256": "613cde43bb6725a1609fef3538f195933956b31da88ad22c1d3e79d21768f295"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/geometry_zh_CN_light.json",
+      "bytes": 421,
+      "sha256": "f181d12e5cdeea7befde92c5b5c5800ba4a412e60744b138eb98fbcc9c00a764"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/mission_en_US_dark.png",
+      "bytes": 32785,
+      "sha256": "9c18beb5ee60f3084665c59ff011e2adbb41822e115857f2af1be74b750d0a17",
+      "pixel_size": [
+        1068,
+        304
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/mission_zh_CN_light.png",
+      "bytes": 34279,
+      "sha256": "88e5947c3bbe922c1419d349eafdf271db65161f23ada4e42b264ee421854c58",
+      "pixel_size": [
+        1068,
+        240
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/health_en_US_dark.png",
+      "bytes": 111129,
+      "sha256": "3e61e3a1e753dc64cd610d52f18ebc7b56fc1044afc0c943ad58b5a72023bd6d",
+      "pixel_size": [
+        1068,
+        684
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/health_details_zh_CN_light.png",
+      "bytes": 155339,
+      "sha256": "42626a0481db250cfd23dc77ff890622a2680355f4b44b8821faee7f86d6a49a",
+      "pixel_size": [
+        1068,
+        624
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi/health_details_window_en_US_dark.png",
+      "bytes": 165617,
+      "sha256": "b08a030c07a78f115bc73ed01e240bc4c52ce680609ffb06bb8906b8df9eed0b",
+      "pixel_size": [
+        2000,
+        1400
+      ]
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-focused.log",
+      "bytes": 113,
+      "sha256": "2d63fb3ce06facbd7dc510f2bb9ac77e051d1eef48d142dfd506b0b6a333c5cf"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-hidpi.log",
+      "bytes": 101,
+      "sha256": "df983052b4e2732899a61daa387d1f32a66a92ab5e6d2b0db43eff0eaa0a10dc"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-full.log",
+      "bytes": 535,
+      "sha256": "df41d5c978e85230a64dec9ba740ca1b0c47f4d512445c7a7d2baa91e088d8f1"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-lint.log",
+      "bytes": 20,
+      "sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-navigation-lint.log",
+      "bytes": 20,
+      "sha256": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-compileall.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-diffcheck.log",
+      "bytes": 1809,
+      "sha256": "b4bed4c8cfd7d6ff9ca1bb3ea8c6e04f0258ece8f89ec5dd20a225e42e8641d1"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-packaging.log",
+      "bytes": 157,
+      "sha256": "11e1abc773f01a63de25a399f2e9acc7a9d1ad6c229e8bc5d3c769aec8495f1e"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-packaging-result.json",
+      "bytes": 471,
+      "sha256": "cc91e838fa98e52719ef6e5105ab6278fa7e571887706a9850aa043530153f85"
+    },
+    {
+      "path": "tests/joint_rework_20260927/packaging_smoke.ps1",
+      "bytes": 3133,
+      "sha256": "4dcb29e9032c68d183886f69668fa8e31bf758915dbe1fad51d08cc95527b88c"
+    },
+    {
+      "path": "tests/joint_rework_20260927/gui-fit-docs.log",
+      "bytes": 101,
+      "sha256": "0efdd83b276b2aaf558598912c5f1e87bd64ec23eba849f1ae17ce089d8519f8"
+    }
+  ],
+  "total_evidence_bytes": 2431904,
+  "commit_files": [
+    "ui/main_window.py",
+    "tests/test_navigation_gui.py",
+    "VALIDATION.md",
+    "tests/joint_rework_20260927/gui-fit-evidence.json",
+    "tests/joint_rework_20260927/gui-fit/preflight_window_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit/preflight_window_en_US_light.png",
+    "tests/joint_rework_20260927/gui-fit/preflight_window_zh_CN_dark.png",
+    "tests/joint_rework_20260927/gui-fit/preflight_window_zh_CN_light.png",
+    "tests/joint_rework_20260927/gui-fit/flight_window_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit/flight_window_en_US_light.png",
+    "tests/joint_rework_20260927/gui-fit/flight_window_zh_CN_dark.png",
+    "tests/joint_rework_20260927/gui-fit/flight_window_zh_CN_light.png",
+    "tests/joint_rework_20260927/gui-fit/geometry_en_US_dark.json",
+    "tests/joint_rework_20260927/gui-fit/geometry_en_US_light.json",
+    "tests/joint_rework_20260927/gui-fit/geometry_zh_CN_dark.json",
+    "tests/joint_rework_20260927/gui-fit/geometry_zh_CN_light.json",
+    "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_en_US_light.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_zh_CN_dark.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/preflight_window_zh_CN_light.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_en_US_light.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_zh_CN_dark.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/flight_window_zh_CN_light.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/geometry_en_US_dark.json",
+    "tests/joint_rework_20260927/gui-fit-hidpi/geometry_en_US_light.json",
+    "tests/joint_rework_20260927/gui-fit-hidpi/geometry_zh_CN_dark.json",
+    "tests/joint_rework_20260927/gui-fit-hidpi/geometry_zh_CN_light.json",
+    "tests/joint_rework_20260927/gui-fit-hidpi/mission_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/mission_zh_CN_light.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/health_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/health_details_zh_CN_light.png",
+    "tests/joint_rework_20260927/gui-fit-hidpi/health_details_window_en_US_dark.png",
+    "tests/joint_rework_20260927/gui-fit-focused.log",
+    "tests/joint_rework_20260927/gui-fit-hidpi.log",
+    "tests/joint_rework_20260927/gui-fit-full.log",
+    "tests/joint_rework_20260927/gui-fit-lint.log",
+    "tests/joint_rework_20260927/gui-fit-navigation-lint.log",
+    "tests/joint_rework_20260927/gui-fit-compileall.log",
+    "tests/joint_rework_20260927/gui-fit-diffcheck.log",
+    "tests/joint_rework_20260927/gui-fit-packaging.log",
+    "tests/joint_rework_20260927/gui-fit-packaging-result.json",
+    "tests/joint_rework_20260927/packaging_smoke.ps1",
+    "tests/joint_rework_20260927/gui-fit-docs.log"
+  ],
+  "documentation_delta": {
+    "passed": 32,
+    "seconds": 0.23,
+    "exit_code": 0
+  },
+  "evidence_maintenance": {
+    "path": "tests/joint_rework_20260927/packaging_smoke.ps1",
+    "change": "Remove surplus empty EOF line only; executed script behavior unchanged; original test logs retained.",
+    "previous_bytes": 3135,
+    "previous_sha256": "44777f5410f74c259da125ad5186ccff247d94b23fee93985c3f6a285ea67b93"
+  }
+}

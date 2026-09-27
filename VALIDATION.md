@@ -1,9 +1,47 @@
 # GSHC 验收快照
 
+## 2026-09-27 — 联合导航准备、健康与会话门禁
+
+本轮实现固定 9-byte AIR 扩展、NAV_SUBSCRIBE 会话协商、实际导航准备状态、
+五组导航健康和 GNSS/IMU/Logger 详情，以及中英/Light/Dark GUI。
+ACK 不生成 READY；旧固件 BAD_CMD 显示 UNSUPPORTED；校准、重准备、代次变化、
+断线、BOOT 与状态超时撤销 START。通用命令、重试入口也执行相同门禁。
+旧 AIR M0 数值、已有布局及 GSP 包装不变；完整行为见 [联合状态](docs/JOINT_GSHC_STATUS.md)。
+
+所有本轮临时数据、构建、缓存与证据位于 `tests/joint_rework_20260927/`。
+没有修改全局依赖或设置，没有访问硬件、串口、功率输出或发布。
+
+| 检查 | 实际结果 | 证据（相对上述目录） |
+|---|---|---|
+| 完整 pytest | **425 passed, 3 subtests passed，447.78 s，无 skip** | `full-delivery.log` |
+| 导航协议/模型/GUI 专项 | 22 passed，7.38 s | `sequence-final.log` |
+| 导航 GUI 与既有工作流 | 30 passed，135.01 s | `gui-scroll-final.log` |
+| 200% DPI 中英/Light/Dark | 4 passed，6.35 s | `hidpi-final.log`、`gui-hidpi/` |
+| 产品 compileall | exit 0 | `compileall-delivery.log`、`.exit` |
+| 产品 Ruff E9/F63/F7/F82 | All checks passed，exit 0 | `lint-delivery.log`、`.exit` |
+| 原 spec PyInstaller 与 offscreen 启动 | 构建成功；自身 EXE 8 s 后存活，stderr 0 bytes | `packaging-delivery.log`、`packaging-result.json` |
+| git diff --check | 通过 | 最终工作区检查 |
+
+完整套件使用 FLP 已有 venv 的 pytest/Qt，并追加已有系统 site-packages 中的 pyserial；
+Ruff 使用该 venv，未安装软件。compileall/PyInstaller 使用已安装系统 Python 3.14。
+所有环境变量仅作用于测试进程。打包检查只停止自己启动的隐藏子进程。
+
+协议模拟验证 ACK/READY 分离、旧会话/代次拒绝、重复包不延长 TTL、独立字段过期、
+低频字段跨多次 u8 序号回绕、未知字段/算法诊断、旧固件拒绝及 GSP 透明封装。
+五组状态与成功融合年龄 TTL 为 3 s，详情 TTL 为 10 s；没有为避免掉帧而放宽主状态门禁。
+GUI 已检查折叠详情的滚动区域，四种语言/主题截图含底部 GNSS/IMU/队列诊断。
+
+硬件状态为 **NOT_FIELD_VALIDATED**：未验证实体无线网关是否透明传递新 type，
+没有 JY901B + NEO-M9N 新固件台架或飞行验收，也未验证新芯片实物。
+五份真实日志与算法数值回归由 FCCG/FLP 联合报告列出，不能把本仓库协议模拟当作硬件验证。
+
+首次交付 lint 命令误用了无 Ruff 的系统 Python；最终已改用已有 venv
+运行实际 Ruff 并通过。所有历史验收段仅适用于其当时版本。
+
 ## 2026-09-22 — 联合长时导出
 
 起始与最终 HEAD `62656da1fa035bff344165c8857a932e644ddbae`，main，初始工作区干净。
-没有 commit/push/tag/Release。当前完整文件清单和三仓库状态见 FCCG
+本节记录软件验证快照；最终 commit/push 由联合主任务按用户授权执行，不创建 tag/Release。完整文件清单和三仓库状态见 FCCG
 `docs/JOINT_FIELD_REWORK.md`；历史段落仅适用于其日期。
 
 ### 改动
@@ -375,3 +413,31 @@ tests **45 passed**. Headless GUI smoke passed **8 mask/language cases**. Existi
 PyInstaller packaging and offscreen startup smoke passed: packaged EXE alive after
 8 s, stderr **0 bytes**. `git diff --check` passed. No C, firmware, or wire protocol
 source changed in this follow-up; GSHC has no firmware Power of Ten gate.
+
+
+## 2026-09-27 — 导航准备、实时健康与小窗口布局最终复验
+
+本次联合实现后的 GSHC 全套测试覆盖导航协商、nonce/会话/代次失效、逐字段时效、START 三入口门禁、五组融合健康、AIR/GSP Golden、JSONL、离线处理及原校准/Alignment/命令流程。应用 metadata 仍为 0.0.3；本次最后布局修复没有更改协议或导航状态模型。
+
+修复了 QTabWidget 共享裸飞行页最小尺寸导致窗口被撑高的问题：普通导航/状态卡进入仓库 TouchScroll_Wrap，图表、3D 和时间滑块保持在页滚动祖先之外。预飞卡片纵向排列并允许字段换行，导航九项放在顶部；任务状态名称和值不再依赖固定最小宽度。六张实时图按 E/N/U 三行、速度/位置两列排列，保留六条数据流、标题、坐标轴及原图表手势。
+
+| 检查 | 本次实际结果 |
+|---|---|
+| 导航 GUI、触摸滚动排除与既有 UI 工作流 | **48 passed**，159.86 s，exit 0 |
+| 200% 导航 GUI | **4 passed**，12.74 s，exit 0；两种语言 × 两种主题 |
+| 完整 pytest | **425 passed，3 subtests passed**，658.11 s，exit 0 |
+| 几何与截图 | 每个主题/语言的预飞、飞行页均在 show、展开详情、切页后实测 **1000×700 logical**；100% 的 8 张整窗为 **1000×700**，200% 的 8 张整窗为 **2000×1400** |
+| 布局断言 | 页内容不超过 viewport 宽度，九项准备与任务状态 QLabel 换行高度满足 heightForWidth；原图表/3D/滑块无页滚动祖先回归通过 |
+| R 倍率夹具 | Q8.8 原始值 **0x0400** 显示 **4.00**；不再把十进制 400 或 10 当作 4.0 |
+| Ruff | 既定产品 fatal 规则 E9/F63/F7/F82 通过；新增导航模块及两个导航测试文件完整 Ruff 通过 |
+| 文档最终增量 | 更新验收章后 **32 passed**，0.23 s，链接与语义通过 |
+| compileall / diff | 产品入口与模块、导航 GUI 测试编译通过；git diff --check 通过（仅既有 LF/CRLF 提示） |
+| PyInstaller / EXE | 原 spec、原仓库脚本重新打包通过；隐藏的 offscreen 自建子进程存活 **8 s**，stderr **0 bytes**，随后仅终止该测试子进程 |
+
+窗口尺寸结论纠正：旧 `tests/joint_rework_20260927/gui-hidpi/flight_window_en_US_dark.png` 实际为 **2000×1778**，不能作为 1000×700 logical @ 200% 的通过证据；旧图保留问题事实。本次有效截图位于 `gui-fit/` 与 `gui-fit-hidpi/`，测试断言的是显示后的实际尺寸，不是仅调用 resize()。整窗与独立任务状态/导航详情截图已视觉检查。在最小窗口中，六图保留独立手势区域，普通状态区约 90 logical px，需要纵向滚动查看详情和任务状态；五组详情自己的滚动保留，不宣称所有展开信息能同屏显示。
+
+全部产物位于本仓库 tests 下。小体积证据清单、逐文件 SHA-256、截图像素尺寸和实际命令结果见 [gui-fit-evidence.json](tests/joint_rework_20260927/gui-fit-evidence.json)：**40 个证据文件，2,431,904 bytes**，另含可供主任务逐项暂存的 `commit_files`；不包含 PyInstaller dist/work、pytest 临时目录或 Python 缓存。关键日志为 [完整回归](tests/joint_rework_20260927/gui-fit-full.log)、[焦点回归](tests/joint_rework_20260927/gui-fit-focused.log)、[HiDPI](tests/joint_rework_20260927/gui-fit-hidpi.log) 和 [打包启动结果](tests/joint_rework_20260927/gui-fit-packaging-result.json)。本次打包 EXE SHA-256 为 `f47f27b6df256162677eb0c324e09fffae58bef8199d14c0cd9026776482b334`。
+
+限制：截图使用真实 Qt 控件与事件循环，但 offscreen 环境隐藏 OpenGL 视口；不覆盖真实 GPU、CF-33 手指/触笔、无线网关或串口设备。没有连接 JY901B/NEO-M9N，也没有烧录、物理输出或发布。新芯片仍为 HARDWARE_UNVERIFIED，当前硬件型号的联合导航仍需后续台架确认。
+
+最终暂存检查仅清理 `packaging_smoke.ps1` 末尾多余空行，未改变已执行的打包/启动行为；对应证据大小与 SHA-256 已同步，原始测试日志未修改。

@@ -1,0 +1,541 @@
+{
+  "schema": "silverstar.navigation/1",
+  "coordinate_frame": "ENU",
+  "quaternion": {
+    "order": "wxyz",
+    "algebra": "Hamilton",
+    "direction": "body_to_navigation",
+    "error": "right_local"
+  },
+  "algorithm_ids": {
+    "none": 0,
+    "kf6": 1,
+    "eskf15": 2
+  },
+  "eskf15": {
+    "component_id": "silverstar.algorithm.estimator.eskf15",
+    "revision": 1,
+    "nominal_order": [
+      "p_E",
+      "p_N",
+      "p_U",
+      "v_E",
+      "v_N",
+      "v_U",
+      "q_w",
+      "q_x",
+      "q_y",
+      "q_z",
+      "bg_x",
+      "bg_y",
+      "bg_z",
+      "ba_x",
+      "ba_y",
+      "ba_z"
+    ],
+    "error_order": [
+      "dp_E",
+      "dp_N",
+      "dp_U",
+      "dv_E",
+      "dv_N",
+      "dv_U",
+      "dtheta_x",
+      "dtheta_y",
+      "dtheta_z",
+      "dbg_x",
+      "dbg_y",
+      "dbg_z",
+      "dba_x",
+      "dba_y",
+      "dba_z"
+    ],
+    "covariance_dimension": 15,
+    "maximum_dt_s": 0.02,
+    "parameters": {
+      "gravity_mps2": {
+        "type": "float",
+        "default": 9.78,
+        "unit": "m/s^2",
+        "representation": "value",
+        "min": 1.0,
+        "max": 20.0
+      },
+      "gyro_noise_density": {
+        "type": "float",
+        "default": 0.003,
+        "unit": "rad/s/sqrt(Hz)",
+        "representation": "value",
+        "min": 1e-08,
+        "max": 10.0
+      },
+      "accel_noise_density": {
+        "type": "float",
+        "default": 0.08,
+        "unit": "m/s^2/sqrt(Hz)",
+        "representation": "value",
+        "min": 1e-08,
+        "max": 10.0
+      },
+      "gyro_bias_rw": {
+        "type": "float",
+        "default": 0.0001,
+        "unit": "rad/s^2/sqrt(Hz)",
+        "representation": "value",
+        "min": 1e-08,
+        "max": 10.0
+      },
+      "accel_bias_rw": {
+        "type": "float",
+        "default": 0.001,
+        "unit": "m/s^3/sqrt(Hz)",
+        "representation": "value",
+        "min": 1e-08,
+        "max": 10.0
+      },
+      "p0_position_e": {
+        "type": "float",
+        "default": 4,
+        "unit": "m^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_position_n": {
+        "type": "float",
+        "default": 4,
+        "unit": "m^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_position_u": {
+        "type": "float",
+        "default": 9,
+        "unit": "m^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_velocity_e": {
+        "type": "float",
+        "default": 0.25,
+        "unit": "m^2/s^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_velocity_n": {
+        "type": "float",
+        "default": 0.25,
+        "unit": "m^2/s^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_velocity_u": {
+        "type": "float",
+        "default": 0.25,
+        "unit": "m^2/s^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_theta_x": {
+        "type": "float",
+        "default": 0.030461742,
+        "unit": "rad^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_theta_y": {
+        "type": "float",
+        "default": 0.030461742,
+        "unit": "rad^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_theta_z": {
+        "type": "float",
+        "default": 0.030461742,
+        "unit": "rad^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_gyro_bias_x": {
+        "type": "float",
+        "default": 0.0001,
+        "unit": "rad^2/s^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_gyro_bias_y": {
+        "type": "float",
+        "default": 0.0001,
+        "unit": "rad^2/s^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_gyro_bias_z": {
+        "type": "float",
+        "default": 0.0001,
+        "unit": "rad^2/s^2",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_accel_bias_x": {
+        "type": "float",
+        "default": 0.01,
+        "unit": "m^2/s^4",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_accel_bias_y": {
+        "type": "float",
+        "default": 0.01,
+        "unit": "m^2/s^4",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "p0_accel_bias_z": {
+        "type": "float",
+        "default": 0.01,
+        "unit": "m^2/s^4",
+        "representation": "covariance_diagonal",
+        "min": 1e-08,
+        "max": 1000000.0
+      },
+      "gnss_position_std_horizontal": {
+        "type": "float",
+        "default": 1.5,
+        "unit": "m",
+        "representation": "sigma",
+        "min": 0.001,
+        "max": 1000
+      },
+      "gnss_position_std_vertical": {
+        "type": "float",
+        "default": 2.5,
+        "unit": "m",
+        "representation": "sigma",
+        "min": 0.001,
+        "max": 1000
+      },
+      "gnss_velocity_std": {
+        "type": "float",
+        "default": 0.15,
+        "unit": "m/s",
+        "representation": "sigma",
+        "min": 0.001,
+        "max": 1000
+      },
+      "baro_std_m": {
+        "type": "float",
+        "default": 2.5,
+        "unit": "m",
+        "representation": "sigma",
+        "min": 0.01,
+        "max": 1000
+      },
+      "nis_1d_soft": {
+        "type": "float",
+        "default": 6.635,
+        "unit": "1",
+        "representation": "value",
+        "min": 0.001,
+        "max": 10000
+      },
+      "nis_1d_hard": {
+        "type": "float",
+        "default": 10.828,
+        "unit": "1",
+        "representation": "value",
+        "min": 0.001,
+        "max": 10000
+      },
+      "nis_2d_soft": {
+        "type": "float",
+        "default": 9.21,
+        "unit": "1",
+        "representation": "value",
+        "min": 0.001,
+        "max": 10000
+      },
+      "nis_2d_hard": {
+        "type": "float",
+        "default": 13.816,
+        "unit": "1",
+        "representation": "value",
+        "min": 0.001,
+        "max": 10000
+      },
+      "nis_max_r_scale": {
+        "type": "float",
+        "default": 4,
+        "unit": "1",
+        "representation": "value",
+        "min": 1,
+        "max": 4
+      },
+      "lever_arm_body_x_m": {
+        "type": "float",
+        "default": 0.0,
+        "unit": "m",
+        "representation": "value",
+        "min": -10.0,
+        "max": 10.0
+      },
+      "lever_arm_body_y_m": {
+        "type": "float",
+        "default": 0.0,
+        "unit": "m",
+        "representation": "value",
+        "min": -10.0,
+        "max": 10.0
+      },
+      "lever_arm_body_z_m": {
+        "type": "float",
+        "default": 0.0,
+        "unit": "m",
+        "representation": "value",
+        "min": -10.0,
+        "max": 10.0
+      },
+      "gnss_position_measurement_delay_ms": {
+        "type": "integer",
+        "default": 0,
+        "unit": "ms",
+        "representation": "value",
+        "min": 0,
+        "max": 550
+      },
+      "gnss_velocity_measurement_delay_ms": {
+        "type": "integer",
+        "default": 270,
+        "unit": "ms",
+        "representation": "value",
+        "min": 0,
+        "max": 550
+      },
+      "baro_measurement_delay_ms": {
+        "type": "integer",
+        "default": 0,
+        "unit": "ms",
+        "representation": "value",
+        "min": 0,
+        "max": 550
+      }
+    },
+    "initial_covariance_diagonal": [
+      4,
+      4,
+      9,
+      0.25,
+      0.25,
+      0.25,
+      0.030461742,
+      0.030461742,
+      0.030461742,
+      0.0001,
+      0.0001,
+      0.0001,
+      0.01,
+      0.01,
+      0.01
+    ],
+    "lever_arm_body_m": [
+      0,
+      0,
+      0
+    ],
+    "receiver_sigma_multiplier": 1.0,
+    "measurement_variance": "max(receiver_sigma * receiver_sigma_multiplier, selected_ESKF_group_floor)^2; multiply quality, PosEN consistency, then bounded robust variance factors once; old KF profile is independent"
+  },
+  "quality_policy_revision": 3,
+  "groups": [
+    "position_en",
+    "position_u",
+    "velocity_en",
+    "velocity_u",
+    "barometer_u"
+  ],
+  "timestamps": [
+    "sample_epoch_us",
+    "receive_us",
+    "measurement_us",
+    "evaluation_us",
+    "output_us"
+  ],
+  "quality": {
+    "recommended_satellites": 6,
+    "satellite_variance_step": 0.5,
+    "satellite_variance_max": 4.0,
+    "variance_order": [
+      "receiver_profile_floor",
+      "quality",
+      "consistency",
+      "robust"
+    ],
+    "consistency_window_us": 10000000,
+    "consistency_offset_us": 5000000,
+    "consistency_ttl_us": 6000000,
+    "consistency_max_gap_us": 120000,
+    "consistency_variance_max": 4.0,
+    "fusion_timeout_us": 2000000,
+    "fusion_invalid_us": 10000000,
+    "consistency_error_threshold_m": 10.0,
+    "successful_fusion_clock": "evaluation_us of committed outer update; physical, admitted, finite positive gain; no historical side effects",
+    "timeout_policy": "2s per-group dead reckoning; 10s required-group INVALID; continue only physically valid ordinary robust updates; no automatic P inflation or unqualified reset. A real subsequent positive-gain update records reacquisition separately from KF6 controlled outage reset.",
+    "nav_quality_window_reason": {
+      "0": "warmup_or_discontinuity",
+      "1": "valid_evidence",
+      "4": "expired_evidence"
+    }
+  },
+  "replay_claims": [
+    "RECORDED",
+    "FAITHFUL",
+    "WHAT_IF",
+    "APPROXIMATE",
+    "UNSUPPORTED"
+  ],
+  "log": {
+    "maximum_payload_bytes": 256,
+    "legacy_record_identity_immutable": true,
+    "full_covariance_periodic_default": false,
+    "calibration_generation": "SystemCalibration start_sequence, incremented on Start/Reset, frozen with correction; independent of navigation epoch"
+  },
+  "air_navigation_extension": {
+    "schema_version": 1,
+    "frame_bytes": 9,
+    "application_crc_bytes": 0,
+    "subscribe_command": 14,
+    "subscribe_token_prefix": 1314258944,
+    "subscribe_param0": 1,
+    "subscribe_param1": 0,
+    "session": "nonzero subscriber nonce u16; new connection requires new nonce",
+    "generation": "u16; no wrap without renegotiation",
+    "common_bytes": [
+      "type",
+      "sequence",
+      "session_lo",
+      "session_hi",
+      "generation_lo",
+      "generation_hi"
+    ],
+    "capability_type": 21,
+    "capability_tail": [
+      "schema_version",
+      "algorithm_id",
+      "group_mask"
+    ],
+    "preparation_type": 22,
+    "preparation_tail": [
+      "required_mask",
+      "ready_mask",
+      "air_block_reason"
+    ],
+    "preparation_bits": [
+      "devices",
+      "calibration",
+      "attitude",
+      "gnss_fix",
+      "gnss_origin",
+      "barometer_origin",
+      "navigation"
+    ],
+    "health_type": 23,
+    "health_tail": [
+      "metric_times_8_plus_group",
+      "value_lo",
+      "value_hi"
+    ],
+    "health_metrics": {
+      "0": "result_low4_quality_high4_reason_high8",
+      "1": "last_success_age_100ms_65535_unknown",
+      "2": "variance_multiplier_q8_8",
+      "3": "nis_q8_8",
+      "4": "last_receive_age_100ms_65535_unknown",
+      "5": "last_physically_valid_age_100ms_65535_unknown",
+      "6": "last_update_attempt_age_100ms_65535_unknown",
+      "7": "last_recovery_age_100ms_65535_unknown",
+      "8": "recovery_count_saturating_65534"
+    },
+    "health_results": [
+      "UNAVAILABLE",
+      "ACCEPTED",
+      "SOFT_WEIGHTED",
+      "REJECTED",
+      "RECOVERING",
+      "DEAD_RECKONING",
+      "INVALID"
+    ],
+    "quality_levels": [
+      "UNKNOWN",
+      "NOMINAL",
+      "DEGRADED",
+      "INVALID"
+    ],
+    "preparation_ttl_ms": 2000,
+    "health_field_ttl_ms": 3000,
+    "gateway_hardware_status": "UNVERIFIED",
+    "q8_8_unknown": 65535,
+    "q8_8_maximum_valid": 65534,
+    "system_group": 7,
+    "system_metrics": {
+      "0": "gnss_satellite_count",
+      "1": "gnss_hacc_cm",
+      "2": "gnss_vacc_cm",
+      "3": "gnss_sacc_cmps",
+      "4": "gnss_receive_age_100ms",
+      "5": "gnss_fix_type_low8_online_bit8_fixok_bit9_position_usable_bit10_degraded_bit11",
+      "6": "imu_quality_flags",
+      "7": "imu_receive_age_100ms",
+      "8": "imu_config_generation",
+      "9": "imu_effective_gyro_range_dps",
+      "10": "logger_queue_overflow_count",
+      "11": "logger_normal_queue_hwm",
+      "12": "logger_estimator_queue_hwm",
+      "13": "logger_bootstrap_suppressed_count",
+      "14": "logger_state_reject_count",
+      "15": "logger_capacity_reject_count",
+      "16": "imu_effective_accel_range_centig"
+    },
+    "imu_quality_bits": [
+      "NEAR_RANGE",
+      "CLIPPED",
+      "TIME_UNCERTAIN",
+      "HISTORY_RESET",
+      "TIME_DISCONTINUITY",
+      "RANGE_UNVERIFIED",
+      "PAIR_SKEW"
+    ],
+    "detail_field_ttl_ms": 10000,
+    "detail_period_ms": 100,
+    "detail_item_count": 52,
+    "detail_scope": "groups 0..4 metrics 2..8; system group 7 metrics 0..16",
+    "integer_unknown": 65535,
+    "integer_saturation": 65534
+  },
+  "imu_quality": {
+    "near_range": 1,
+    "clipped": 2,
+    "time_uncertain": 4,
+    "history_reset": 8,
+    "time_discontinuity": 16,
+    "range_unverified": 32,
+    "pair_skew": 64,
+    "hard_mask": 114,
+    "soft_mask": 5,
+    "soft_noise_variance_scale": 4.0,
+    "hard_fault_clear": "explicit lifecycle navigation initialization; subsequent good measurements do not clear a lost inertial interval"
+  }
+}

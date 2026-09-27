@@ -77,6 +77,8 @@ from services.state_model import (
     MissionPhase,
 )
 from ui.port_combo import PortComboBox
+from ui.navigation_panel import NavigationPanel
+from services.navigation_state import NavigationStartResult
 from ui.touch_scroll import TouchScroll_Enable, TouchScroll_Wrap
 from ui.theme import ThemeColors, apply_application_theme, theme_colors
 
@@ -1580,16 +1582,13 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(8)
 
-        summary_row = QHBoxLayout()
-        summary_row.addWidget(self._build_preflight_system_panel(), 1)
-        summary_row.addWidget(self._build_calibration_panel(), 1)
-        summary_row.addWidget(self._build_alignment_panel(), 1)
-        root.addLayout(summary_row)
-
-        detail_row = QHBoxLayout()
-        detail_row.addWidget(self._build_preflight_sensor_panel(), 2)
-        detail_row.addWidget(self._build_preflight_gnss_panel(), 1)
-        root.addLayout(detail_row)
+        self.navigation_preparation_panel = NavigationPanel(self.i18n, preflight=True)
+        root.addWidget(self.navigation_preparation_panel)
+        root.addWidget(self._build_preflight_system_panel())
+        root.addWidget(self._build_calibration_panel())
+        root.addWidget(self._build_alignment_panel())
+        root.addWidget(self._build_preflight_sensor_panel())
+        root.addWidget(self._build_preflight_gnss_panel())
         root.addWidget(self._build_preflight_command_panel())
         root.addWidget(self._build_event_panel(), 1)
         return TouchScroll_Wrap(page)
@@ -1776,9 +1775,10 @@ class MainWindow(QMainWindow):
         command_row.addSpacing(16)
         self.lbl_start_reason = QLabel()
         self._bind_text(self.lbl_start_reason, "start.wait_capability")
-        self._configure_dynamic_label(self.lbl_start_reason, 360, show_tooltip=True)
-        command_row.addWidget(self.lbl_start_reason, 1)
+        self._configure_dynamic_label(self.lbl_start_reason, 0, show_tooltip=True)
+        self.lbl_start_reason.setWordWrap(True)
         layout.addLayout(command_row)
+        layout.addWidget(self.lbl_start_reason)
 
         feedback_row = QHBoxLayout()
         self.lbl_command_result_name = QLabel()
@@ -1786,7 +1786,9 @@ class MainWindow(QMainWindow):
         self.lbl_command_result_name.setMinimumWidth(80)
         self.lbl_command_result = QLabel()
         self._bind_text(self.lbl_command_result, "common.none")
-        self._configure_dynamic_label(self.lbl_command_result, 520, show_tooltip=True)
+        self._configure_dynamic_label(self.lbl_command_result, 0, show_tooltip=True)
+        self.lbl_command_result_name.setWordWrap(True)
+        self.lbl_command_result.setWordWrap(True)
         feedback_row.addWidget(self.lbl_command_result_name)
         feedback_row.addWidget(self.lbl_command_result, 1)
         layout.addLayout(feedback_row)
@@ -1802,11 +1804,17 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(page)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(8)
-        top = QHBoxLayout()
-        top.addWidget(self._build_flight_status_panel(), 1)
-        top.addWidget(self._build_flight_data_panel(), 2)
-        top.addWidget(self._build_mission_state_panel(), 2)
-        root.addLayout(top)
+        status_content = QWidget()
+        status_layout = QVBoxLayout(status_content)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        self.navigation_health_panel = NavigationPanel(self.i18n, preflight=False)
+        status_layout.addWidget(self.navigation_health_panel)
+        status_layout.addWidget(self._build_flight_status_panel())
+        status_layout.addWidget(self._build_flight_data_panel())
+        status_layout.addWidget(self._build_mission_state_panel())
+        self.flight_status_scroll = TouchScroll_Wrap(status_content)
+        root.addWidget(self.flight_status_scroll, 1)
+        # Plots keep their own pan/zoom gestures, outside page-scroll ancestors.
         root.addWidget(self._build_plot_panel(), 1)
         return page
 
@@ -1832,7 +1840,7 @@ class MainWindow(QMainWindow):
                 ("field.pc_processing", self.lbl_flight_processing),
             )
         ):
-            self._add_value_pair(grid, row, name, label, 150, True)
+            self._add_value_pair(grid, row, name, label, 150, True, wrap=True)
         return box
 
     def _build_flight_data_panel(self) -> QWidget:
@@ -1855,7 +1863,7 @@ class MainWindow(QMainWindow):
                 ("field.position_enu", self.lbl_flight_pos),
             )
         ):
-            self._add_value_pair(grid, row, name, label, 300, True)
+            self._add_value_pair(grid, row, name, label, 300, True, wrap=True)
         return box
 
     def _build_event_panel(self) -> QWidget:
@@ -1884,7 +1892,7 @@ class MainWindow(QMainWindow):
                 ("field.parachute_status", self.lbl_mission_parachute),
             )
         ):
-            self._add_value_pair(grid, row, name, label, 220, True)
+            self._add_value_pair(grid, row, name, label, 220, True, wrap=True)
         return box
 
     def _build_plot_panel(self) -> QWidget:
@@ -2018,6 +2026,8 @@ class MainWindow(QMainWindow):
         value_label: QLabel,
         value_min_width: int,
         value_tooltip: bool,
+        *,
+        wrap: bool = True,
     ) -> QLabel:
         name_label = QLabel()
         self._bind_text(name_label, name_key)
@@ -2028,6 +2038,13 @@ class MainWindow(QMainWindow):
             value_min_width,
             show_tooltip=value_tooltip,
         )
+        if wrap:
+            name_label.setWordWrap(True)
+            name_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+            value_label.setMinimumWidth(0)
+            value_label.setWordWrap(True)
+            value_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            value_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         grid.addWidget(name_label, row, 0)
         grid.addWidget(value_label, row, 1)
         grid.setColumnStretch(1, 1)
@@ -2510,6 +2527,8 @@ class MainWindow(QMainWindow):
         self._render_sensor(state)
         self._render_mission_state(state)
         self._render_commands(state)
+        self.navigation_preparation_panel.Navigation_Render(state)
+        self.navigation_health_panel.Navigation_Render(state)
         self._render_events()
         self._render_plots(state)
         self._render_data_tool_buttons()
@@ -2742,6 +2761,9 @@ class MainWindow(QMainWindow):
             reason = self.i18n.tr(
                 "start.cannot", reason=self.i18n.tr("start.block.unlock")
             )
+        elif state.navigation.Navigation_StartCheck() is not NavigationStartResult.ALLOWED:
+            reason = self.i18n.tr("start.cannot", reason=self.i18n.tr(
+                f"navigation.{state.navigation.Navigation_StartCheck().value}"))
         elif state.start_ready():
             reason = self.i18n.tr("start.ready")
             semantic_state = "ready"
@@ -3061,10 +3083,10 @@ class MainWindow(QMainWindow):
         self.curves = {}
         self.plot_widgets = {}
         self.plot_title_keys = {}
-        for index, (title_key, key, axis) in enumerate(titles):
-            row, column = divmod(index, 3)
+        for title_key, key, axis in titles:
+            row, column = axis, 0 if key == "vel" else 1
             plot_widget = pg.PlotWidget(title=self.i18n.tr(title_key))
-            plot_widget.setMinimumSize(240, 190)
+            plot_widget.setMinimumSize(240, 130)
             plot_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             plot_widget.showGrid(x=True, y=True, alpha=0.3)
             plot_widget.setLabel("bottom", self.i18n.tr("plot.mission_time"))

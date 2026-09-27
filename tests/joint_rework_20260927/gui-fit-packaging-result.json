@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "checked_at": "2026-09-27T16:28:33.8552097+08:00",
+  "exe": "D:\\python_software\\SilverStar_GSHC\\tests\\joint_rework_20260927\\packaging-smoke\\dist\\SilverStar_GSHC\\SilverStar_GSHC.exe",
+  "alive_after_seconds": 8,
+  "alive": true,
+  "window_title": "",
+  "stderr_bytes": 0,
+  "stderr": null,
+  "stopped_own_child": true,
+  "exe_bytes": 22897466,
+  "exe_sha256": "f47f27b6df256162677eb0c324e09fffae58bef8199d14c0cd9026776482b334"
+}

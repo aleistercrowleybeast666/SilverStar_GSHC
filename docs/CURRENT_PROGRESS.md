@@ -1,5 +1,7 @@
 # 当前进度
 
+- 已实现[导航准备与实时健康扩展](JOINT_GSHC_STATUS.md)：独立会话/代次、ACK 与 READY 分离、公共入口及重试 START 硬门、五组健康和 GNSS/IMU/logger 详情。地面无线网关实物透明转发尚未验证。
+
 - 已对齐 Platform 0.0.10 / AIR M0 [Calibration 契约](AIR_CALIBRATION_CONTRACT.md)：按 build 选择自动 NONE 或显式默认/采样事务。
 - Controller 门禁覆盖直接调用与重试；GUI 使用当前握手能力，未知位只诊断，真实快照决定 NONE 就绪。
 - 保留 Reset、Alignment、START、有界 ACK 重试、链路分层诊断、日志、双语与主题。

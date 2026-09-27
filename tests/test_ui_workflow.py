@@ -34,6 +34,7 @@ from services.state_model import (
     HandshakeState,
     MissionPhase,
 )
+from services.navigation_state import PreparationSnapshot
 from ui.main_window import MainWindow
 
 
@@ -64,6 +65,10 @@ def ready_state(generation: int = 1) -> FlightControllerState:
     state.selftest_passed = True
     state.start_unlocked = True
     state.start_block_reason = 0
+    state.navigation.Navigation_Request(42)
+    state.navigation.Navigation_Declare(1, 42, 1)
+    state.navigation.algorithm_id = 1
+    state.navigation.Navigation_ApplyPreparation(PreparationSnapshot(42, 1, 1, 127, 127, 0, 0, 1, 7, 7, time.monotonic_ns()))
     return state
 
 

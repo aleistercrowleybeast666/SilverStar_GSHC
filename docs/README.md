@@ -4,6 +4,8 @@
 
 ## 协议与应用
 
+- [JOINT_GSHC_STATUS](JOINT_GSHC_STATUS.md)：导航准备、健康扩展、联合工作归属及硬件边界。
+
 - [AIR_PROTOCOL](AIR_PROTOCOL.md)：GSHC 唯一 AIR wire authority。
 - [GSP_MIN_PROTOCOL](GSP_MIN_PROTOCOL.md)：PC ↔ 地面站串口封装。
 - [AIR_CALIBRATION_CONTRACT](AIR_CALIBRATION_CONTRACT.md)：FCCG / 飞控 / GSHC 共同契约，保持逐字一致。

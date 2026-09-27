@@ -150,7 +150,9 @@ Alignment READY / FAILED 的 STATUS `arg1` 指向一次 Sensor Snapshot。`SENSO
 
 Alignment `STALE` 表示对准后检测到移动。上位机会立即撤销 ready、禁用 START 并重新启用“开始初对准”，但不会自动重启对准，也不会根据当前姿态自行恢复 READY。STALE 后只有新的 `PREFLIGHT_STATUS` 快照可以重新确认 `alignment_ready=1`。
 
-START 按钮由权威预飞快照驱动，至少要求 Capability、Calibration、Alignment、System、UNLOCK 和 `start_block_reason=OK` 均满足。若 START ACK 丢失，MISSION_START 或第一帧 FLIGHT_STATE 会清除 START 重试、标记任务开始并自动切换一次飞行页。用户随后可手动切回任意页面，后续遥测不会抢焦点。
+START 按钮由权威预飞快照驱动，至少要求 Capability、Calibration、Alignment、System、UNLOCK 和 `start_block_reason=OK` 均满足。导航扩展还要求当前会话/准备代次的完整 `NAV_PREPARATION`，年龄不超过 2 秒，真实估计器初始化位就绪。准备按钮仍发送既有 ALIGN_START；ACK OK 不代表准备完成。旧固件不支持扩展时显示 UNSUPPORTED 并阻止 START。若 START ACK 丢失，MISSION_START 或第一帧 FLIGHT_STATE 会清除 START 重试、标记任务开始并自动切换一次飞行页。用户随后可手动切回任意页面，后续遥测不会抢焦点。
+
+飞行页新增五组实时融合健康及独立过期的 GNSS 精度、IMU 质量/时序与 logger 队列详情。协议仍使用 9-byte AIR M0/GSP 外封装；见[导航联合作业状态](docs/JOINT_GSHC_STATUS.md)和[AIR 扩展](docs/AIR_PROTOCOL.md)。未知值不会显示为正常，历史 Sensor Snapshot 不作为实时健康来源。
 
 ## 8. JSONL 与会话
 

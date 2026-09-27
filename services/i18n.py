@@ -1013,6 +1013,68 @@ _ENUM_KEYS["sensor_detail"] = {
 }
 
 
+_NAVIGATION_TEXT = {
+    "navigation.preparation": ("导航准备（机载实时状态）", "Navigation Preparation (Live On-board State)"),
+    "navigation.health": ("实时导航健康", "Live Navigation Health"),
+    "navigation.summary": ("{algorithm} · {state} · 会话 {session} / 准备代次 {generation}", "{algorithm} · {state} · Session {session} / Generation {generation}"),
+    "navigation.ALLOWED": ("导航前置就绪", "Navigation Prerequisites Ready"),
+    "navigation.UNSUPPORTED": ("固件未支持此状态，无法确认导航就绪", "Navigation State Unsupported; Readiness Unconfirmed"),
+    "navigation.WAITING": ("等待新鲜机载状态", "Waiting for Fresh On-board State"),
+    "navigation.STALE": ("状态过期，无法确认", "State Expired; Unconfirmed"),
+    "navigation.INCOMPLETE": ("导航准备未完成", "Navigation Preparation Incomplete"),
+    "navigation.BLOCKED": ("导航准备被阻止", "Navigation Preparation Blocked"),
+    "navigation.start_blocked": ("START 已阻止：需要本次会话的新鲜导航就绪状态", "START blocked: fresh navigation readiness for this session is required"),
+    "navigation.step_ready": ("已就绪", "Ready"),
+    "navigation.step_waiting": ("未就绪", "Not Ready"),
+    "navigation.not_required": ("本配置不要求", "Not Required by Configuration"),
+    "navigation.step.link": ("1 链路握手", "1 Link Handshake"),
+    "navigation.step.devices": ("2 设备与配置读回", "2 Devices / Configuration Readback"),
+    "navigation.step.calibration": ("3 IMU 校准", "3 IMU Calibration"),
+    "navigation.step.attitude": ("4 姿态初对准", "4 Attitude Alignment"),
+    "navigation.step.gnss_solution": ("5 GNSS 定位解", "5 GNSS Solution"),
+    "navigation.step.gnss_origin": ("6 GNSS 原点", "6 GNSS Origin"),
+    "navigation.step.baro_reference": ("7 气压基准", "7 Barometer Reference"),
+    "navigation.step.estimator": ("8 导航算法初始化", "8 Estimator Initialization"),
+    "navigation.step.start": ("9 START 许可", "9 START Permission"),
+    "navigation.group_details": ("五组融合详情", "Five Fusion Groups"),
+    "navigation.history": ("接收/物理有效/尝试/恢复年龄：{receive} / {valid} / {attempt} / {recovery}；恢复次数 {count}", "Receive / physical-valid / attempt / recovery age: {receive} / {valid} / {attempt} / {recovery}; recoveries {count}"),
+    "navigation.gnss_detail": ("GNSS 卫星 {satellites} · hAcc/vAcc {hacc}/{vacc} m · sAcc {sacc} m/s · 接收年龄 {age} · {fix}", "GNSS satellites {satellites} · hAcc/vAcc {hacc}/{vacc} m · sAcc {sacc} m/s · RX age {age} · {fix}"),
+    "navigation.fix": ("fix {fix} / 在线 {online} / fixOK {fix_ok} / 定位可用 {usable}", "fix {fix} / online {online} / fixOK {fix_ok} / position usable {usable}"),
+    "navigation.imu_detail": ("IMU {flags} · 接收年龄 {age} · 配置代次 {generation} · 量程 {accel} g / {gyro} deg/s", "IMU {flags} · RX age {age} · configuration generation {generation} · range {accel} g / {gyro} deg/s"),
+    "navigation.logger_detail": ("Logger 溢出 {overflow} · HWM 普通/估计器 {normal}/{estimator} · 引导抑制 {suppressed} · 状态/容量拒绝 {state}/{capacity}", "Logger overflow {overflow} · normal/estimator HWM {normal}/{estimator} · bootstrap suppressed {suppressed} · state/capacity rejection {state}/{capacity}"),
+    "navigation.detail_freshness": ("逐字段独立刷新；主融合状态/成功年龄 3 秒过期，详情 10 秒过期。未知不代表正常；旧传感器快照仅供预飞诊断。", "Fields refresh independently: fusion state/success age expire after 3 s, details after 10 s. Unknown is not healthy; old sensor snapshots describe preflight only."),
+    "navigation.no_flags": ("无上报质量标记", "No reported quality flags"),
+    "navigation.imu_flag.0": ("接近量程", "near range"),
+    "navigation.imu_flag.1": ("削顶", "clipped"),
+    "navigation.imu_flag.2": ("采样时刻不确定", "time uncertain"),
+    "navigation.imu_flag.3": ("历史重置", "history reset"),
+    "navigation.imu_flag.4": ("时间不连续", "time discontinuity"),
+    "navigation.imu_flag.5": ("量程未验证", "range unverified"),
+    "navigation.imu_flag.6": ("样本对不同步", "pair skew"),
+    "navigation.unavailable": ("当前扩展不提供卫星数/精度、IMU clip/时序、logger drop/HWM；不推断为正常。传感器详情仍为初对准结束快照。", "Satellite count/accuracy, IMU clip/timing and logger drop/HWM are unavailable in this extension; no healthy state is inferred. Sensor Details remains an end-of-alignment snapshot."),
+    "navigation.reason": ("原因码 {code}", "Reason {code}"),
+    "navigation.partial": ("导航健康字段缺失/过期", "Navigation Health Fields Missing / Expired"),
+    "navigation.unknown_code": ("未知代码 {code}", "Unknown Code {code}"),
+    "navigation.metrics": ("{state}\n最近成功融合年龄：{age}　R 方差倍率：{r_scale}　NIS：{nis}", "{state}\nLast successful fusion age: {age}   R variance scale: {r_scale}   NIS: {nis}"),
+    "navigation.result.0": ("无可用更新", "Unavailable"),
+    "navigation.result.1": ("实际融合接受", "Fusion Accepted"),
+    "navigation.result.2": ("降权融合", "Soft-weighted Fusion"),
+    "navigation.result.3": ("拒绝融合", "Fusion Rejected"),
+    "navigation.result.4": ("受控恢复", "Controlled Recovery"),
+    "navigation.result.5": ("航位推算/降级", "Dead Reckoning / Degraded"),
+    "navigation.result.6": ("导航无效", "Navigation Invalid"),
+    "navigation.quality.0": ("质量未知", "Quality Unknown"),
+    "navigation.quality.1": ("质量正常", "Nominal Quality"),
+    "navigation.quality.2": ("质量退化", "Degraded Quality"),
+    "navigation.quality.3": ("量测无效", "Invalid Measurement"),
+}
+for _key, (_zh, _en) in _NAVIGATION_TEXT.items():
+    ZH_CN[_key] = _zh
+    EN_US[_key] = _en
+ZH_CN["button.align_start"] = "开始导航准备"
+EN_US["button.align_start"] = "Prepare Navigation"
+
+
 class I18n:
     SETTINGS_ORGANIZATION = APP_ORGANIZATION
     SETTINGS_APPLICATION = APP_EN_NAME

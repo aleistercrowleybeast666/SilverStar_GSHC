@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,12 +28,16 @@ from config import (
 )
 from protocol.air import (
     TOKEN_ALIGNMENT,
+    TOKEN_NAV_SUBSCRIBE,
     TOKEN_CALIBRATION,
     TOKEN_LOCK,
     TOKEN_START_MISSION,
     TOKEN_UNLOCK,
     AirAckMessage,
     AirCapabilityMessage,
+    AirNavigationCapabilityMessage,
+    AirNavigationPreparationMessage,
+    AirNavigationHealthMessage,
     AirFlightStateMessage,
     AirPreflightStateMessage,
     AirPreflightStatusMessage,
@@ -61,6 +66,7 @@ from protocol.receive_pipeline import ProtocolEvent
 from services.data_migration import DataMigrationConflictPolicy
 from services.i18n import EnumParam, I18n
 from services.logger import AsyncJsonlLogger
+from services.navigation_state import NavigationApplyResult, NavigationState, PreparationSnapshot
 from services.preferences import ResolvedExportOptions
 from services.state_model import (
     CalibrationStartResult,
@@ -1196,6 +1202,7 @@ class Controller(QObject):
 
     def disconnect(self) -> None:
         self._connection_generation += 1
+        self.state.navigation = NavigationState()
         self._clear_pending_air_cmds("串口断开")
         self._clear_capability_ack("串口断开")
         self._clear_mission_packet_stats()
@@ -1275,6 +1282,7 @@ class Controller(QObject):
             detail=text,
         )
         if not ok:
+            self.state.navigation = NavigationState()
             self._clear_mission_packet_stats()
         self.state.touch()
 
@@ -1415,6 +1423,9 @@ class Controller(QObject):
         param0: int = 0,
         param1: int = 0,
     ) -> bool:
+        if (cmd_id & 0xFF) == int(AirCmdId.START_MISSION) and not self.state.start_prerequisites_ready():
+            self._set_radio_message("navigation.start_blocked")
+            return False
         if (cmd_id & 0xFF) == int(AirCmdId.CAL_START) and not self._cal_start_allowed(param0):
             return False
         if self.worker is None or not self.state.connected:
@@ -1452,6 +1463,10 @@ class Controller(QObject):
             baseline_completed_face_mask=self.state.calibration.completed_face_mask,
         )
         self.pending_air_cmds[(pending.seq, pending.cmd_id)] = pending
+        if cmd_id in {int(AirCmdId.CAL_START), int(AirCmdId.CAL_FACE), int(AirCmdId.CAL_RESET),
+                      int(AirCmdId.ALIGN_START), int(AirCmdId.ALIGN_STOP), int(AirCmdId.ALIGN_RESET)}:
+            self.state.navigation.Navigation_Invalidate("WAITING")
+            self.state.navigation.awaiting_generation = True
         self._transmit_pending_air_cmd(pending, is_retry=False)
         return True
 
@@ -1461,6 +1476,10 @@ class Controller(QObject):
         *,
         is_retry: bool,
     ) -> None:
+        if pending.cmd_id == int(AirCmdId.START_MISSION) and not self.state.start_prerequisites_ready():
+            self._resolve_pending_air_cmd(pending, "LOCAL_REJECTED", detail="navigation readiness expired")
+            self._set_radio_message("navigation.start_blocked")
+            return
         if pending.cmd_id == int(AirCmdId.CAL_START) and not self._cal_start_allowed(pending.param0):
             self._resolve_pending_air_cmd(pending, "LOCAL_REJECTED", detail="CAL_START gate")
             return
@@ -1603,6 +1622,23 @@ class Controller(QObject):
                 "source": source,
             }
         )
+        self.Navigation_Subscribe()
+
+    def Navigation_Subscribe(self) -> None:
+        """One bounded optional extension probe, separate from base handshake."""
+        navigation = self.state.navigation
+        if self.worker is None or not self.state.capability_acked or navigation.requested_session is not None:
+            return
+        nonce = (getattr(self, "_navigation_nonce", secrets.randbelow(65535)) % 65535) + 1
+        self._navigation_nonce = nonce
+        navigation.Navigation_Request(nonce)
+        seq = self._next_air_seq()
+        navigation.subscription_seq = seq
+        frame = build_air_cmd(seq, int(AirCmdId.NAV_SUBSCRIBE), TOKEN_NAV_SUBSCRIBE | nonce, 1, 0)
+        packet = build_pc_to_gs_air_frame(frame)
+        self.worker.send_bytes(packet)
+        self.state.handshake.gsp_air_tx_requests += 1
+        self._log_tx_command(frame, packet, seq, int(AirCmdId.NAV_SUBSCRIBE), TOKEN_NAV_SUBSCRIBE | nonce, 1, 0, 1, False)
 
     def _check_air_cmd_timeouts(self) -> None:
         now = time.monotonic()
@@ -1999,6 +2035,8 @@ class Controller(QObject):
         )
         if isinstance(message, AirCapabilityMessage):
             self._handle_capability(message, event)
+        elif isinstance(message, (AirNavigationCapabilityMessage, AirNavigationPreparationMessage, AirNavigationHealthMessage)):
+            self.Navigation_HandleMessage(message, event)
         elif isinstance(message, AirPreflightStatusMessage):
             self._handle_preflight_status(message)
         elif isinstance(message, AirSensorStatusMessage):
@@ -2011,6 +2049,26 @@ class Controller(QObject):
             self._handle_status_message(message, event)
         elif isinstance(message, AirAckMessage):
             self._handle_ack_message(message)
+
+    def Navigation_HandleMessage(self, message, event: ProtocolEvent | None = None) -> None:
+        navigation = self.state.navigation
+        received_ns = event.host_rx_monotonic_ns if event is not None else time.monotonic_ns()
+        if isinstance(message, AirNavigationCapabilityMessage):
+            result = navigation.Navigation_Declare(message.schema, message.session, message.generation, message.seq)
+            if result is NavigationApplyResult.APPLIED:
+                navigation.algorithm_id = message.algorithm_id
+                navigation.group_mask = message.group_mask
+        elif isinstance(message, AirNavigationPreparationMessage):
+            result = navigation.Navigation_ApplyPreparation(PreparationSnapshot(
+                message.session, message.generation, message.seq, message.required_mask,
+                message.ready_mask, 0, message.reason, navigation.algorithm_id or 0,
+                (message.ready_mask & message.required_mask).bit_count(), message.required_mask.bit_count(),
+                received_ns,
+            ))
+        else:
+            result = navigation.Navigation_ApplyMetric(message.session, message.generation, message.seq,
+                                                        message.selector, message.value, received_ns)
+        self._log({"dir": "LOCAL", "layer": "NAVIGATION", "kind": type(message).__name__, "result": result.value})
 
     def _handle_capability(
         self,
@@ -2248,6 +2306,7 @@ class Controller(QObject):
 
         status_id = message.status_id
         if status_id == int(AirStatusId.BOOT):
+            self.state.navigation = NavigationState()
             self.state.lifecycle_state = int(AirLifecycleState.BOOT)
         elif status_id == int(AirStatusId.SELFTEST_COMPLETE):
             self.state.selftest_passed = bool(message.arg0)
@@ -2343,6 +2402,16 @@ class Controller(QObject):
         self.state.handshake.air_ack_result = message.result
         result_name = enum_name(AirAckResult, message.result)
         command_name = enum_name(AirCmdId, message.ack_cmd_id)
+        if message.ack_cmd_id == int(AirCmdId.NAV_SUBSCRIBE):
+            navigation = self.state.navigation
+            if message.ack_seq == navigation.subscription_seq:
+                if message.result != int(AirAckResult.OK):
+                    navigation.protocol_version = None
+                    navigation.Navigation_Invalidate("UNSUPPORTED")
+                # OK acknowledges the request only; NAV_CAPABILITY binds the nonce.
+                self._log({"dir": "LOCAL", "layer": "NAVIGATION", "kind": "SUBSCRIPTION_ACK",
+                           "result": message.result, "ack_seq": message.ack_seq})
+            return
         if message.ack_cmd_id == int(AirCmdId.CAPABILITY_ACK):
             diagnostics = self.state.handshake
             diagnostics.air_ack_result = message.result

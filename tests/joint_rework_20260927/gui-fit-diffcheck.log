@@ -1,0 +1,16 @@
+warning: in the working copy of 'CHANGELOG.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'VALIDATION.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'app.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/AIR_PROTOCOL.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/CURRENT_PROGRESS.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'protocol/air.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'protocol/common.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'protocol/receive_pipeline.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/i18n.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/state_model.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_calibration_capability.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_start_ack_state.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_ui_workflow.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ui/main_window.py', LF will be replaced by CRLF the next time Git touches it

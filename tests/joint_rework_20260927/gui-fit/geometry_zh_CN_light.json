@@ -1,0 +1,28 @@
+[
+  {
+    "page": "preflight",
+    "logical_size": [
+      1000,
+      700
+    ],
+    "pixel_size": [
+      1000,
+      700
+    ],
+    "dpr": 1.0,
+    "file": "preflight_window_zh_CN_light.png"
+  },
+  {
+    "page": "flight",
+    "logical_size": [
+      1000,
+      700
+    ],
+    "pixel_size": [
+      1000,
+      700
+    ],
+    "dpr": 1.0,
+    "file": "flight_window_zh_CN_light.png"
+  }
+]

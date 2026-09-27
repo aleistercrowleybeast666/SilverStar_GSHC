@@ -336,7 +336,8 @@ def test_downlink_pause_does_not_hide_gsp_progress_or_erase_handshake(window):
     last_air = diagnostics.last_air_rx_monotonic_ns
     assert diagnostics.capability_rx == 1
     assert diagnostics.preflight_status_rx == 1
-    assert diagnostics.gsp_air_tx_requests == 2
+    # Capability ACK, the one-shot NAV_SUBSCRIBE probe, then CAL_START.
+    assert diagnostics.gsp_air_tx_requests == 3
     assert diagnostics.gsp_air_tx_serial_writes == 1
     assert diagnostics.gsp_air_tx_ack_ok == 1
     assert diagnostics.air_ack_rx == 1
@@ -353,7 +354,7 @@ def test_downlink_pause_does_not_hide_gsp_progress_or_erase_handshake(window):
     assert "PREFLIGHT_STATUS RX / last snapshot age: 1 /" in details
     assert "GS TX / RX / CRC: 9 / 4 / 0" in details
     assert "RSSI / SNR: -70 dBm / 5.00 dB" in details
-    assert "GSP AIR_TX requests: 2" in details
+    assert "GSP AIR_TX requests: 3" in details
 
 
 @pytest.mark.parametrize("mask", (3, 5, 7, 0x83, 0x85, 0x87))

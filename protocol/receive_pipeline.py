@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from services.state_model import quat_to_euler_rpy
@@ -10,6 +10,9 @@ from .air import (
     AIR_PROFILE_COMPACT_V0,
     AirAckMessage,
     AirCapabilityMessage,
+    AirNavigationCapabilityMessage,
+    AirNavigationPreparationMessage,
+    AirNavigationHealthMessage,
     AirCmdMessage,
     AirFlightStateMessage,
     AirFrame,
@@ -385,6 +388,9 @@ def protocol_event_log_records(event: ProtocolEvent) -> list[dict[str, Any]]:
                 "gyro_full_scale_dps": message.gyro_full_scale_dps,
             }
         )
+
+    elif isinstance(message, (AirNavigationCapabilityMessage, AirNavigationPreparationMessage, AirNavigationHealthMessage)):
+        records.append({**common, "kind": enum_name(AirType, event.air_frame.air_type), **asdict(message)})
 
     elif isinstance(message, AirPreflightStatusMessage):
         records.append(

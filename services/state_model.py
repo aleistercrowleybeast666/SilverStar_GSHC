@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Iterable
 
 from config import MAX_LIVE_POINTS, PLOT_WINDOW_SECONDS, UI_EVENT_HISTORY_LIMIT
+from services.navigation_state import NavigationStartResult, NavigationState
 from protocol.air import AirCapabilityMessage, AirSensorStatusMessage
 from protocol.common import (
     AirAckResult,
@@ -474,6 +475,7 @@ class FlightControllerState:
     latest_calibration_diagnostic_face: int = 0xFF
     latest_calibration_diagnostic_time: int | None = None
     alignment: AlignmentSnapshot = field(default_factory=AlignmentSnapshot)
+    navigation: NavigationState = field(default_factory=NavigationState)
     alignment_sensor_snapshots: AlignmentSensorSnapshotCache = field(
         default_factory=AlignmentSensorSnapshotCache
     )
@@ -604,6 +606,7 @@ class FlightControllerState:
             and self.alignment.ready
             and self.system_ready
             and self.start_unlocked
+            and self.navigation.Navigation_StartCheck() is NavigationStartResult.ALLOWED
         )
 
     def start_ready(self) -> bool:

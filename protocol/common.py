@@ -27,6 +27,9 @@ class AirType(IntEnum):
     CAPABILITY = 0x12
     PREFLIGHT_STATUS = 0x13
     SENSOR_STATUS = 0x14
+    NAV_CAPABILITY = 0x15
+    NAV_PREPARATION = 0x16
+    NAV_HEALTH = 0x17
     STATUS = 0x20
     CMD = 0x30
     ACK = 0x40
@@ -196,6 +199,7 @@ class AirCmdId(IntEnum):
     LOCK = 0x03
     UNLOCK = 0x04
     CAPABILITY_ACK = 0x05
+    NAV_SUBSCRIBE = 0x0E
     CAL_START = 0x07
     CAL_FACE = 0x08
     CAL_STOP = 0x09

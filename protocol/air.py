@@ -25,6 +25,9 @@ AIR_PREFLIGHT_STATE_LEN = 26
 AIR_CAPABILITY_LEN = 9
 AIR_PREFLIGHT_STATUS_LEN = 9
 AIR_SENSOR_STATUS_LEN = 9
+AIR_NAV_CAPABILITY_LEN = 9
+AIR_NAV_PREPARATION_LEN = 9
+AIR_NAV_HEALTH_LEN = 9
 AIR_STATUS_LEN = 9
 AIR_CMD_LEN = 9
 AIR_ACK_LEN = 9
@@ -35,6 +38,7 @@ TOKEN_LOCK = 0xC33CA55A
 TOKEN_UNLOCK = 0x55AA6996
 TOKEN_CALIBRATION = 0x43414C30
 TOKEN_ALIGNMENT = 0x414C4947
+TOKEN_NAV_SUBSCRIBE = 0x4E560000
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,35 @@ class AirFrame:
     seq: int
     payload: bytes
     raw: bytes
+
+
+@dataclass(frozen=True)
+class AirNavigationCapabilityMessage:
+    seq: int
+    session: int
+    generation: int
+    schema: int
+    algorithm_id: int
+    group_mask: int
+
+
+@dataclass(frozen=True)
+class AirNavigationPreparationMessage:
+    seq: int
+    session: int
+    generation: int
+    required_mask: int
+    ready_mask: int
+    reason: int
+
+
+@dataclass(frozen=True)
+class AirNavigationHealthMessage:
+    seq: int
+    session: int
+    generation: int
+    selector: int
+    value: int
 
 
 @dataclass(frozen=True)
@@ -232,6 +265,18 @@ def parse_air_frame(frame: bytes) -> tuple[AirFrame, Any]:
     air_type = int(frame[0])
     seq = int(frame[1])
     air = AirFrame(air_type=air_type, seq=seq, payload=bytes(frame[2:]), raw=bytes(frame))
+
+    if air_type in (AirType.NAV_CAPABILITY, AirType.NAV_PREPARATION, AirType.NAV_HEALTH):
+        if len(frame) != 9:
+            raise ValueError(f"bad AIR navigation status length: {len(frame)}")
+        session, generation = struct.unpack_from("<HH", frame, 2)
+        if session == 0:
+            raise ValueError("navigation status session must be nonzero")
+        if air_type == AirType.NAV_CAPABILITY:
+            return air, AirNavigationCapabilityMessage(seq, session, generation, *frame[6:9])
+        if air_type == AirType.NAV_PREPARATION:
+            return air, AirNavigationPreparationMessage(seq, session, generation, *frame[6:9])
+        return air, AirNavigationHealthMessage(seq, session, generation, frame[6], struct.unpack_from("<H", frame, 7)[0])
 
     if air_type == AirType.FLIGHT_STATE:
         if len(frame) != AIR_FLIGHT_STATE_LEN:
