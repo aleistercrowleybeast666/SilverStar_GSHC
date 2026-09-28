@@ -1,6 +1,12 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 build/
 dist/
 installer/output/
+# Disposable pytest cache and basetemp output; keep formal evidence under tests/.../evidence/.
+tests/.pytest*/
+tests/.pycache-*/
+# Regenerable joint-validation work; keep final evidence outside work/.
+tests/joint_rework_*/work/

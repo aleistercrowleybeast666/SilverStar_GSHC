@@ -441,3 +441,9 @@ source changed in this follow-up; GSHC has no firmware Power of Ten gate.
 限制：截图使用真实 Qt 控件与事件循环，但 offscreen 环境隐藏 OpenGL 视口；不覆盖真实 GPU、CF-33 手指/触笔、无线网关或串口设备。没有连接 JY901B/NEO-M9N，也没有烧录、物理输出或发布。新芯片仍为 HARDWARE_UNVERIFIED，当前硬件型号的联合导航仍需后续台架确认。
 
 最终暂存检查仅清理 `packaging_smoke.ps1` 末尾多余空行，未改变已执行的打包/启动行为；对应证据大小与 SHA-256 已同步，原始测试日志未修改。
+
+## 2026-09-27 — Workspace Cleanup
+
+本次工作区清理删除了历史本地目录 `tests/.pytest_cache/`。其中包含 2026-09-14、2026-09-16 等旧验证运行的本地日志、截图和 package-smoke evidence。这些文件从未进入 Git，因此无法从仓库恢复。本文历史章节中的命令、测试数量和当时结论均保留；对应本地 artifact 已不再保存。
+
+当前 2026-09-27 已 tracked 的正式 evidence、源码、测试及 validation fixture 未受影响；`gui-fit-evidence.json` 所列 40 个文件仍存在，大小和 SHA-256 与清单一致。本说明不重新生成旧 evidence，也不将新运行结果冒充为原始历史证据。今后 `.pytest_cache` 和 pytest basetemp 仅作为可再生成缓存/临时工作区；正式 evidence 应保存于明确的 `tests/.../evidence/` 或类似目录，大型可再生成工作放在 ignored 的 `work/` 下。
